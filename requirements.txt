@@ -1,0 +1,4 @@
+peewee
+chromadb
+pillow
+zhdate

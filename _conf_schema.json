@@ -1,0 +1,57 @@
+{
+    "private_memory_timeout": {
+        "description": "私聊记忆总结触发时间（秒）",
+        "type": "int",
+        "default": 1800,
+        "hint": "距离最后一次对话超过此时间将触发总结"
+    },
+    "min_msg_count": {
+        "description": "触发总结的最少消息数",
+        "type": "int",
+        "default": 4,
+        "hint": "未保存的消息达到此数量且超时后触发总结"
+    },
+    "max_recent_memories": {
+        "description": "检索时召回的最大长期记忆数量",
+        "type": "int",
+        "default": 3
+    },
+    "summarize_model": {
+        "description": "总结记忆使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "选择一个大模型来总结记忆（建议选择低成本模型）。留空则使用当前默认模型。"
+    },
+    "persona_model": {
+        "description": "更新画像使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
+    },
+    "summarize_prompt": {
+        "description": "总结记忆的提示词",
+        "type": "string",
+        "default": "请总结以下用户与 AI 的私聊对话，提取关键信息、用户偏好、情感状态和重要事件。要求简明扼要，适合作为长期记忆索引。\n\n对话内容：\n{{chat_text}}",
+        "hint": "使用 {{chat_text}} 作为对话内容的占位符"
+    },
+    "list_memory_count": {
+        "description": "查询记忆指令返回的数量",
+        "type": "int",
+        "default": 5,
+        "hint": "使用 /mem_list 指令时返回的记忆条数"
+    },
+    "min_persona_update_memories": {
+        "description": "触发画像更新所需的最小新增记忆数",
+        "type": "int",
+        "default": 3,
+        "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
+    },
+    "pillowmd_style_path": {
+        "description": "PillowMD 样式目录路径",
+        "type": "string",
+        "default": "",
+        "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
+    }
+}
