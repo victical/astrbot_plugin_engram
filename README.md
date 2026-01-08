@@ -1,8 +1,5 @@
 # Astrbot Engram 仿生双轨记忆系统
 
-[![Astrbot Plugin](https://img.shields.io/badge/Ast rbot-Plugin-blue.svg)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/Version-1.0.0-green.svg)](https://github.com/yourusername/astrbot_plugin_engram)
-
 `astrbot_plugin_engram` 是一款为 Astrbot 设计的工业级长期记忆增强插件。它模仿人类大脑的记忆机制，通过“双轨制”架构解决了 LLM 在即时通讯场景下记忆碎片化、遗忘快、无法回溯原文等痛点。
 
 ## 🌟 核心特性
@@ -24,15 +21,16 @@
 
 ## 🛠️ 指令说明
 
-| `/mem_list` | 查看最近生成的 5 条长期记忆摘要 |
-| `/mem_source <编号>` | 查看指定编号记忆的原始对话记录（如：`/mem_source 1`） |
+| 指令 | 说明 |
+| :--- | :--- |
+| `/mem_list` | 查看最近生成的长期记忆摘要 |
 | `/mem_search <关键词>` | 搜索相关的长期记忆（含时间戳、背景及原文参考） |
 | `/mem_clear` | 清除所有长期记忆与原始对话（需二次确认） |
-| `/profile show` | 查看当前的结构化用户画像（Markdown 格式） |
-| `/profile set <键> <值>` | 手动校准画像（如：`/profile set basic.name 小明`） |
+| `/profile show` | 查看当前的结构化用户画像（手账风格图片） |
+| `/profile set <键> <值>` | 手动设置画像字段（如：`/profile set basic_info.job 学生`） |
 | `/profile clear` | 重置用户画像（需二次确认） |
-| `/engram_test force_summarize` | (管理员) 强制触发当前对话的总结归档 |
-| `/engram_test force_persona` | (管理员) 强制根据今日记忆更新用户画像 |
+| `/engram_force_summarize` | (管理员) 立即对当前所有未处理对话进行记忆总结 |
+| `/engram_force_persona` | (管理员) 立即基于今日记忆强制深度更新画像 |
 
 ## ⚙️ 配置项说明
 
@@ -49,9 +47,13 @@
 2. 或手动克隆到 `data/plugins/` 目录：
    ```bash
    cd data/plugins
-   git clone https://github.com/yourusername/astrbot_plugin_engram.git
+   git clone https://github.com/victical/astrbot_plugin_engram.git
    ```
 3. 重启 Astrbot。
+
+## 💡 致谢
+
+- 用户信息的获取与解析参考了 [astrbot_plugin_box](https://github.com/Zhalslar/astrbot_plugin_box)。
 
 ## 🧪 功能测试指南
 
@@ -80,14 +82,10 @@
 - **第一步**：手动设置一个语气偏好：`/profile set communication_style.tone 毒舌`。
 - **第二步**：设置一个称呼：`/profile set communication_style.addressing 老大`。
 - **第三步**：随便发一条消息。
-  - **预期结果**：AI 的回复语气应该变得“毒舌”，并称呼你为“老大”。
+- **预期结果**：AI 的回复语气应该变得“毒舌”，并称呼你为“老大”。
 
 ## 📂 存储说明
 本插件遵循 Astrbot 规范，所有持久化数据均存储在由 `StarTools.get_data_dir()` 自动生成的插件数据目录下（通常为 `data/plugins_data/astrbot_plugin_engram/`）：
 - **SQLite**: `engram_memories.db` (存储原文、索引及时间链)。
 - **ChromaDB**: `engram_chroma/` (存储语义向量)。
 - **JSON Persona**: `engram_personas/{user_id}.json` (存储用户画像)。
-- **PillowMD Styles**: `data/engram_styles/` (默认样式目录，可在配置中更改)。
-
----
-*Inspired by the concept of biological engrams.*

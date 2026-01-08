@@ -11,7 +11,7 @@ import aiohttp
 from zhdate import ZhDate
 from PIL import Image, ImageDraw, ImageFont
 
-@register("astrbot_plugin_engram", "Roo", "仿生双轨记忆系统", "1.0.8")
+@register("astrbot_plugin_engram", "Roo", "仿生双轨记忆系统", "1.1.2")
 class EngramPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
