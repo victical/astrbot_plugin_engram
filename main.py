@@ -11,7 +11,7 @@ import aiohttp
 from zhdate import ZhDate
 from PIL import Image, ImageDraw, ImageFont
 
-@register("astrbot_plugin_engram", "Roo", "仿生双轨记忆系统", "1.1.2")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.1.4")
 class EngramPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -22,7 +22,7 @@ class EngramPlugin(Star):
         asyncio.create_task(self.background_worker())
 
     async def background_worker(self):
-        """每分钟检查一次是否需要进行记忆总结及画像深度更新"""
+        """每分钟检查一次是否需要进行记忆归档及画像深度更新"""
         while not self.logic._is_shutdown:
             try:
                 await asyncio.sleep(60)
@@ -213,7 +213,7 @@ class EngramPlugin(Star):
 
     @filter.command("mem_list")
     async def mem_list(self, event: AstrMessageEvent):
-        """查看最近生成的长期记忆摘要"""
+        """查看最近生成的长期记忆归档"""
         user_id = event.get_sender_id()
         limit = self.config.get("list_memory_count", 5)
         loop = asyncio.get_event_loop()
@@ -221,9 +221,59 @@ class EngramPlugin(Star):
         if not memories:
             yield event.plain_result("🧐 你目前还没有生成的长期记忆。")
             return
-        result = [f"📜 最近的 {len(memories)} 条长期记忆："]
+        result = [f"📜 最近的 {len(memories)} 条长期记忆：\n" + "—" * 15]
         for i, m in enumerate(memories):
-            result.append(f"{i+1}. [{m.created_at.strftime('%m-%d %H:%M')}] {m.summary}")
+            result.append(f"{i+1}. ⏰ {m.created_at.strftime('%m-%d %H:%M')}\n   📝 {m.summary}\n")
+        
+        result.append("\n💡 发送 /mem_view <序号> 可查看某条记忆的完整对话原文。")
+        yield event.plain_result("\n".join(result))
+
+    @filter.command("mem_view")
+    async def mem_view(self, event: AstrMessageEvent, index: str):
+        """查看指定序号记忆的完整对话原文"""
+        user_id = event.get_sender_id()
+        
+        if not index.isdigit():
+            yield event.plain_result("⚠️ 请输入正确的序号，例如：/mem_view 1")
+            return
+            
+        seq = int(index)
+        if seq <= 0:
+             yield event.plain_result("⚠️ 序号必须大于 0。")
+             return
+
+        # 调用逻辑获取详情
+        memory_index, raw_msgs = await self.logic.get_memory_detail(user_id, seq)
+        
+        if not memory_index:
+            yield event.plain_result(raw_msgs) # 这里 raw_msgs 返回的是错误提示字符串
+            return
+            
+        # 格式化输出
+        result = [
+            f"📖 记忆详情 (序号 {seq})",
+            f"⏰ 时间：{memory_index.created_at.strftime('%Y-%m-%d %H:%M')}",
+            f"📝 归档：{memory_index.summary}",
+            "————————————————",
+            "🎙️ 原始对话回溯："
+        ]
+        
+        if not raw_msgs:
+            result.append("(暂无关联的原始对话数据)")
+        else:
+            for m in raw_msgs:
+                # 简单的格式化：[时间] 角色: 内容
+                time_str = m.timestamp.strftime("%H:%M:%S")
+                content = m.content.strip()
+                # 同步最新的过滤逻辑
+                if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
+                    continue
+                if "_" in content and " " not in content:
+                    continue
+                    
+                role_name = "我" if m.role == "assistant" else (m.user_name or "你")
+                result.append(f"[{time_str}] {role_name}: {m.content}")
+                
         yield event.plain_result("\n".join(result))
 
     @filter.command("mem_search")
@@ -237,12 +287,65 @@ class EngramPlugin(Star):
         result = [f"🔍 搜索关键词 '{query}' 的结果："] + memories
         yield event.plain_result("\n".join(result))
 
-    @filter.command("mem_clear")
-    async def mem_clear(self, event: AstrMessageEvent, confirm: str = ""):
+    @filter.command("mem_clear_raw")
+    async def mem_clear_raw(self, event: AstrMessageEvent, confirm: str = ""):
+        """清除所有未归档的原始消息数据"""
+        user_id = event.get_sender_id()
+        if confirm != "confirm":
+            yield event.plain_result("⚠️ 危险操作：此指令将永久删除您所有**尚未归档**的聊天原文，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear_raw confirm")
+            return
+        
+        loop = asyncio.get_event_loop()
+        try:
+            # 仅删除 RawMemory 中未归档的消息
+            from .db_manager import RawMemory
+            def _clear_raw():
+                with self.logic.db.db.connection_context():
+                    RawMemory.delete().where((RawMemory.user_id == user_id) & (RawMemory.is_archived == False)).execute()
+            
+            await loop.run_in_executor(self.logic.executor, _clear_raw)
+            # 重置内存计数
+            self.logic.unsaved_msg_count[user_id] = 0
+            yield event.plain_result("🗑️ 已成功清除您所有未归档的原始对话消息。")
+        except Exception as e:
+            logger.error(f"Clear raw memory failed: {e}")
+            yield event.plain_result(f"❌ 清除失败：{e}")
+
+    @filter.command("mem_clear_archive")
+    async def mem_clear_archive(self, event: AstrMessageEvent, confirm: str = ""):
+        """清除所有长期记忆归档（保留原始消息）"""
+        user_id = event.get_sender_id()
+        if confirm != "confirm":
+            yield event.plain_result("⚠️ 危险操作：此指令将永久删除您所有的**长期记忆归档**及向量检索数据，但会保留原始聊天记录。\n\n如果您确定要执行，请发送：\n/mem_clear_archive confirm")
+            return
+        
+        loop = asyncio.get_event_loop()
+        try:
+            # 1. 清除 SQLite 中的总结索引 (MemoryIndex)
+            from .db_manager import MemoryIndex, RawMemory
+            def _clear_archive():
+                with self.logic.db.db.connection_context():
+                    # 删除索引
+                    MemoryIndex.delete().where(MemoryIndex.user_id == user_id).execute()
+                    # 将所有已归档的消息重新标记为未归档，以便可以重新总结
+                    RawMemory.update(is_archived=False).where(RawMemory.user_id == user_id).execute()
+            
+            await loop.run_in_executor(self.logic.executor, _clear_archive)
+            
+            # 2. 清除 ChromaDB 中的向量数据
+            await loop.run_in_executor(self.logic.executor, lambda: self.logic.collection.delete(where={"user_id": user_id}))
+            
+            yield event.plain_result("🗑️ 已成功清除您所有的长期记忆归档，原始消息已重置为待归档状态。")
+        except Exception as e:
+            logger.error(f"Clear archive memory failed: {e}")
+            yield event.plain_result(f"❌ 清除失败：{e}")
+
+    @filter.command("mem_clear_all")
+    async def mem_clear_all(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有原始消息和长期记忆数据"""
         user_id = event.get_sender_id()
         if confirm != "confirm":
-            yield event.plain_result("⚠️ 危险操作：此指令将永久删除您所有的聊天原文、长期记忆摘要及向量检索数据，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear confirm")
+            yield event.plain_result("⚠️ 警告：此指令将永久删除您所有的聊天原文、长期记忆归档及向量检索数据，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear_all confirm")
             return
         
         loop = asyncio.get_event_loop()
@@ -251,9 +354,11 @@ class EngramPlugin(Star):
             await loop.run_in_executor(self.logic.executor, self.logic.db.clear_user_data, user_id)
             # 清除 ChromaDB 中的向量数据
             await loop.run_in_executor(self.logic.executor, lambda: self.logic.collection.delete(where={"user_id": user_id}))
+            # 重置内存计数
+            self.logic.unsaved_msg_count[user_id] = 0
             yield event.plain_result("🗑️ 已成功彻底清除您所有的原始对话消息和归档记忆。")
         except Exception as e:
-            logger.error(f"Clear memory failed: {e}")
+            logger.error(f"Clear all memory failed: {e}")
             yield event.plain_result(f"❌ 清除失败：{e}")
 
     @filter.command_group("profile")
@@ -529,11 +634,11 @@ class EngramPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize")
     async def force_summarize(self, event: AstrMessageEvent):
-        """[管理员] 立即对当前所有未处理对话进行记忆总结"""
+        """[管理员] 立即对当前所有未处理对话进行记忆归档"""
         user_id = event.get_sender_id()
-        yield event.plain_result("⏳ 正在强制执行记忆总结，请稍候...")
+        yield event.plain_result("⏳ 正在强制执行记忆归档，请稍候...")
         await self.logic._summarize_private_chat(user_id)
-        yield event.plain_result("✅ 记忆总结完成。您可以使用 /mem_list 查看。")
+        yield event.plain_result("✅ 记忆归档完成。您可以使用 /mem_list 查看。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_persona")

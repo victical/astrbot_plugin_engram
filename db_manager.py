@@ -53,9 +53,12 @@ class DatabaseManager:
         with self.db.connection_context():
             return RawMemory.create(**kwargs)
 
-    def get_unarchived_raw(self, session_id, limit=50):
+    def get_unarchived_raw(self, session_id, limit=None):
         with self.db.connection_context():
-            return list(RawMemory.select().where((RawMemory.session_id == session_id) & (RawMemory.is_archived == False)).order_by(RawMemory.timestamp.desc()).limit(limit))
+            query = RawMemory.select().where((RawMemory.session_id == session_id) & (RawMemory.is_archived == False)).order_by(RawMemory.timestamp.desc())
+            if limit:
+                query = query.limit(limit)
+            return list(query)
 
     def mark_as_archived(self, uuids):
         with self.db.connection_context():

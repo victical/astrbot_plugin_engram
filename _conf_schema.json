@@ -1,15 +1,15 @@
 {
     "private_memory_timeout": {
-        "description": "私聊记忆总结触发时间（秒）",
+        "description": "私聊记忆归档触发时间（秒）",
         "type": "int",
         "default": 1800,
-        "hint": "距离最后一次对话超过此时间将触发总结"
+        "hint": "距离最后一次对话超过此时间将触发归档"
     },
     "min_msg_count": {
-        "description": "触发总结的最少消息数",
+        "description": "触发归档的最少消息数",
         "type": "int",
         "default": 4,
-        "hint": "未保存的消息达到此数量且超时后触发总结"
+        "hint": "未保存的消息达到此数量且超时后触发归档"
     },
     "max_recent_memories": {
         "description": "检索时召回的最大长期记忆数量",
@@ -17,11 +17,11 @@
         "default": 3
     },
     "summarize_model": {
-        "description": "总结记忆使用的模型",
+        "description": "归档记忆使用的模型",
         "type": "string",
         "_special": "select_provider",
         "default": "",
-        "hint": "选择一个大模型来总结记忆（建议选择低成本模型）。留空则使用当前默认模型。"
+        "hint": "选择一个大模型来归档记忆（建议选择低成本模型）。留空则使用当前默认模型。"
     },
     "persona_model": {
         "description": "更新画像使用的模型",
@@ -31,7 +31,7 @@
         "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
     },
     "summarize_prompt": {
-        "description": "总结记忆的提示词",
+        "description": "归档记忆的提示词",
         "type": "string",
         "default": "请总结以下用户与 AI 的私聊对话，提取关键信息、用户偏好、情感状态和重要事件。要求简明扼要，适合作为长期记忆索引。\n\n对话内容：\n{{chat_text}}",
         "hint": "使用 {{chat_text}} 作为对话内容的占位符"
@@ -53,5 +53,11 @@
         "type": "string",
         "default": "",
         "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
+    },
+    "max_history_days": {
+        "description": "强制总结回溯天数限制",
+        "type": "int",
+        "default": 0,
+        "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
     }
 }

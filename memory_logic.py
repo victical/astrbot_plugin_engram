@@ -161,7 +161,7 @@ class MemoryLogic:
             self.unsaved_msg_count[user_id] = self.unsaved_msg_count.get(user_id, 0) + 1
 
     async def check_and_summarize(self):
-        """检查是否需要进行私聊总结及画像更新"""
+        """检查是否需要进行私聊归档及画像更新"""
         import datetime
         now = datetime.datetime.now()
         now_ts = now.timestamp()
@@ -170,7 +170,7 @@ class MemoryLogic:
         
         for user_id, last_time in list(self.last_chat_time.items()):
             if now_ts - last_time > timeout and self.unsaved_msg_count.get(user_id, 0) >= min_count:
-                # 触发记忆总结
+                # 触发记忆归档
                 await self._summarize_private_chat(user_id)
                 self.unsaved_msg_count[user_id] = 0
                 
@@ -268,46 +268,85 @@ class MemoryLogic:
             logging.error(f"Daily persona update error: {e}")
 
     async def _summarize_private_chat(self, user_id):
-        """对私聊进行总结并存入长期记忆"""
+        """对私聊进行总结并存入长期记忆（按天分组处理）"""
         import datetime
-        import re
+        from itertools import groupby
+        
         # 1. 获取未归档的原始消息
         loop = asyncio.get_event_loop()
-        raw_msgs = await loop.run_in_executor(self.executor, self.db.get_unarchived_raw, user_id)
+        # 获取所有未归档消息，不设限制
+        # 使用 lambda 传递参数以避免 run_in_executor 的关键字参数限制
+        raw_msgs = await loop.run_in_executor(self.executor, lambda: self.db.get_unarchived_raw(user_id, limit=None))
         if not raw_msgs:
             return
         
+        # 按时间正序排列（数据库返回的是倒序）
+        raw_msgs.reverse()
+        
+        # 计算回溯截止时间
+        max_days = self.config.get("max_history_days", 0)
+        cutoff_date = None
+        if max_days > 0:
+            cutoff_date = (datetime.datetime.now() - datetime.timedelta(days=max_days)).date()
+        
+        # 按日期分组
+        def get_date_key(m):
+            return m.timestamp.date()
+            
+        for date_key, group in groupby(raw_msgs, key=get_date_key):
+            # 将 group 转为列表，因为 groupby 的迭代器只能用一次
+            group_msgs = list(group)
+            
+            # 检查是否超过回溯天数限制
+            if cutoff_date and date_key < cutoff_date:
+                # 超过限制，直接标记为已归档，不进行总结
+                ref_uuids = [m.uuid for m in group_msgs]
+                await loop.run_in_executor(self.executor, self.db.mark_as_archived, ref_uuids)
+                continue
+                
+            await self._process_single_summary_batch(user_id, group_msgs, date_key)
+
+    async def _process_single_summary_batch(self, user_id, raw_msgs, date_key):
+        """处理单批次（单日）消息的总结"""
+        import datetime
+        import re
+        import json # 确保 json 被导入
+        
         # 过滤指令和过短的消息
-        # 只对不以特殊字符开头且包含足够中文字符的消息进行总结
         filtered_msgs = []
         for m in raw_msgs:
             content = m.content.strip()
-            # 过滤以常见指令前缀开头的消息
-            if content.startswith(('/', '#', '~', '!', '！', '／')):
+            # 1. 过滤以常见指令前缀开头的消息
+            if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
                 continue
-            # 统计中文数量 (简单正则)
+            # 2. 专门清洗带下划线的内部指令
+            if "_" in content and " " not in content:
+                continue
+            
+            # 3. 统计中文数量或检查总长度
             chinese_chars = re.findall(r'[\u4e00-\u9fa5]', content)
-            if len(chinese_chars) < 5:
+            if len(chinese_chars) < 2 and len(content) < 10:
                 continue
+                
             filtered_msgs.append(m)
         
+        loop = asyncio.get_event_loop()
+        
         if not filtered_msgs:
-            # 如果没有符合条件的消息，也标记原本的所有消息为已归档，防止阻塞
+            # 如果没有符合条件的消息，也标记原本的所有消息为已归档
             ref_uuids = [m.uuid for m in raw_msgs]
             await loop.run_in_executor(self.executor, self.db.mark_as_archived, ref_uuids)
             return
 
-        # 倒序排列回正常顺序
-        filtered_msgs.reverse()
-        # 如果有昵称，显示昵称和时间
-        chat_lines = []
+        # 构造对话文本
+        chat_lines = [f"【日期：{date_key.strftime('%Y-%m-%d')}】"]
         for m in filtered_msgs:
             time_str = m.timestamp.strftime("%H:%M")
             name = m.user_name if m.role == "user" and m.user_name else m.role
             chat_lines.append(f"[{time_str}] {name}: {m.content}")
         chat_text = "\n".join(chat_lines)
         
-        # 2. 调用 LLM 总结 (增加重试逻辑)
+        # 2. 调用 LLM 总结
         custom_prompt = self.config.get("summarize_prompt", """
 请根据你和用户的聊天记录，以第一人称写日记。
                                         
@@ -380,7 +419,9 @@ class MemoryLogic:
             # 3. 存入 ChromaDB 和 SQLite Index
             index_id = str(uuid.uuid4())
             ref_uuids = [m.uuid for m in raw_msgs] # 注意：归档标记原始的所有消息
-            created_at = datetime.datetime.now()
+            
+            # 使用该批次最后一条消息的时间作为归档时间，确保历史重构时的顺序正确
+            created_at = raw_msgs[-1].timestamp
             
             # 获取前一条记忆索引，形成链表（时间线）
             last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
@@ -420,6 +461,7 @@ class MemoryLogic:
 
     async def retrieve_memories(self, user_id, query, limit=3):
         """检索相关记忆并返回原文摘要及背景（基于时间链）"""
+        import re
         loop = asyncio.get_event_loop()
         
         # 1. ChromaDB 检索
@@ -453,10 +495,51 @@ class MemoryLogic:
             raw_preview = ""
             if db_index and db_index.ref_uuids:
                 uuids = json.loads(db_index.ref_uuids)
-                # 取原文的前 2 条作为证据参考
-                raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids[:2])
-                raw_preview = "\n   - 原文参考：" + " | ".join([m.content[:30] for m in raw_msgs])
+                # 获取该总结对应的所有原文
+                raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
+                
+                # 过滤原文：排除指令和过短的消息（与总结时的逻辑保持一致）
+                filtered_raw = []
+                for m in raw_msgs:
+                    content = m.content.strip()
+                    if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
+                        continue
+                    if "_" in content and " " not in content:
+                        continue
+                    
+                    chinese_chars = re.findall(r'[\u4e00-\u9fa5]', content)
+                    if len(chinese_chars) < 2 and len(content) < 10:
+                        continue
+                    filtered_raw.append(m.content[:30])
+                
+                if filtered_raw:
+                    # 取前 3 条有效原文作为证据参考
+                    raw_preview = "\n   └ 📄 相关原文：" + " | ".join(filtered_raw[:3])
             
-            all_memories.append(f"记录时间：{created_at}\n摘要：{summary}{context_hint}{raw_preview}")
+            all_memories.append(f"⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
             
         return all_memories
+
+    async def get_memory_detail(self, user_id, sequence_num):
+        """获取指定序号记忆的完整原文详情"""
+        loop = asyncio.get_event_loop()
+        
+        # 1. 获取最近的 N 条记忆（为了找到对应的序号）
+        # 假设用户输入的序号是基于 mem_list 的（最新的为 1）
+        limit = sequence_num + 2 
+        memories = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, limit)
+        
+        if not memories or len(memories) < sequence_num:
+            return None, "找不到该序号的记忆，请确认序号是否存在。"
+            
+        # 2. 锁定目标记忆
+        target_memory = memories[sequence_num - 1]
+        
+        # 3. 解析原文 UUID
+        if not target_memory.ref_uuids:
+            return target_memory, []
+            
+        uuids = json.loads(target_memory.ref_uuids)
+        raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
+        
+        return target_memory, raw_msgs
