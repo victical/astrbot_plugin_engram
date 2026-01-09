@@ -19,6 +19,8 @@ class EngramPlugin(Star):
         from astrbot.api.star import StarTools
         self.plugin_data_dir = StarTools.get_data_dir()
         self.logic = MemoryLogic(context, config, self.plugin_data_dir)
+        # 记录上次同步 OneBot 信息的时间，避免每条消息都触发 API 调用
+        self._last_onebot_sync = {} 
         asyncio.create_task(self.background_worker())
 
     async def background_worker(self):
@@ -51,6 +53,9 @@ class EngramPlugin(Star):
             dislikes = ", ".join(prefs.get("dislikes", [])) if isinstance(prefs.get("dislikes"), list) else ""
             tech = ", ".join(dev.get("tech_stack", [])) if isinstance(dev.get("tech_stack"), list) else ""
             profile_block = f"【用户档案】\n- 称呼: {basic.get('nickname', '用户')} (QQ: {basic.get('qq_id')})\n"
+            if basic.get('gender') and basic.get('gender') != "未知": profile_block += f"- 性别: {basic.get('gender')}\n"
+            if basic.get('age') and basic.get('age') != "未知": profile_block += f"- 年龄: {basic.get('age')}\n"
+            if basic.get('birthday') and basic.get('birthday') != "未知": profile_block += f"- 生日: {basic.get('birthday')}\n"
             if basic.get('job') and basic.get('job') != "未知": profile_block += f"- 职业: {basic.get('job')}\n"
             if basic.get('location') and basic.get('location') != "未知": profile_block += f"- 所在地: {basic.get('location')}\n"
             if basic.get('constellation') and basic.get('constellation') != "未知": profile_block += f"- 星座: {basic.get('constellation')}\n"
@@ -89,6 +94,13 @@ class EngramPlugin(Star):
         user_name = event.get_sender_name()
         await self.logic.record_message(user_id=user_id, session_id=user_id, role="user", content=content, user_name=user_name)
         
+        # 频率控制：每 12 小时最多同步一次 OneBot 信息
+        import time
+        now = time.time()
+        last_sync = self._last_onebot_sync.get(user_id, 0)
+        if now - last_sync < 12 * 3600:
+            return
+
         # 被动更新基础信息 (通过 OneBot V11 接口获取更多细节)
         try:
             # 1. 基础 Payload
@@ -164,6 +176,7 @@ class EngramPlugin(Star):
                 logger.debug(f"Engram: OneBot API call skipped or failed: {api_err}")
 
             await self.logic.update_user_profile(user_id, update_payload)
+            self._last_onebot_sync[user_id] = now
         except Exception as e:
             logger.error(f"Auto update basic info failed: {e}")
 
