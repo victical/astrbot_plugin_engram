@@ -11,7 +11,7 @@ import aiohttp
 from zhdate import ZhDate
 from PIL import Image, ImageDraw, ImageFont
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.1.4")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.1.5")
 class EngramPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -22,17 +22,73 @@ class EngramPlugin(Star):
         # 记录上次同步 OneBot 信息的时间，避免每条消息都触发 API 调用
         self._last_onebot_sync = {} 
         asyncio.create_task(self.background_worker())
+        asyncio.create_task(self._daily_persona_scheduler())
 
-    async def background_worker(self):
-        """每分钟检查一次是否需要进行记忆归档及画像深度更新"""
+    async def _daily_persona_scheduler(self):
+        """独立的每日画像更新调度器：精准在00:00执行，避免依赖轮询"""
         while not self.logic._is_shutdown:
             try:
-                await asyncio.sleep(60)
+                # 计算距离下一个00:00的秒数
+                now = datetime.datetime.now()
+                tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                sleep_seconds = (tomorrow - now).total_seconds()
+                
+                logger.info(f"Engram: Daily persona update scheduled in {sleep_seconds/3600:.1f} hours")
+                await asyncio.sleep(sleep_seconds)
+                
+                if self.logic._is_shutdown: break
+                
+                # 执行画像更新
+                min_memories = self.config.get("min_persona_update_memories", 3)
+                for user_id in list(self.logic.last_chat_time.keys()):
+                    today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                    loop = asyncio.get_event_loop()
+                    memories = await loop.run_in_executor(self.logic.executor, self.logic.db.get_memories_since, user_id, today)
+                    if len(memories) >= min_memories:
+                        await self.logic._update_persona_daily(user_id)
+                        logger.info(f"Engram: Daily persona updated for {user_id}")
+            except Exception as e:
+                if not self.logic._is_shutdown:
+                    logger.error(f"Engram daily persona scheduler error: {e}")
+                await asyncio.sleep(60)  # 出错后短暂休眠再重试
+
+    async def background_worker(self):
+        """智能休眠：根据最早需要处理的时间动态调整检测间隔"""
+        while not self.logic._is_shutdown:
+            try:
+                # 计算下一次需要检测的时间
+                sleep_time = self._calculate_next_check_time()
+                await asyncio.sleep(sleep_time)
                 if self.logic._is_shutdown: break
                 await self.logic.check_and_summarize()
             except Exception as e:
                 if not self.logic._is_shutdown:
                     logger.error(f"Engram background worker error: {e}")
+
+    def _calculate_next_check_time(self) -> int:
+        """计算下一次检测的休眠时间（秒）"""
+        import time
+        now_ts = time.time()
+        timeout = self.config.get("private_memory_timeout", 1800)
+        
+        # 如果没有活跃用户，休眠较长时间（5分钟）
+        if not self.logic.last_chat_time:
+            return 300
+        
+        # 找出最早需要触发归档的时间
+        earliest_trigger = float('inf')
+        for user_id, last_time in self.logic.last_chat_time.items():
+            if self.logic.unsaved_msg_count.get(user_id, 0) >= self.config.get("min_msg_count", 3):
+                trigger_time = last_time + timeout
+                earliest_trigger = min(earliest_trigger, trigger_time)
+        
+        if earliest_trigger == float('inf'):
+            # 有用户但消息数不够，每2分钟检测一次
+            return 120
+        
+        # 计算距离最早触发时间的秒数，最少30秒，最多5分钟
+        wait_seconds = max(30, min(300, int(earliest_trigger - now_ts) + 5))
+        return wait_seconds
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
@@ -275,15 +331,11 @@ class EngramPlugin(Star):
             result.append("(暂无关联的原始对话数据)")
         else:
             for m in raw_msgs:
-                # 简单的格式化：[时间] 角色: 内容
-                time_str = m.timestamp.strftime("%H:%M:%S")
-                content = m.content.strip()
-                # 同步最新的过滤逻辑
-                if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
-                    continue
-                if "_" in content and " " not in content:
+                # 使用公共过滤方法
+                if not self.logic._is_valid_message_content(m.content):
                     continue
                     
+                time_str = m.timestamp.strftime("%H:%M:%S")
                 role_name = "我" if m.role == "assistant" else (m.user_name or "你")
                 result.append(f"[{time_str}] {role_name}: {m.content}")
                 

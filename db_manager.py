@@ -10,24 +10,37 @@ class BaseModel(Model):
 
 class RawMemory(BaseModel):
     uuid = CharField(primary_key=True)
-    session_id = CharField()
-    user_id = CharField()
-    user_name = CharField(null=True) # 新增：记录用户昵称
-    role = CharField() # user 或 assistant
+    session_id = CharField(index=True)  # 添加索引：按会话查询
+    user_id = CharField(index=True)     # 添加索引：按用户查询
+    user_name = CharField(null=True)
+    role = CharField()
     content = TextField()
     msg_type = CharField()
-    is_archived = BooleanField(default=False) # 新增：标记是否已归档总结
-    timestamp = DateTimeField(default=datetime.datetime.now)
+    is_archived = BooleanField(default=False, index=True)  # 添加索引：按归档状态查询
+    timestamp = DateTimeField(default=datetime.datetime.now, index=True)  # 添加索引：按时间排序
+
+    class Meta:
+        indexes = (
+            # 复合索引：常用查询组合
+            (('session_id', 'is_archived'), False),
+            (('user_id', 'is_archived'), False),
+        )
 
 class MemoryIndex(BaseModel):
-    index_id = CharField(primary_key=True) # 对应 ChromaDB 的 ID
+    index_id = CharField(primary_key=True)
     summary = TextField()
-    ref_uuids = TextField() # 存储 JSON 字符串的 UUID 列表 (指向原文)
-    prev_index_id = CharField(null=True) # 新增：链表结构，指向前一条总结，形成时间线
-    source_type = CharField() # private 或 group
-    user_id = CharField(null=True) # 记录所属用户
+    ref_uuids = TextField()
+    prev_index_id = CharField(null=True, index=True)  # 添加索引：链表查询
+    source_type = CharField()
+    user_id = CharField(null=True, index=True)  # 添加索引：按用户查询
     active_score = IntegerField(default=100)
-    created_at = DateTimeField(default=datetime.datetime.now)
+    created_at = DateTimeField(default=datetime.datetime.now, index=True)  # 添加索引：按时间排序
+
+    class Meta:
+        indexes = (
+            # 复合索引：用户+时间查询
+            (('user_id', 'created_at'), False),
+        )
 
 class DatabaseManager:
     def __init__(self, data_dir):

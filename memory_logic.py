@@ -28,16 +28,75 @@ class MemoryLogic:
         self.executor = ThreadPoolExecutor(max_workers=4)
         self._is_shutdown = False
         
-        # 内存中记录最后聊天时间
-        self.last_chat_time = {} # {user_id: timestamp}
-        self.unsaved_msg_count = {} # {user_id: count}
+        # 内存中记录最后聊天时间（带自动清理机制）
+        self.last_chat_time = {}     # {user_id: timestamp}
+        self.unsaved_msg_count = {}  # {user_id: count}
+        self._max_inactive_users = 100  # 最大缓存用户数
+        self._inactive_threshold = 7 * 24 * 3600  # 7天无活动则清理
 
     def shutdown(self):
         self._is_shutdown = True
         self.executor.shutdown(wait=False)
 
+    def _cleanup_inactive_users(self):
+        """清理长期不活跃的用户缓存，防止内存泄漏"""
+        import time
+        now_ts = time.time()
+        
+        # 找出所有超过阈值的不活跃用户
+        inactive_users = [
+            user_id for user_id, last_time in self.last_chat_time.items()
+            if now_ts - last_time > self._inactive_threshold
+        ]
+        
+        # 清理不活跃用户（但只有在已归档后才清理）
+        for user_id in inactive_users:
+            if self.unsaved_msg_count.get(user_id, 0) == 0:
+                self.last_chat_time.pop(user_id, None)
+                self.unsaved_msg_count.pop(user_id, None)
+        
+        # 如果用户数仍然过多，按最后活跃时间排序，保留最近的
+        if len(self.last_chat_time) > self._max_inactive_users:
+            sorted_users = sorted(self.last_chat_time.items(), key=lambda x: x[1], reverse=True)
+            users_to_keep = set(u[0] for u in sorted_users[:self._max_inactive_users])
+            
+            for user_id in list(self.last_chat_time.keys()):
+                if user_id not in users_to_keep and self.unsaved_msg_count.get(user_id, 0) == 0:
+                    self.last_chat_time.pop(user_id, None)
+                    self.unsaved_msg_count.pop(user_id, None)
+
     def _get_profile_path(self, user_id):
         return os.path.join(self.profiles_dir, f"{user_id}.json")
+
+    @staticmethod
+    def _is_valid_message_content(content: str) -> bool:
+        """
+        统一的消息内容过滤逻辑，用于判断消息是否应被纳入归档/检索。
+        
+        过滤规则：
+        1. 以常见指令前缀开头的消息
+        2. 带下划线且无空格的内部指令
+        3. 中文字符不足2个且总长度不足10的短消息
+        
+        返回 True 表示消息有效，False 表示应被过滤。
+        """
+        import re
+        content = content.strip()
+        
+        # 1. 过滤以常见指令前缀开头的消息
+        if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
+            return False
+        
+        # 2. 专门清洗带下划线的内部指令
+        if "_" in content and " " not in content:
+            return False
+        
+        # 3. 统计中文数量或检查总长度
+        chinese_chars = re.findall(r'[\u4e00-\u9fa5]', content)
+        if len(chinese_chars) < 2 and len(content) < 10:
+            return False
+        
+        return True
 
     async def get_user_profile(self, user_id):
         """获取用户画像"""
@@ -161,10 +220,9 @@ class MemoryLogic:
             self.unsaved_msg_count[user_id] = self.unsaved_msg_count.get(user_id, 0) + 1
 
     async def check_and_summarize(self):
-        """检查是否需要进行私聊归档及画像更新"""
+        """检查是否需要进行私聊归档（画像更新由独立调度器处理）"""
         import datetime
-        now = datetime.datetime.now()
-        now_ts = now.timestamp()
+        now_ts = datetime.datetime.now().timestamp()
         timeout = self.config.get("private_memory_timeout", 1800)
         min_count = self.config.get("min_msg_count", 3)
         
@@ -173,22 +231,9 @@ class MemoryLogic:
                 # 触发记忆归档
                 await self._summarize_private_chat(user_id)
                 self.unsaved_msg_count[user_id] = 0
-                
-        # 每天凌晨触发一次画像深度更新（带阈值检查）
-        if now.hour == 0 and now.minute == 0:
-            min_memories = self.config.get("min_persona_update_memories", 3)
-            for user_id in list(self.last_chat_time.keys()):
-                # 1. 获取当天的记忆摘要数量
-                today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                loop = asyncio.get_event_loop()
-                memories = await loop.run_in_executor(self.executor, self.db.get_memories_since, user_id, today)
-                
-                # 2. 检查数量阈值
-                if len(memories) >= min_memories:
-                    await self._update_persona_daily(user_id)
-                else:
-                    import logging
-                    logging.info(f"Persona update skipped for {user_id}: only {len(memories)} new memories (min {min_memories})")
+        
+        # 定期清理不活跃用户缓存，防止内存泄漏
+        self._cleanup_inactive_users()
 
     async def _update_persona_daily(self, user_id):
         """每日画像深度更新 (用户画像架构)"""
@@ -309,26 +354,9 @@ class MemoryLogic:
     async def _process_single_summary_batch(self, user_id, raw_msgs, date_key):
         """处理单批次（单日）消息的总结"""
         import datetime
-        import re
-        import json # 确保 json 被导入
         
-        # 过滤指令和过短的消息
-        filtered_msgs = []
-        for m in raw_msgs:
-            content = m.content.strip()
-            # 1. 过滤以常见指令前缀开头的消息
-            if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
-                continue
-            # 2. 专门清洗带下划线的内部指令
-            if "_" in content and " " not in content:
-                continue
-            
-            # 3. 统计中文数量或检查总长度
-            chinese_chars = re.findall(r'[\u4e00-\u9fa5]', content)
-            if len(chinese_chars) < 2 and len(content) < 10:
-                continue
-                
-            filtered_msgs.append(m)
+        # 使用公共过滤方法
+        filtered_msgs = [m for m in raw_msgs if self._is_valid_message_content(m.content)]
         
         loop = asyncio.get_event_loop()
         
@@ -427,15 +455,16 @@ class MemoryLogic:
             last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
             prev_index_id = last_index.index_id if last_index else None
             
-            # 向量化存储
+            # 向量化存储（使用配置的 AI 名称）
+            ai_name = self.config.get("ai_name", "助手")
             add_params = {
                 "ids": [index_id],
                 "documents": [summary],
                 "metadatas": [{
-                    "user_id": user_id, 
+                    "user_id": user_id,
                     "source_type": "private",
                     "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "ai_name": "小糯"
+                    "ai_name": ai_name
                 }]
             }
             await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
@@ -461,7 +490,6 @@ class MemoryLogic:
 
     async def retrieve_memories(self, user_id, query, limit=3):
         """检索相关记忆并返回原文摘要及背景（基于时间链）"""
-        import re
         loop = asyncio.get_event_loop()
         
         # 1. ChromaDB 检索
@@ -483,7 +511,7 @@ class MemoryLogic:
             metadata = results['metadatas'][0][i]
             created_at = metadata.get("created_at", "未知时间")
             
-            # 尝试通过链表获取“前情提要”
+            # 尝试通过链表获取"前情提要"
             context_hint = ""
             db_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, index_id)
             if db_index and db_index.prev_index_id:
@@ -498,23 +526,14 @@ class MemoryLogic:
                 # 获取该总结对应的所有原文
                 raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
                 
-                # 过滤原文：排除指令和过短的消息（与总结时的逻辑保持一致）
-                filtered_raw = []
-                for m in raw_msgs:
-                    content = m.content.strip()
-                    if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
-                        continue
-                    if "_" in content and " " not in content:
-                        continue
-                    
-                    chinese_chars = re.findall(r'[\u4e00-\u9fa5]', content)
-                    if len(chinese_chars) < 2 and len(content) < 10:
-                        continue
-                    filtered_raw.append(m.content[:30])
+                # 使用公共过滤方法，取前 3 条有效原文作为证据参考
+                filtered_raw = [
+                    m.content[:30] for m in raw_msgs
+                    if self._is_valid_message_content(m.content)
+                ][:3]
                 
                 if filtered_raw:
-                    # 取前 3 条有效原文作为证据参考
-                    raw_preview = "\n   └ 📄 相关原文：" + " | ".join(filtered_raw[:3])
+                    raw_preview = "\n   └ 📄 相关原文：" + " | ".join(filtered_raw)
             
             all_memories.append(f"⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
             
