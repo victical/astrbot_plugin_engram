@@ -92,6 +92,3 @@
 - **SQLite**: `engram_memories.db` (存储原文、索引及时间链)。
 - **ChromaDB**: `engram_chroma/` (存储语义向量)。
 - **JSON Persona**: `engram_personas/{user_id}.json` (存储用户画像)。
-
-## ⚠️ 常见问题
-- **安装失败 (NotADirectoryError)**：如果您在上传 zip 安装时遇到此错误，请确保您的 zip 压缩包内**直接包含**插件文件（如 `main.py`, `metadata.yaml` 等），而不是将它们放在一个多层嵌套的文件夹中。
