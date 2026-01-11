@@ -1,69 +1,135 @@
 {
-    "private_memory_timeout": {
-        "description": "私聊记忆归档触发时间（秒）",
-        "type": "int",
-        "default": 1800,
-        "hint": "距离最后一次对话超过此时间将触发归档"
-    },
-    "min_msg_count": {
-        "description": "触发归档的最少消息数",
-        "type": "int",
-        "default": 4,
-        "hint": "未保存的消息达到此数量且超时后触发归档"
-    },
-    "max_recent_memories": {
-        "description": "检索时召回的最大长期记忆数量",
-        "type": "int",
-        "default": 3
-    },
-    "summarize_model": {
-        "description": "归档记忆使用的模型",
-        "type": "string",
-        "_special": "select_provider",
-        "default": "",
-        "hint": "选择一个大模型来归档记忆（建议选择低成本模型）。留空则使用当前默认模型。"
-    },
-    "persona_model": {
-        "description": "更新画像使用的模型",
-        "type": "string",
-        "_special": "select_provider",
-        "default": "",
-        "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
-    },
-    "summarize_prompt": {
-        "description": "归档记忆的提示词",
-        "type": "string",
-        "default": "请总结以下用户与 AI 的私聊对话，提取关键信息、用户偏好、情感状态和重要事件。要求简明扼要，适合作为长期记忆索引。\n\n对话内容：\n{{chat_text}}",
-        "hint": "使用 {{chat_text}} 作为对话内容的占位符"
-    },
-    "list_memory_count": {
-        "description": "查询记忆指令返回的数量",
-        "type": "int",
-        "default": 5,
-        "hint": "使用 /mem_list 指令时返回的记忆条数"
-    },
-    "min_persona_update_memories": {
-        "description": "触发画像更新所需的最小新增记忆数",
-        "type": "int",
-        "default": 3,
-        "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
-    },
-    "pillowmd_style_path": {
-        "description": "PillowMD 样式目录路径",
-        "type": "string",
-        "default": "",
-        "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
-    },
-    "max_history_days": {
-        "description": "强制总结回溯天数限制",
-        "type": "int",
-        "default": 0,
-        "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
-    },
-    "ai_name": {
-        "description": "AI 名称",
-        "type": "string",
-        "default": "助手",
-        "hint": "用于记忆归档时标记 AI 的名称，将存入向量数据库元信息中。"
-    }
+  "private_memory_timeout": {
+    "description": "私聊记忆归档触发时间（秒）",
+    "type": "int",
+    "default": 1800,
+    "hint": "距离最后一次对话超过此时间将触发归档"
+  },
+  "min_msg_count": {
+    "description": "触发归档的最少消息数",
+    "type": "int",
+    "default": 4,
+    "hint": "未保存的消息达到此数量且超时后触发归档"
+  },
+  "max_recent_memories": {
+    "description": "检索时召回的最大长期记忆数量",
+    "type": "int",
+    "default": 3
+  },
+  "summarize_model": {
+    "description": "归档记忆使用的模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "选择一个大模型来归档记忆（建议选择低成本模型）。留空则使用当前默认模型。"
+  },
+  "persona_model": {
+    "description": "更新画像使用的模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
+  },
+  "ai_name": {
+    "description": "AI 名称",
+    "type": "string",
+    "default": "助手",
+    "hint": "用于记忆归档时标记 AI 的名称，将存入向量数据库元信息中。"
+  },
+  "summarize_prompt": {
+    "description": "归档记忆的提示词",
+    "type": "string",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "你是{{ai_name}}，请根据聊天记录，写一篇简短的日记。核心原则：简单！短小！像写手帐一样，一笔带过，不要写作文。 - 字数限制：100字以内。  - 视角：第一人称。-称呼：根据对话语境或你们的关系。 - 内容：      1. 简单记录发生了什么 (如：主人醒了)。2. 必须保留细节 (如：喜欢吃西瓜)，这是重点。3. 心情如何 (如：开心)。- 禁止：禁止长篇大论的心理描写，禁止啰嗦的铺垫。对话内容： {{chat_text}}",
+    "hint": "{{ai_name}}：bot名字 {{chat_text}}：对话内容"
+  },
+  "list_memory_count": {
+    "description": "查询记忆指令默认返回的数量",
+    "type": "int",
+    "default": 5,
+    "hint": "使用 /mem_list 指令时默认返回的记忆条数。可在指令中使用 /mem_list <数量> 临时覆盖此值（最多50条）"
+  },
+  "min_persona_update_memories": {
+    "description": "触发画像更新所需的最小新增记忆数",
+    "type": "int",
+    "default": 3,
+    "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
+  },
+  "persona_update_max_concurrent": {
+    "description": "每日画像更新最大并发数",
+    "type": "int",
+    "default": 3,
+    "hint": "控制凌晨00:00画像更新时的最大并发LLM请求数，避免API限流。建议值：3-5"
+  },
+  "persona_update_delay": {
+    "description": "画像更新间隔延迟（秒）",
+    "type": "int",
+    "default": 5,
+    "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
+  },
+  "memory_similarity_threshold": {
+    "description": "记忆检索相关性阈值",
+    "type": "float",
+    "default": 1.5,
+    "hint": "向量搜索的距离阈值，超过此值的记忆将被过滤（距离越小相关性越高）。建议值：1.0-2.0。设置过小可能导致检索不到结果，过大会引入无关记忆"
+  },
+  "show_relevance_score": {
+    "description": "显示记忆相关性评分",
+    "type": "bool",
+    "default": true,
+    "hint": "在搜索记忆结果中显示相关性百分比（🎯 85%）。关闭后仅显示记忆 ID 和时间。"
+  },
+  "enable_keyword_boost": {
+    "description": "启用关键词匹配增强",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
+  },
+  "keyword_boost_weight": {
+    "description": "关键词匹配权重",
+    "type": "string",
+    "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
+    "labels": ["纯向量模式", "向量优先", "均衡模式", "关键词优先", "纯关键词模式"],
+    "default": "0.5",
+    "hint": "选择搜索排序策略：向量模式适合语义搜索，关键词模式适合精确匹配，均衡模式兼顾两者。"
+  },
+  "pillowmd_style_path": {
+    "description": "PillowMD 样式目录路径",
+    "type": "string",
+    "default": "",
+    "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
+  },
+  "max_history_days": {
+    "description": "强制总结回溯天数限制",
+    "type": "int",
+    "default": 0,
+    "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
+  },
+  "enable_command_filter": {
+    "description": "启用指令标识过滤",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），避免将其记入长期记忆。"
+  },
+  "command_prefixes": {
+    "description": "指令前缀列表",
+    "type": "list",
+    "default": ["/", "!", "#"],
+    "hint": "需要过滤的指令前缀，如 /、!、# 等。当消息以这些前缀开头时，插件会跳过处理。"
+  },
+  "enable_full_command_detection": {
+    "description": "启用完整指令字符串检测",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，会检测消息是否为完整的指令（全字符串匹配）。例如 'new' 会被识别为指令并跳过，但 'new world' 不会。"
+  },
+  "full_command_list": {
+    "description": "完整指令列表",
+    "type": "list",
+    "default": ["new", "help", "reset", "clear"],
+    "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
+  }
 }

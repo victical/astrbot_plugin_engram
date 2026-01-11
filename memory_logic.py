@@ -2,9 +2,15 @@ import chromadb
 import os
 import uuid
 import json
+import re
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
+from astrbot.api import logger
 from .db_manager import DatabaseManager
+
+# 预编译正则表达式
+_CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
 
 class MemoryLogic:
     def __init__(self, context, config, data_dir):
@@ -15,10 +21,12 @@ class MemoryLogic:
         
         self.db = DatabaseManager(self.data_dir)
         
-        # 初始化 ChromaDB
+        # ChromaDB 延迟初始化（避免构造函数阻塞）
         self.chroma_path = os.path.join(self.data_dir, "engram_chroma")
-        self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
-        self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
+        self.chroma_client = None
+        self.collection = None
+        self._chroma_init_lock = asyncio.Lock()
+        self._chroma_initialized = False
         
         # 用户画像路径
         self.profiles_dir = os.path.join(self.data_dir, "engram_personas")
@@ -33,14 +41,45 @@ class MemoryLogic:
         self.unsaved_msg_count = {}  # {user_id: count}
         self._max_inactive_users = 100  # 最大缓存用户数
         self._inactive_threshold = 7 * 24 * 3600  # 7天无活动则清理
+        
+        # 撤销删除缓存：{user_id: [最近删除的记忆列表]}
+        self._delete_history = {}  # 每个用户保留最近3次删除
+        self._max_undo_history = 3
 
     def shutdown(self):
         self._is_shutdown = True
         self.executor.shutdown(wait=False)
+    
+    async def _ensure_chroma_initialized(self):
+        """确保 ChromaDB 已初始化（延迟初始化，避免构造函数阻塞）"""
+        if self._chroma_initialized:
+            return
+        
+        async with self._chroma_init_lock:
+            # 双重检查
+            if self._chroma_initialized:
+                return
+            
+            # 在线程池中初始化 ChromaDB（避免阻塞事件循环）
+            loop = asyncio.get_event_loop()
+            
+            def _init_chroma():
+                client = chromadb.PersistentClient(path=self.chroma_path)
+                collection = client.get_or_create_collection(name="long_term_memories")
+                return client, collection
+            
+            try:
+                self.chroma_client, self.collection = await loop.run_in_executor(
+                    self.executor, _init_chroma
+                )
+                self._chroma_initialized = True
+                logger.info("Engram: ChromaDB initialized successfully")
+            except Exception as e:
+                logger.error(f"Engram: Failed to initialize ChromaDB: {e}")
+                raise
 
     def _cleanup_inactive_users(self):
         """清理长期不活跃的用户缓存，防止内存泄漏"""
-        import time
         now_ts = time.time()
         
         # 找出所有超过阈值的不活跃用户
@@ -92,7 +131,7 @@ class MemoryLogic:
             return False
         
         # 3. 统计中文数量或检查总长度
-        chinese_chars = re.findall(r'[\u4e00-\u9fa5]', content)
+        chinese_chars = _CHINESE_PATTERN.findall(content)
         if len(chinese_chars) < 2 and len(content) < 10:
             return False
         
@@ -309,8 +348,7 @@ class MemoryLogic:
             await loop.run_in_executor(self.executor, _write)
             
         except Exception as e:
-            import logging
-            logging.error(f"Daily persona update error: {e}")
+            logger.error(f"Daily persona update error: {e}")
 
     async def _summarize_private_chat(self, user_id):
         """对私聊进行总结并存入长期记忆（按天分组处理）"""
@@ -375,20 +413,10 @@ class MemoryLogic:
         chat_text = "\n".join(chat_lines)
         
         # 2. 调用 LLM 总结
-        custom_prompt = self.config.get("summarize_prompt", """
-请根据你和用户的聊天记录，以第一人称写日记。
-                                        
-- **视角**：必须使用**第一人称 ("我")**。称呼根据对话语境或你们的关系。
-- **风格**：情感丰富、口语化、像在写手帐。
-    - 记录发生了什么，心情怎么样。
-    - **必须保留细节**：如果用户说了喜欢什么，要在日记里写出来（例如：“今天他说最爱吃西瓜了...”），不要省略。
-    - 捕捉你们之间的互动氛围（摸头、开玩笑等）。
-- **示例**：“今天下午问主人为什么不理我，主人说刚补觉醒来，主人告诉我他喜欢吃**柚子和西瓜**，我记在心里啦！后来还喂我吃了草莓蛋糕，他还摸了摸我的头，感觉超级幸福~”
-
-对话内容：
-{{chat_text}}
-""").strip()
-        prompt = custom_prompt.replace("{{chat_text}}", chat_text)
+        # 从配置获取提示词模板并替换占位符
+        custom_prompt = self.config.get("summarize_prompt")
+        ai_name = self.config.get("ai_name")
+        prompt = custom_prompt.replace("{{chat_text}}", chat_text).replace("{{ai_name}}", ai_name)
         
         max_retries = 3
         retry_delay = 2
@@ -414,18 +442,15 @@ class MemoryLogic:
                 if full_content and len(full_content) >= 5:
                     break # 成功获取总结
                 
-                import logging
-                logging.warning(f"Summarization attempt {attempt + 1} produced empty or too short result.")
+                logger.warning(f"Summarization attempt {attempt + 1} produced empty or too short result.")
             except Exception as e:
-                import logging
-                logging.error(f"Summarization attempt {attempt + 1} error: {e}")
+                logger.error(f"Summarization attempt {attempt + 1} error: {e}")
             
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
         
         if not full_content or len(full_content) < 5:
-            import logging
-            logging.error(f"Failed to summarize chat for user {user_id} after {max_retries} attempts.")
+            logger.error(f"Failed to summarize chat for user {user_id} after {max_retries} attempts.")
             return
 
         # 解析日记和画像
@@ -440,10 +465,12 @@ class MemoryLogic:
                 if persona_update:
                     await self.update_user_profile(user_id, persona_update)
             except Exception as e:
-                import logging
-                logging.error(f"Failed to parse persona update: {e}")
+                logger.error(f"Failed to parse persona update: {e}")
             
         try:
+            # 确保 ChromaDB 已初始化
+            await self._ensure_chroma_initialized()
+            
             # 3. 存入 ChromaDB 和 SQLite Index
             index_id = str(uuid.uuid4())
             ref_uuids = [m.uuid for m in raw_msgs] # 注意：归档标记原始的所有消息
@@ -485,31 +512,124 @@ class MemoryLogic:
             await loop.run_in_executor(self.executor, self.db.mark_as_archived, ref_uuids)
             
         except Exception as e:
-            import logging
-            logging.error(f"Save summarization error: {e}")
+            logger.error(f"Save summarization error: {e}")
 
     async def retrieve_memories(self, user_id, query, limit=3):
-        """检索相关记忆并返回原文摘要及背景（基于时间链）"""
+        """检索相关记忆并返回原文摘要及背景（基于时间链），使用关键词重排序提升精确匹配"""
+        # 确保 ChromaDB 已初始化
+        await self._ensure_chroma_initialized()
+        
         loop = asyncio.get_event_loop()
         
-        # 1. ChromaDB 检索
+        # 1. ChromaDB 检索（多取一些结果以便过滤和重排序后仍有足够数据）
         query_params = {
             "query_texts": [query],
-            "n_results": limit,
+            "n_results": min(limit * 3, 15),  # 多取结果以便重排序
             "where": {"user_id": user_id}
         }
         results = await loop.run_in_executor(self.executor, lambda: self.collection.query(**query_params))
         
         if not results or not results['ids'] or not results['ids'][0]:
             return []
-            
-        # 2. 构造带时间线背景的记忆
-        all_memories = []
+        
+        # 获取配置
+        similarity_threshold = self.config.get("memory_similarity_threshold", 1.5)
+        show_relevance_score = self.config.get("show_relevance_score", True)
+        enable_keyword_boost = self.config.get("enable_keyword_boost", True)
+        
+        # 解析关键词权重（新格式直接是数值字符串 "0.5"）
+        weight_config = self.config.get("keyword_boost_weight", "0.5")
+        try:
+            keyword_boost_weight = float(weight_config)
+        except (ValueError, TypeError):
+            # 向后兼容旧格式 "均衡模式 (0.5)"
+            import re
+            match = re.search(r'\(([\d.]+)\)', str(weight_config))
+            keyword_boost_weight = float(match.group(1)) if match else 0.5
+        
+        # 2. 预处理结果并计算关键词匹配度
+        distances = results.get('distances', [[]])[0] if 'distances' in results else []
+        memory_data = []
+        
+        # 提取查询关键词（简单分词：按空格和标点分割）
+        query_keywords = set()
+        for char in ['，', '。', '！', '？', '、', ' ', ',', '.', '!', '?']:
+            query = query.replace(char, ' ')
+        query_keywords = set([w.strip().lower() for w in query.split() if len(w.strip()) > 0])
+        
         for i in range(len(results['ids'][0])):
+            distance = distances[i] if distances and i < len(distances) else float('inf')
+            
+            # 过滤低相关性结果
+            if distance > similarity_threshold:
+                logger.debug(f"Skipping memory with distance {distance:.3f} (threshold: {similarity_threshold})")
+                continue
+            
             index_id = results['ids'][0][i]
             summary = results['documents'][0][i]
             metadata = results['metadatas'][0][i]
+            
+            # 计算关键词匹配度（关键词在summary中出现的次数）
+            keyword_score = 0
+            summary_lower = summary.lower()
+            for keyword in query_keywords:
+                # 精确匹配得分更高
+                if keyword in summary_lower:
+                    # 统计出现次数
+                    count = summary_lower.count(keyword)
+                    keyword_score += count * len(keyword)  # 长关键词权重更高
+            
+            # 归一化关键词得分（0-1之间）
+            keyword_score_normalized = min(1.0, keyword_score / max(1, len(query) * 2))
+            
+            memory_data.append({
+                'index_id': index_id,
+                'summary': summary,
+                'metadata': metadata,
+                'distance': distance,
+                'keyword_score': keyword_score_normalized
+            })
+        
+        # 3. 混合排序：结合向量相似度和关键词匹配度
+        if enable_keyword_boost and query_keywords:
+            # 计算综合得分（距离越小越好，关键词得分越高越好）
+            for data in memory_data:
+                # 向量得分：将距离转换为0-1的得分（距离越小得分越高）
+                vector_score = max(0, 1 - data['distance'] / 2.0)
+                
+                # 综合得分 = 向量得分 * (1 - weight) + 关键词得分 * weight
+                data['combined_score'] = (
+                    vector_score * (1 - keyword_boost_weight) +
+                    data['keyword_score'] * keyword_boost_weight
+                )
+            
+            # 按综合得分排序（得分越高越靠前）
+            memory_data.sort(key=lambda x: x['combined_score'], reverse=True)
+        else:
+            # 仅按向量距离排序
+            memory_data.sort(key=lambda x: x['distance'])
+        
+        # 4. 只保留前 limit 条
+        memory_data = memory_data[:limit]
+        
+        # 5. 构造带时间线背景和评分的记忆文本
+        all_memories = []
+        
+        for data in memory_data:
+            index_id = data['index_id']
+            summary = data['summary']
+            metadata = data['metadata']
+            distance = data['distance']
+            keyword_score = data.get('keyword_score', 0)
             created_at = metadata.get("created_at", "未知时间")
+            
+            # 计算显示的相关性百分比
+            if enable_keyword_boost and query_keywords:
+                # 使用综合得分
+                relevance_percent = int(data['combined_score'] * 100)
+            else:
+                # 使用向量得分
+                relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
             
             # 尝试通过链表获取"前情提要"
             context_hint = ""
@@ -535,7 +655,16 @@ class MemoryLogic:
                 if filtered_raw:
                     raw_preview = "\n   └ 📄 相关原文：" + " | ".join(filtered_raw)
             
-            all_memories.append(f"⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
+            # 添加 ID 信息（UUID 前 8 位）和相关性评分
+            short_id = index_id[:8]
+            
+            # 根据配置决定是否显示相关性评分
+            if show_relevance_score:
+                relevance_badge = f"🎯 {relevance_percent}% | "
+            else:
+                relevance_badge = ""
+            
+            all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
             
         return all_memories
 
@@ -545,7 +674,7 @@ class MemoryLogic:
         
         # 1. 获取最近的 N 条记忆（为了找到对应的序号）
         # 假设用户输入的序号是基于 mem_list 的（最新的为 1）
-        limit = sequence_num + 2 
+        limit = sequence_num + 2
         memories = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, limit)
         
         if not memories or len(memories) < sequence_num:
@@ -562,3 +691,433 @@ class MemoryLogic:
         raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
         
         return target_memory, raw_msgs
+    
+    async def delete_memory_by_sequence(self, user_id, sequence_num, delete_raw=False):
+        """
+        删除指定序号的记忆（支持撤销）
+        
+        Args:
+            user_id: 用户ID
+            sequence_num: 记忆序号（基于 mem_list 的序号，最新的为 1）
+            delete_raw: 是否同时删除关联的原始消息
+            
+        Returns:
+            (success: bool, message: str, summary: str)
+        """
+        loop = asyncio.get_event_loop()
+        
+        # 1. 获取目标记忆
+        limit = sequence_num + 2
+        memories = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, limit)
+        
+        if not memories or len(memories) < sequence_num:
+            return False, "找不到该序号的记忆，请确认序号是否存在。", ""
+            
+        target_memory = memories[sequence_num - 1]
+        index_id = target_memory.index_id
+        summary = target_memory.summary
+        
+        try:
+            # 确保 ChromaDB 已初始化
+            await self._ensure_chroma_initialized()
+            
+            # 保存删除前的数据（用于撤销）
+            deleted_uuids = json.loads(target_memory.ref_uuids) if target_memory.ref_uuids else []
+            
+            # 获取向量数据（用于恢复）
+            vector_data = None
+            try:
+                chroma_result = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.collection.get(ids=[index_id], include=['embeddings', 'metadatas', 'documents'])
+                )
+                if chroma_result and chroma_result['ids']:
+                    vector_data = {
+                        'embedding': chroma_result['embeddings'][0] if chroma_result.get('embeddings') else None,
+                        'metadata': chroma_result['metadatas'][0] if chroma_result.get('metadatas') else {},
+                        'document': chroma_result['documents'][0] if chroma_result.get('documents') else summary
+                    }
+            except Exception as e:
+                logger.debug(f"Failed to get vector data for backup: {e}")
+            
+            # 创建删除记录
+            delete_record = {
+                'index_id': index_id,
+                'summary': summary,
+                'ref_uuids': target_memory.ref_uuids,
+                'prev_index_id': target_memory.prev_index_id,
+                'source_type': target_memory.source_type,
+                'user_id': user_id,
+                'created_at': target_memory.created_at,
+                'active_score': target_memory.active_score,
+                'delete_raw': delete_raw,
+                'deleted_uuids': deleted_uuids,
+                'vector_data': vector_data
+            }
+            
+            # 保存到删除历史
+            if user_id not in self._delete_history:
+                self._delete_history[user_id] = []
+            self._delete_history[user_id].insert(0, delete_record)
+            # 只保留最近N次删除
+            self._delete_history[user_id] = self._delete_history[user_id][:self._max_undo_history]
+            
+            # 2. 从 ChromaDB 删除向量数据
+            await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
+            
+            # 3. 如果需要，删除关联的原始消息
+            if delete_raw and target_memory.ref_uuids:
+                uuids = json.loads(target_memory.ref_uuids)
+                await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
+            else:
+                # 不删除原始消息时，将其标记为未归档，以便重新总结
+                if deleted_uuids:
+                    def _mark_unarchived():
+                        from .db_manager import RawMemory
+                        with self.db.db.connection_context():
+                            RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
+                    await loop.run_in_executor(self.executor, _mark_unarchived)
+            
+            # 4. 从 SQLite 删除记忆索引
+            await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
+            
+            return True, "删除成功", summary
+            
+        except Exception as e:
+            logger.error(f"Delete memory error: {e}")
+            return False, f"删除失败：{e}", summary
+    
+    async def undo_last_delete(self, user_id):
+        """
+        撤销最近一次删除操作
+        
+        Args:
+            user_id: 用户ID
+            
+        Returns:
+            (success: bool, message: str, summary: str)
+        """
+        # 检查是否有删除历史
+        if user_id not in self._delete_history or not self._delete_history[user_id]:
+            return False, "没有可撤销的删除操作。", ""
+        
+        # 获取最近的删除记录
+        delete_record = self._delete_history[user_id].pop(0)
+        
+        loop = asyncio.get_event_loop()
+        
+        try:
+            # 1. 恢复 SQLite 中的记忆索引
+            index_params = {
+                'index_id': delete_record['index_id'],
+                'summary': delete_record['summary'],
+                'ref_uuids': delete_record['ref_uuids'],
+                'prev_index_id': delete_record['prev_index_id'],
+                'source_type': delete_record['source_type'],
+                'user_id': delete_record['user_id'],
+                'created_at': delete_record['created_at'],
+                'active_score': delete_record.get('active_score', 100)
+            }
+            await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
+            
+            # 确保 ChromaDB 已初始化
+            await self._ensure_chroma_initialized()
+            
+            # 2. 恢复 ChromaDB 中的向量数据
+            vector_data = delete_record.get('vector_data')
+            if vector_data and vector_data.get('embedding'):
+                # 有完整的向量数据，直接恢复
+                add_params = {
+                    'ids': [delete_record['index_id']],
+                    'documents': [vector_data.get('document', delete_record['summary'])],
+                    'metadatas': [vector_data.get('metadata', {'user_id': user_id})],
+                    'embeddings': [vector_data['embedding']]
+                }
+                await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+            else:
+                # 没有向量数据，重新生成
+                add_params = {
+                    'ids': [delete_record['index_id']],
+                    'documents': [delete_record['summary']],
+                    'metadatas': [{
+                        'user_id': user_id,
+                        'source_type': delete_record['source_type'],
+                        'created_at': delete_record['created_at'].strftime("%Y-%m-%d %H:%M:%S") if hasattr(delete_record['created_at'], 'strftime') else str(delete_record['created_at'])
+                    }]
+                }
+                await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+            
+            # 3. 恢复原始消息的归档状态
+            if delete_record['deleted_uuids']:
+                def _mark_archived():
+                    from .db_manager import RawMemory
+                    with self.db.db.connection_context():
+                        RawMemory.update(is_archived=True).where(
+                            RawMemory.uuid << delete_record['deleted_uuids']
+                        ).execute()
+                try:
+                    await loop.run_in_executor(self.executor, _mark_archived)
+                except Exception as e:
+                    logger.debug(f"Failed to restore raw messages archive status: {e}")
+            
+            return True, "撤销成功", delete_record['summary']
+            
+        except Exception as e:
+            logger.error(f"Undo delete error: {e}")
+            # 恢复失败，将记录放回历史
+            self._delete_history[user_id].insert(0, delete_record)
+            return False, f"撤销失败：{e}", delete_record['summary']
+    
+    async def delete_memory_by_id(self, user_id, short_id, delete_raw=False):
+        """
+        根据记忆 ID（短 ID 或完整 UUID）删除记忆
+        
+        Args:
+            user_id: 用户ID
+            short_id: 记忆ID（可以是前8位短ID或完整UUID）
+            delete_raw: 是否同时删除关联的原始消息
+            
+        Returns:
+            (success: bool, message: str, summary: str)
+        """
+        loop = asyncio.get_event_loop()
+        
+        # 1. 查找匹配的记忆索引
+        def _find_memory():
+            with self.db.db.connection_context():
+                from .db_manager import MemoryIndex
+                # 如果是短ID（8位），查找匹配的完整UUID
+                if len(short_id) == 8:
+                    query = MemoryIndex.select().where(
+                        (MemoryIndex.user_id == user_id) &
+                        (MemoryIndex.index_id.startswith(short_id))
+                    )
+                else:
+                    # 完整UUID
+                    query = MemoryIndex.select().where(
+                        (MemoryIndex.user_id == user_id) &
+                        (MemoryIndex.index_id == short_id)
+                    )
+                return query.first()
+        
+        try:
+            target_memory = await loop.run_in_executor(self.executor, _find_memory)
+            
+            if not target_memory:
+                return False, f"找不到 ID 为 {short_id} 的记忆，请确认 ID 是否正确。", ""
+            
+            index_id = target_memory.index_id
+            summary = target_memory.summary
+            
+            # 确保 ChromaDB 已初始化
+            await self._ensure_chroma_initialized()
+            
+            # 2. 从 ChromaDB 删除向量数据
+            await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
+            
+            # 3. 如果需要，删除关联的原始消息
+            if delete_raw and target_memory.ref_uuids:
+                uuids = json.loads(target_memory.ref_uuids)
+                await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
+            
+            # 4. 从 SQLite 删除记忆索引
+            await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
+            
+            return True, "删除成功", summary
+            
+        except Exception as e:
+            logger.error(f"Delete memory by ID error: {e}")
+            return False, f"删除失败：{e}", ""
+    
+    async def export_raw_messages(self, user_id, format="jsonl", start_date=None, end_date=None, limit=None):
+        """
+        导出原始消息数据用于模型微调
+        
+        Args:
+            user_id: 用户ID
+            format: 导出格式 (jsonl, json, txt)
+            start_date: 开始日期
+            end_date: 结束日期
+            limit: 限制数量
+            
+        Returns:
+            (success: bool, data: str, stats: dict)
+        """
+        loop = asyncio.get_event_loop()
+        
+        try:
+            # 获取原始消息
+            raw_msgs = await loop.run_in_executor(
+                self.executor,
+                self.db.get_all_raw_messages,
+                user_id,
+                start_date,
+                end_date,
+                limit
+            )
+            
+            if not raw_msgs:
+                return False, "没有找到可导出的消息", {}
+            
+            # 获取统计信息
+            stats = await loop.run_in_executor(self.executor, self.db.get_message_stats, user_id)
+            stats["exported"] = len(raw_msgs)
+            
+            # 根据格式导出
+            if format == "jsonl":
+                data = self._export_as_jsonl(raw_msgs)
+            elif format == "json":
+                data = self._export_as_json(raw_msgs)
+            elif format == "txt":
+                data = self._export_as_txt(raw_msgs)
+            elif format == "alpaca":
+                data = self._export_as_alpaca(raw_msgs)
+            elif format == "sharegpt":
+                data = self._export_as_sharegpt(raw_msgs)
+            else:
+                return False, f"不支持的导出格式：{format}", {}
+            
+            return True, data, stats
+            
+        except Exception as e:
+            logger.error(f"Export raw messages error: {e}")
+            return False, f"导出失败：{e}", {}
+    
+    def _export_as_jsonl(self, raw_msgs):
+        """导出为 JSONL 格式（每行一个 JSON 对象）"""
+        lines = []
+        for msg in raw_msgs:
+            if not self._is_valid_message_content(msg.content):
+                continue
+            obj = {
+                "role": "assistant" if msg.role == "assistant" else "user",
+                "content": msg.content,
+                "timestamp": msg.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "user_id": msg.user_id,
+                "user_name": msg.user_name
+            }
+            lines.append(json.dumps(obj, ensure_ascii=False))
+        return "\n".join(lines)
+    
+    def _export_as_json(self, raw_msgs):
+        """导出为 JSON 数组格式"""
+        messages = []
+        for msg in raw_msgs:
+            if not self._is_valid_message_content(msg.content):
+                continue
+            messages.append({
+                "role": "assistant" if msg.role == "assistant" else "user",
+                "content": msg.content,
+                "timestamp": msg.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "user_id": msg.user_id,
+                "user_name": msg.user_name
+            })
+        return json.dumps(messages, ensure_ascii=False, indent=2)
+    
+    def _export_as_txt(self, raw_msgs):
+        """导出为纯文本格式"""
+        lines = []
+        for msg in raw_msgs:
+            if not self._is_valid_message_content(msg.content):
+                continue
+            role_name = "助手" if msg.role == "assistant" else (msg.user_name or "用户")
+            time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            lines.append(f"[{time_str}] {role_name}: {msg.content}")
+        return "\n".join(lines)
+    
+    def _export_as_alpaca(self, raw_msgs):
+        """导出为 Alpaca 格式（用于微调）"""
+        conversations = []
+        current_instruction = None
+        
+        for msg in raw_msgs:
+            if not self._is_valid_message_content(msg.content):
+                continue
+                
+            if msg.role == "user":
+                current_instruction = msg.content
+            elif msg.role == "assistant" and current_instruction:
+                conversations.append({
+                    "instruction": current_instruction,
+                    "input": "",
+                    "output": msg.content
+                })
+                current_instruction = None
+        
+        return json.dumps(conversations, ensure_ascii=False, indent=2)
+    
+    async def export_all_users_messages(self, format="jsonl", start_date=None, end_date=None, limit=None):
+        """
+        导出所有用户的原始消息数据
+        
+        Args:
+            format: 导出格式 (jsonl, json, txt, alpaca, sharegpt)
+            start_date: 开始日期
+            end_date: 结束日期
+            limit: 限制数量
+            
+        Returns:
+            (success: bool, data: str, stats: dict)
+        """
+        loop = asyncio.get_event_loop()
+        
+        try:
+            # 获取所有用户的消息
+            raw_msgs = await loop.run_in_executor(
+                self.executor,
+                self.db.get_all_users_messages,
+                start_date,
+                end_date,
+                limit
+            )
+            
+            if not raw_msgs:
+                return False, "没有找到可导出的消息", {}
+            
+            # 获取统计信息
+            stats = await loop.run_in_executor(self.executor, self.db.get_all_users_stats)
+            stats["exported"] = len(raw_msgs)
+            
+            # 根据格式导出
+            if format == "jsonl":
+                data = self._export_as_jsonl(raw_msgs)
+            elif format == "json":
+                data = self._export_as_json(raw_msgs)
+            elif format == "txt":
+                data = self._export_as_txt(raw_msgs)
+            elif format == "alpaca":
+                data = self._export_as_alpaca(raw_msgs)
+            elif format == "sharegpt":
+                data = self._export_as_sharegpt(raw_msgs)
+            else:
+                return False, f"不支持的导出格式：{format}", {}
+            
+            return True, data, stats
+            
+        except Exception as e:
+            logger.error(f"Export all users messages error: {e}")
+            return False, f"导出失败：{e}", {}
+    
+    def _export_as_sharegpt(self, raw_msgs):
+        """导出为 ShareGPT 格式（用于微调）"""
+        conversations = []
+        current_conversation = []
+        
+        for msg in raw_msgs:
+            if not self._is_valid_message_content(msg.content):
+                continue
+            
+            role = "gpt" if msg.role == "assistant" else "human"
+            current_conversation.append({
+                "from": role,
+                "value": msg.content
+            })
+            
+            # 每个对话轮次（一问一答）作为一个完整对话
+            if msg.role == "assistant" and len(current_conversation) >= 2:
+                conversations.append({
+                    "conversations": current_conversation.copy()
+                })
+                current_conversation = []
+        
+        return json.dumps(conversations, ensure_ascii=False, indent=2)

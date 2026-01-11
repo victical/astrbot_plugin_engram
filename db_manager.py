@@ -109,6 +109,16 @@ class DatabaseManager:
         with self.db.connection_context():
             MemoryIndex.update(active_score=MemoryIndex.active_score + bonus).where(MemoryIndex.index_id == index_id).execute()
 
+    def delete_memory_index(self, index_id):
+        """删除单条总结记忆索引"""
+        with self.db.connection_context():
+            MemoryIndex.delete().where(MemoryIndex.index_id == index_id).execute()
+    
+    def delete_raw_memories_by_uuids(self, uuids):
+        """删除指定 UUID 的原始消息"""
+        with self.db.connection_context():
+            RawMemory.delete().where(RawMemory.uuid << uuids).execute()
+    
     def clear_user_data(self, user_id):
         """清除用户的所有记忆数据 (原始消息和总结索引)"""
         with self.db.connection_context():
@@ -116,3 +126,73 @@ class DatabaseManager:
             RawMemory.delete().where(RawMemory.user_id == user_id).execute()
             # 删除总结索引
             MemoryIndex.delete().where(MemoryIndex.user_id == user_id).execute()
+    
+    def get_all_raw_messages(self, user_id, start_date=None, end_date=None, limit=None):
+        """获取用户的所有原始消息（支持时间范围过滤）"""
+        with self.db.connection_context():
+            query = RawMemory.select().where(RawMemory.user_id == user_id)
+            
+            # 时间范围过滤
+            if start_date:
+                query = query.where(RawMemory.timestamp >= start_date)
+            if end_date:
+                query = query.where(RawMemory.timestamp <= end_date)
+            
+            # 按时间升序排列
+            query = query.order_by(RawMemory.timestamp.asc())
+            
+            if limit:
+                query = query.limit(limit)
+            
+            return list(query)
+    
+    def get_message_stats(self, user_id):
+        """获取用户的消息统计信息"""
+        with self.db.connection_context():
+            total = RawMemory.select().where(RawMemory.user_id == user_id).count()
+            archived = RawMemory.select().where((RawMemory.user_id == user_id) & (RawMemory.is_archived == True)).count()
+            user_msgs = RawMemory.select().where((RawMemory.user_id == user_id) & (RawMemory.role == "user")).count()
+            assistant_msgs = RawMemory.select().where((RawMemory.user_id == user_id) & (RawMemory.role == "assistant")).count()
+            
+            return {
+                "total": total,
+                "archived": archived,
+                "unarchived": total - archived,
+                "user_messages": user_msgs,
+                "assistant_messages": assistant_msgs
+            }
+    
+    def get_all_users_messages(self, start_date=None, end_date=None, limit=None):
+        """获取所有用户的原始消息"""
+        with self.db.connection_context():
+            query = RawMemory.select()
+            
+            if start_date:
+                query = query.where(RawMemory.timestamp >= start_date)
+            if end_date:
+                query = query.where(RawMemory.timestamp <= end_date)
+            
+            query = query.order_by(RawMemory.timestamp.asc())
+            
+            if limit:
+                query = query.limit(limit)
+            
+            return list(query)
+    
+    def get_all_users_stats(self):
+        """获取所有用户的统计信息"""
+        with self.db.connection_context():
+            total = RawMemory.select().count()
+            archived = RawMemory.select().where(RawMemory.is_archived == True).count()
+            user_count = RawMemory.select(RawMemory.user_id).distinct().count()
+            user_msgs = RawMemory.select().where(RawMemory.role == "user").count()
+            assistant_msgs = RawMemory.select().where(RawMemory.role == "assistant").count()
+            
+            return {
+                "user_count": user_count,
+                "total": total,
+                "archived": archived,
+                "unarchived": total - archived,
+                "user_messages": user_msgs,
+                "assistant_messages": assistant_msgs
+            }

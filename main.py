@@ -2,16 +2,16 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
 from .memory_logic import MemoryLogic
+from .export_handler import ExportHandler
+from .profile_renderer import ProfileRenderer
+from .utils import get_constellation, get_zodiac, get_career
 import asyncio
 import json
-import os
-import io
+import sys
 import datetime
-import aiohttp
-from zhdate import ZhDate
-from PIL import Image, ImageDraw, ImageFont
+import time
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.1.5")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.2.3")
 class EngramPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -19,13 +19,37 @@ class EngramPlugin(Star):
         from astrbot.api.star import StarTools
         self.plugin_data_dir = StarTools.get_data_dir()
         self.logic = MemoryLogic(context, config, self.plugin_data_dir)
-        # 记录上次同步 OneBot 信息的时间，避免每条消息都触发 API 调用
-        self._last_onebot_sync = {} 
+        self.export_handler = ExportHandler(self.logic, self.plugin_data_dir)
+        self.profile_renderer = ProfileRenderer(config, self.plugin_data_dir)
+        self._last_onebot_sync = {}
         asyncio.create_task(self.background_worker())
         asyncio.create_task(self._daily_persona_scheduler())
+        
+    def _is_command_message(self, content: str) -> bool:
+        """检测消息是否为指令"""
+        if not self.config.get("enable_command_filter", True):
+            return False
+        
+        text = content.strip()
+        
+        # 1. 检查指令前缀
+        command_prefixes = self.config.get("command_prefixes", ["/", "!", "#"])
+        for prefix in command_prefixes:
+            if text.startswith(prefix):
+                return True
+        
+        # 2. 检查完整指令匹配
+        if self.config.get("enable_full_command_detection", False):
+            full_commands = self.config.get("full_command_list", [])
+            cleaned_text = "".join(text.split())
+            for cmd in full_commands:
+                if cleaned_text == "".join(str(cmd).split()):
+                    return True
+        
+        return False
 
     async def _daily_persona_scheduler(self):
-        """独立的每日画像更新调度器：精准在00:00执行，避免依赖轮询"""
+        """独立的每日画像更新调度器：精准在00:00执行，避免依赖轮询，支持并发控制"""
         while not self.logic._is_shutdown:
             try:
                 # 计算距离下一个00:00的秒数
@@ -38,15 +62,46 @@ class EngramPlugin(Star):
                 
                 if self.logic._is_shutdown: break
                 
-                # 执行画像更新
+                # 执行画像更新 - 带并发控制和延迟
                 min_memories = self.config.get("min_persona_update_memories", 3)
-                for user_id in list(self.logic.last_chat_time.keys()):
-                    today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                    loop = asyncio.get_event_loop()
-                    memories = await loop.run_in_executor(self.logic.executor, self.logic.db.get_memories_since, user_id, today)
-                    if len(memories) >= min_memories:
-                        await self.logic._update_persona_daily(user_id)
-                        logger.info(f"Engram: Daily persona updated for {user_id}")
+                max_concurrent = self.config.get("persona_update_max_concurrent", 3)
+                update_delay = self.config.get("persona_update_delay", 5)
+                
+                # 创建信号量控制并发数
+                semaphore = asyncio.Semaphore(max_concurrent)
+                
+                async def update_user_persona(user_id):
+                    """带并发控制的单用户画像更新"""
+                    async with semaphore:
+                        try:
+                            today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                            loop = asyncio.get_event_loop()
+                            memories = await loop.run_in_executor(
+                                self.logic.executor,
+                                self.logic.db.get_memories_since,
+                                user_id,
+                                today
+                            )
+                            if len(memories) >= min_memories:
+                                await self.logic._update_persona_daily(user_id)
+                                logger.info(f"Engram: Daily persona updated for {user_id}")
+                                # 更新后延迟，避免瞬时压力
+                                if update_delay > 0:
+                                    await asyncio.sleep(update_delay)
+                        except Exception as e:
+                            logger.error(f"Engram: Failed to update persona for {user_id}: {e}")
+                
+                # 收集所有需要更新的用户
+                user_ids = list(self.logic.last_chat_time.keys())
+                if user_ids:
+                    logger.info(f"Engram: Starting daily persona update for {len(user_ids)} users (max concurrent: {max_concurrent}, delay: {update_delay}s)")
+                    
+                    # 并发执行所有用户的画像更新（受信号量限制）
+                    tasks = [update_user_persona(user_id) for user_id in user_ids]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    logger.info(f"Engram: Daily persona update completed for {len(user_ids)} users")
+                    
             except Exception as e:
                 if not self.logic._is_shutdown:
                     logger.error(f"Engram daily persona scheduler error: {e}")
@@ -67,7 +122,6 @@ class EngramPlugin(Star):
 
     def _calculate_next_check_time(self) -> int:
         """计算下一次检测的休眠时间（秒）"""
-        import time
         now_ts = time.time()
         timeout = self.config.get("private_memory_timeout", 1800)
         
@@ -134,24 +188,39 @@ class EngramPlugin(Star):
             if req.system_prompt: req.system_prompt += inject_text
             else: req.system_prompt = f"你是一个有记忆的助手。以下是关于用户的信息：{inject_text}"
 
-    @filter.on_llm_response()
-    async def on_llm_response(self, event: AstrMessageEvent, resp):
-        """在 LLM 响应后记录 AI 的回复到原始记忆"""
+    @filter.after_message_sent()
+    async def after_message_sent(self, event: AstrMessageEvent):
+        """在消息发送后记录 AI 的回复到原始记忆"""
+        # 只处理私聊
         if event.get_group_id(): return
+        
+        # 获取结果对象
+        result = event.get_result()
+        # 必须是 LLM 结果才记录 (过滤掉指令回复、报错信息等)
+        if not result or not result.is_llm_result():
+            return
+
         user_id = event.get_sender_id()
-        if resp and resp.completion_text:
-            await self.logic.record_message(user_id=user_id, session_id=user_id, role="assistant", content=resp.completion_text)
+        # 提取纯文本内容
+        content = "".join([c.text for c in result.chain if hasattr(c, "text")])
+        
+        if content:
+            await self.logic.record_message(user_id=user_id, session_id=user_id, role="assistant", content=content)
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_private_message(self, event: AstrMessageEvent):
         """在收到私聊消息时记录原始记忆并被动同步 OneBot 用户信息"""
         user_id = event.get_sender_id()
         content = event.message_str
+        
+        # 检查是否为指令消息，是则跳过记录
+        if self._is_command_message(content):
+            return
+        
         user_name = event.get_sender_name()
         await self.logic.record_message(user_id=user_id, session_id=user_id, role="user", content=content, user_name=user_name)
         
         # 频率控制：每 12 小时最多同步一次 OneBot 信息
-        import time
         now = time.time()
         last_sync = self._last_onebot_sync.get(user_id, 0)
         if now - last_sync < 12 * 3600:
@@ -201,15 +270,15 @@ class EngramPlugin(Star):
 
                         if b_year and b_month and b_day:
                             update_payload["basic_info"]["birthday"] = f"{b_year}-{b_month}-{b_day}"
-                            update_payload["basic_info"]["constellation"] = self._get_constellation(int(b_month), int(b_day))
-                            update_payload["basic_info"]["zodiac"] = self._get_zodiac(int(b_year), int(b_month), int(b_day))
+                            update_payload["basic_info"]["constellation"] = get_constellation(int(b_month), int(b_day))
+                            update_payload["basic_info"]["zodiac"] = get_zodiac(int(b_year), int(b_month), int(b_day))
                         elif "birthday" in stranger_info and str(stranger_info["birthday"]).isdigit():
                             b_str = str(stranger_info["birthday"])
                             if len(b_str) == 8:
                                 b_year, b_month, b_day = b_str[:4], b_str[4:6], b_str[6:]
                                 update_payload["basic_info"]["birthday"] = f"{b_year}-{b_month}-{b_day}"
-                                update_payload["basic_info"]["constellation"] = self._get_constellation(int(b_month), int(b_day))
-                                update_payload["basic_info"]["zodiac"] = self._get_zodiac(int(b_year), int(b_month), int(b_day))
+                                update_payload["basic_info"]["constellation"] = get_constellation(int(b_month), int(b_day))
+                                update_payload["basic_info"]["zodiac"] = get_zodiac(int(b_year), int(b_month), int(b_day))
 
                         if "zodiac" in stranger_info: update_payload["basic_info"]["zodiac"] = stranger_info["zodiac"]
                         if "signature" in stranger_info: update_payload["basic_info"]["signature"] = stranger_info["signature"]
@@ -217,7 +286,7 @@ class EngramPlugin(Star):
                         # 补充职业
                         career_id = stranger_info.get("makeFriendCareer")
                         if career_id and career_id != "0":
-                            update_payload["basic_info"]["job"] = self._get_career(int(career_id))
+                            update_payload["basic_info"]["job"] = get_career(int(career_id))
 
                         # 某些 OneBot 扩展实现可能会提供 location
                         if "location" in stranger_info:
@@ -236,55 +305,23 @@ class EngramPlugin(Star):
         except Exception as e:
             logger.error(f"Auto update basic info failed: {e}")
 
-    def _get_constellation(self, month: int, day: int) -> str:
-        """星座映射"""
-        constellations = {
-            "白羊座": ((3, 21), (4, 19)),
-            "金牛座": ((4, 20), (5, 20)),
-            "双子座": ((5, 21), (6, 20)),
-            "巨蟹座": ((6, 21), (7, 22)),
-            "狮子座": ((7, 23), (8, 22)),
-            "处女座": ((8, 23), (9, 22)),
-            "天秤座": ((9, 23), (10, 22)),
-            "天蝎座": ((10, 23), (11, 21)),
-            "射手座": ((11, 22), (12, 21)),
-            "摩羯座": ((12, 22), (1, 19)),
-            "水瓶座": ((1, 20), (2, 18)),
-            "双鱼座": ((2, 19), (3, 20)),
-        }
-        for constellation, ((start_month, start_day), (end_month, end_day)) in constellations.items():
-            if (month == start_month and day >= start_day) or (month == end_month and day <= end_day):
-                return constellation
-            if start_month > end_month: # 跨年
-                if (month == start_month and day >= start_day) or (month == end_month + 12 and day <= end_day):
-                    return constellation
-        return f"星座{month}-{day}"
-
-    def _get_zodiac(self, year: int, month: int, day: int) -> str:
-        """生肖映射"""
-        zodiacs = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"]
-        from datetime import date
-        current = date(year, month, day)
-        try:
-            spring = ZhDate(year, 1, 1).to_datetime().date()
-            zodiac_year = year if current >= spring else year - 1
-        except:
-            zodiac_year = year
-        index = (zodiac_year - 2020) % 12
-        return zodiacs[index]
-
-    def _get_career(self, num: int) -> str:
-        """职业映射"""
-        career = {1: "计算机/互联网/通信", 2: "生产/工艺/制造", 3: "医疗/护理/制药", 4: "金融/银行/投资/保险", 5: "商业/服务业/个体经营", 
-                  6: "文化/广告/传媒", 7: "娱乐/艺术/表演", 8: "律师/法务", 9: "教育/培训", 10: "公务员/行政/事业单位", 
-                  11: "模特", 12: "空姐", 13: "学生", 14: "其他职业"}
-        return career.get(num, f"职业{num}")
-
     @filter.command("mem_list")
-    async def mem_list(self, event: AstrMessageEvent):
+    async def mem_list(self, event: AstrMessageEvent, count: str = ""):
         """查看最近生成的长期记忆归档"""
         user_id = event.get_sender_id()
-        limit = self.config.get("list_memory_count", 5)
+        
+        # 支持可选的数量参数，未指定则使用配置项
+        if count and count.isdigit():
+            limit = int(count)
+            if limit <= 0:
+                yield event.plain_result("⚠️ 数量必须大于 0。")
+                return
+            elif limit > 50:
+                yield event.plain_result("⚠️ 单次最多查询 50 条记忆。")
+                return
+        else:
+            limit = self.config.get("list_memory_count", 5)
+        
         loop = asyncio.get_event_loop()
         memories = await loop.run_in_executor(self.logic.executor, self.logic.db.get_memory_list, user_id, limit)
         if not memories:
@@ -295,6 +332,7 @@ class EngramPlugin(Star):
             result.append(f"{i+1}. ⏰ {m.created_at.strftime('%m-%d %H:%M')}\n   📝 {m.summary}\n")
         
         result.append("\n💡 发送 /mem_view <序号> 可查看某条记忆的完整对话原文。")
+        result.append("💡 发送 /mem_list <数量> 可自定义查询条数。")
         yield event.plain_result("\n".join(result))
 
     @filter.command("mem_view")
@@ -343,14 +381,97 @@ class EngramPlugin(Star):
 
     @filter.command("mem_search")
     async def mem_search(self, event: AstrMessageEvent, query: str):
-        """搜索与关键词相关的长期记忆"""
+        """搜索与关键词相关的长期记忆（按相关性排序）"""
         user_id = event.get_sender_id()
         memories = await self.logic.retrieve_memories(user_id, query, limit=3)
         if not memories:
             yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆。")
             return
-        result = [f"🔍 搜索关键词 '{query}' 的结果："] + memories
+        result = [f"🔍 搜索关键词 '{query}' 的结果（按相关性排序）：\n"] + memories
+        result.append("\n💡 使用 /mem_delete <ID> 可根据记忆 ID 删除指定记忆。")
         yield event.plain_result("\n".join(result))
+
+    @filter.command("mem_delete")
+    async def mem_delete(self, event: AstrMessageEvent, index: str):
+        """删除指定序号或 ID 的总结记忆（保留原始消息）"""
+        user_id = event.get_sender_id()
+        
+        # 智能判断：数字且 ≤ 50 使用序号删除，否则使用 ID 删除
+        if index.isdigit():
+            seq = int(index)
+            if seq <= 0:
+                yield event.plain_result("⚠️ 序号必须大于 0。")
+                return
+            if seq > 50:
+                yield event.plain_result("⚠️ 序号超过 50，请使用记忆 ID 进行删除。")
+                return
+            
+            # 按序号删除
+            success, message, summary = await self.logic.delete_memory_by_sequence(user_id, seq, delete_raw=False)
+            
+            if success:
+                yield event.plain_result(f"🗑️ 已删除记忆 #{seq}：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 原始对话消息已保留，可重新归档。")
+            else:
+                yield event.plain_result(f"❌ {message}")
+        else:
+            # 按 ID 删除
+            if len(index) < 8:
+                yield event.plain_result("⚠️ 记忆 ID 至少需要 8 位，例如：/mem_delete a1b2c3d4")
+                return
+            
+            success, message, summary = await self.logic.delete_memory_by_id(user_id, index, delete_raw=False)
+            
+            if success:
+                yield event.plain_result(f"🗑️ 已删除记忆 ID {index[:8]}：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 原始对话消息已保留，可重新归档。")
+            else:
+                yield event.plain_result(f"❌ {message}")
+
+    @filter.command("mem_delete_all")
+    async def mem_delete_all(self, event: AstrMessageEvent, index: str):
+        """删除指定序号或 ID 的总结记忆及其关联的原始消息"""
+        user_id = event.get_sender_id()
+        
+        # 智能判断：数字且 ≤ 50 使用序号删除，否则使用 ID 删除
+        if index.isdigit():
+            seq = int(index)
+            if seq <= 0:
+                yield event.plain_result("⚠️ 序号必须大于 0。")
+                return
+            if seq > 50:
+                yield event.plain_result("⚠️ 序号超过 50，请使用记忆 ID 进行删除。")
+                return
+            
+            # 按序号删除
+            success, message, summary = await self.logic.delete_memory_by_sequence(user_id, seq, delete_raw=True)
+            
+            if success:
+                yield event.plain_result(f"🗑️ 已彻底删除记忆 #{seq} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /mem_undo 撤销此操作。")
+            else:
+                yield event.plain_result(f"❌ {message}")
+        else:
+            # 按 ID 删除
+            if len(index) < 8:
+                yield event.plain_result("⚠️ 记忆 ID 至少需要 8 位，例如：/mem_delete_all a1b2c3d4")
+                return
+            
+            success, message, summary = await self.logic.delete_memory_by_id(user_id, index, delete_raw=True)
+            
+            if success:
+                yield event.plain_result(f"🗑️ 已彻底删除记忆 ID {index[:8]} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /mem_undo 撤销此操作。")
+            else:
+                yield event.plain_result(f"❌ {message}")
+
+    @filter.command("mem_undo")
+    async def mem_undo(self, event: AstrMessageEvent):
+        """撤销最近一次删除操作"""
+        user_id = event.get_sender_id()
+        
+        success, message, summary = await self.logic.undo_last_delete(user_id)
+        
+        if success:
+            yield event.plain_result(f"✅ 撤销成功！已恢复记忆：\n📝 {summary[:80]}{'...' if len(summary) > 80 else ''}\n\n💡 记忆已重新添加到您的记忆库中。")
+        else:
+            yield event.plain_result(f"❌ {message}")
 
     @filter.command("mem_clear_raw")
     async def mem_clear_raw(self, event: AstrMessageEvent, confirm: str = ""):
@@ -386,6 +507,9 @@ class EngramPlugin(Star):
         
         loop = asyncio.get_event_loop()
         try:
+            # 确保 ChromaDB 已初始化
+            await self.logic._ensure_chroma_initialized()
+            
             # 1. 清除 SQLite 中的总结索引 (MemoryIndex)
             from .db_manager import MemoryIndex, RawMemory
             def _clear_archive():
@@ -415,6 +539,9 @@ class EngramPlugin(Star):
         
         loop = asyncio.get_event_loop()
         try:
+            # 确保 ChromaDB 已初始化
+            await self.logic._ensure_chroma_initialized()
+            
             # 清除 SQLite 中的原始消息和索引
             await loop.run_in_executor(self.logic.executor, self.logic.db.clear_user_data, user_id)
             # 清除 ChromaDB 中的向量数据
@@ -451,233 +578,20 @@ class EngramPlugin(Star):
         if not profile or not profile.get("basic_info"):
             yield event.plain_result("👤 您当前还没有建立深度画像。")
             return
-
-        basic = profile.get("basic_info", {})
-        attrs = profile.get("attributes", {})
-        prefs = profile.get("preferences", {})
-        social = profile.get("social_graph", {})
         
-        # 绘图逻辑
         try:
-            # 配色方案 (奶油布丁风)
-            colors = {
-                "bg": "#FFF9E6",          # 奶油黄背景
-                "grid": "#E6DCC3",        # 浅色网格
-                "card_bg": "#FFFFFF",     # 卡片白底
-                "text_main": "#5D4037",   # 深褐主文字
-                "text_dim": "#8D6E63",    # 浅褐副文字
-                "accent": "#FFAB91",      # 珊瑚粉装饰
-                "tag_bg": "#FFECB3",      # 标签背景
-                "shadow": "#E0C39E"       # 阴影色
-            }
-
-            W, H = 600, 900
-            im = Image.new("RGB", (W, H), colors["bg"])
-            draw = ImageDraw.Draw(im)
-
-            # 1. 绘制背景网格 (手账风格)
-            grid_size = 30
-            for x in range(0, W, grid_size):
-                draw.line([(x, 0), (x, H)], fill=colors["grid"], width=1)
-            for y in range(0, H, grid_size):
-                draw.line([(0, y), (W, y)], fill=colors["grid"], width=1)
-
-            # 2. 绘制主卡片 (带阴影)
-            margin = 40
-            card_rect = [margin, 120, W-margin, H-margin]
-            draw.rounded_rectangle([c + 8 for c in card_rect], radius=20, fill=colors["shadow"]) # 阴影
-            draw.rounded_rectangle(card_rect, radius=20, fill=colors["card_bg"]) # 实体层
-
-            # 3. 顶部胶带效果
-            tape_w = 120
-            draw.rectangle([W/2 - tape_w/2, 110, W/2 + tape_w/2, 125], fill=colors["accent"])
-
-            # 字体加载逻辑优化：优先使用 PillowMD 样式目录下的字体
-            font_path = None
-            custom_style_path = self.config.get("pillowmd_style_path", "")
-            
-            # 搜索路径优先级：1. 配置的样式目录, 2. 插件数据目录下的 fonts, 3. 系统字体
-            font_search_paths = []
-            if custom_style_path and os.path.exists(custom_style_path):
-                font_search_paths.append(custom_style_path)
-                # 递归一层子目录 (适配 styles/default/ 这种结构)
-                try:
-                    for sub in os.listdir(custom_style_path):
-                        sub_p = os.path.join(custom_style_path, sub)
-                        if os.path.isdir(sub_p): font_search_paths.append(sub_p)
-                except: pass
-            
-            font_search_paths.extend([
-                os.path.join(self.plugin_data_dir, "fonts"),
-                "C:/Windows/Fonts",
-                "/usr/share/fonts/truetype/wqy",
-                "/usr/share/fonts"
-            ])
-
-            for sp in font_search_paths:
-                if not sp or not os.path.exists(sp): continue
-                try:
-                    files = [f for f in os.listdir(sp) if f.lower().endswith(('.ttc', '.ttf', '.otf'))]
-                    # 优先选择用户放入的第一个字体，或者包含常见中文关键词的字体
-                    best_match = None
-                    if files:
-                        # 只要有字体文件，就拿第一个
-                        best_match = files[0]
-                        # 如果有中文字体关键词，则更优
-                        for f in files:
-                            if any(k in f.lower() for k in ['cute', 'lixia', 'msyh', 'sim', 'wqy', 'noto']):
-                                best_match = f; break
-                        font_path = os.path.join(sp, best_match)
-                        logger.info(f"Engram: Using custom font from style path: {font_path}")
-                        break
-                except: continue
-
-            def get_f(size):
-                try: 
-                    if font_path: return ImageFont.truetype(font_path, size)
-                    return ImageFont.load_default()
-                except: return ImageFont.load_default()
-
-            f_name = get_f(40)
-            f_uid = get_f(20)
-            f_label = get_f(22)
-            f_val = get_f(24)
-            f_title = get_f(28)
-            f_tag = get_f(20)
-
-            # 4. 绘制头像
-            avatar_size = 140
-            avatar_url = basic.get("avatar_url")
-            if avatar_url:
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(avatar_url, timeout=5) as resp:
-                            if resp.status == 200:
-                                avatar_img = Image.open(io.BytesIO(await resp.read())).convert("RGBA").resize((avatar_size, avatar_size))
-                                mask = Image.new('L', (avatar_size, avatar_size), 0)
-                                ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-                                av_x, av_y = (W - avatar_size) // 2, 60
-                                draw.ellipse((av_x-5, av_y-5, av_x+avatar_size+5, av_y+avatar_size+5), fill="white")
-                                im.paste(avatar_img, (av_x, av_y), mask=mask)
-                except: pass
-
-            # 5. 文字信息
-            curr_y = 220
-            # 昵称 (居中)
-            name = basic.get("nickname", "未知用户")
-            tw = draw.textlength(name, font=f_name)
-            draw.text(((W - tw)/2, curr_y), name, fill=colors["text_main"], font=f_name)
-            
-            curr_y += 55
-            # UID (带背景)
-            uid_str = f"ID: {basic.get('qq_id', user_id)}"
-            uw = draw.textlength(uid_str, font=f_uid)
-            draw.rounded_rectangle([(W-uw)/2 - 12, curr_y, (W+uw)/2 + 12, curr_y+32], radius=12, fill=colors["grid"])
-            draw.text(((W - uw)/2, curr_y+3), uid_str, fill=colors["text_dim"], font=f_uid)
-
-            # 绘制个性签名
-            sig = basic.get('signature')
-            if not sig or sig == "暂无个性签名": sig = "暂无个性签名"
-            
-            if sig:
-                if len(sig) > 28: sig = sig[:27] + "..."
-                curr_y += 50
-                sw = draw.textlength(sig, font=f_tag)
-                draw.text(((W - sw)/2, curr_y), sig, fill=colors["text_dim"], font=f_tag)
-                curr_y += 50 # 增加垂直间距，防止往上挤
-            else:
-                curr_y += 20
-
-            # 属性栏
-            infos = []
-            for label, key in [("性别", "gender"), ("年龄", "age"), ("生日", "birthday"), ("生肖", "zodiac"), ("星座", "constellation"), ("职业", "job"), ("所在地", "location")]:
-                val = basic.get(key, "未知")
-                if val and val != "未知":
-                    infos.append((label, val))
-            
-            # 如果信息太少，增加基础间距
-            if len(infos) <= 4:
-                curr_y += 20
-            
-            # 使用更规整的网格布局
-            start_x = margin + 50
-            line_height = 45
-            label_offset = 80 # 标签到内容的距离
-            
-            for i, (label, val) in enumerate(infos):
-                row, col = i // 2, i % 2
-                x_p = start_x + col * (W // 2 - margin - 30)
-                y_p = curr_y + row * line_height
-                
-                draw.text((x_p, y_p), f"{label}：", fill=colors["text_dim"], font=f_label)
-                draw.text((x_p + label_offset, y_p), str(val), fill=colors["text_main"], font=f_val)
-
-            if infos:
-                curr_y += ((len(infos) + 1) // 2) * line_height + 50 # 增加到分割线的间距
-            else:
-                curr_y += 30
-            
-            draw.line([(margin+30, curr_y), (W-margin-30, curr_y)], fill=colors["grid"], width=1)
-            
-            # 6. 标签区域 (记忆碎片 - 分类展示)
-            curr_y += 35 # 增加分割线到标题的间距
-            draw.text((margin+35, curr_y), "记忆碎片", fill=colors["accent"], font=f_title)
-            curr_y += 55 # 增加标题到内容的间距
-            
-            # 分类逻辑
-            tag_categories = [
-                ("性格", attrs.get("personality_tags", [])),
-                ("爱好", attrs.get("hobbies", [])),
-                ("喜好", prefs.get("likes", [])),
-                ("禁忌", prefs.get("dislikes", []))
-            ]
-            
-            has_any_tag = False
-            for cat_name, tags in tag_categories:
-                if not tags: continue
-                has_any_tag = True
-                
-                # 绘制分类标题
-                draw.text((margin+35, curr_y), f"· {cat_name}", fill=colors["text_dim"], font=f_tag)
-                curr_y += 35
-                
-                tag_x = margin + 50
-                for tag in tags:
-                    t_t = str(tag)
-                    tw = draw.textlength(t_t, font=f_tag) + 24
-                    if tag_x + tw > W - margin - 35:
-                        tag_x = margin + 50; curr_y += 42
-                    
-                    if curr_y > H - margin - 100: break # 防止超出卡片
-                    
-                    draw.rounded_rectangle([tag_x, tag_y := curr_y, tag_x+tw, tag_y+32], radius=10, fill=colors["tag_bg"])
-                    draw.text((tag_x+12, tag_y+4), t_t, fill=colors["text_main"], font=f_tag)
-                    tag_x += tw + 12
-                curr_y += 45
-
-            if not has_any_tag:
-                draw.text((margin+50, curr_y), "等待探索中...", fill=colors["text_dim"], font=f_tag)
-
-            # 7. 底部羁绊
-            bottom_y = H - margin - 80
-            status = social.get("relationship_status", "初识")
-            draw.text((margin+30, bottom_y), f"羁绊: {status}", fill=colors["text_dim"], font=f_label)
-            
+            # 获取记忆数量
             loop = asyncio.get_event_loop()
             memories = await loop.run_in_executor(self.logic.executor, self.logic.db.get_memory_list, user_id, 100)
-            sync_rate = min(20 + len(memories) * 5, 100)
+            memory_count = len(memories)
             
-            bar_x, bar_y, bar_w = margin+30, bottom_y + 35, W - 2*margin - 60
-            draw.rounded_rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+10], radius=5, fill="#EEEEEE")
-            draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w * (sync_rate/100), bar_y+10], radius=5, fill=colors["accent"])
-
-            img_byte_arr = io.BytesIO()
-            im.save(img_byte_arr, format='PNG')
+            # 渲染画像
+            img_bytes = await self.profile_renderer.render(user_id, profile, memory_count)
+            
             from astrbot.api.message_components import Image as MsgImage
-            yield event.chain_result([MsgImage.fromBytes(img_byte_arr.getvalue())])
-
+            yield event.chain_result([MsgImage.fromBytes(img_bytes)])
         except Exception as e:
-            logger.error(f"Handheld PIL rendering failed: {e}")
+            logger.error(f"Profile rendering failed: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             yield event.plain_result(f"⚠️ 档案绘制失败，转为文本模式：\n{json.dumps(profile, indent=2, ensure_ascii=False)}")
@@ -714,5 +628,25 @@ class EngramPlugin(Star):
         await self.logic._update_persona_daily(user_id)
         yield event.plain_result("✅ 画像更新完成。您可以使用 /profile show 查看。")
 
+    @filter.command("mem_export")
+    async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
+        """导出原始消息数据用于模型微调"""
+        async for result in self.export_handler.handle_export_command(event, format, days):
+            yield result
+
+    @filter.command("mem_stats")
+    async def mem_stats(self, event: AstrMessageEvent):
+        """查看消息统计信息"""
+        async for result in self.export_handler.handle_stats_command(event):
+            yield result
+    
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("mem_export_all")
+    async def mem_export_all(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
+        """[管理员] 导出所有用户的原始消息数据"""
+        async for result in self.export_handler.handle_export_all_command(event, format, days):
+            yield result
+
     async def terminate(self):
         self.logic.shutdown()
+        await self.profile_renderer.close()
