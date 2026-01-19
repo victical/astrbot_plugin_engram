@@ -1,5 +1,7 @@
 # Astrbot Engram 仿生双轨记忆系统
-![Moe Counter](https://count.getloli.com/get/@:victical-astrbot_plugin_engram?theme=moebooru)
+
+![Visitor Count](https://count.getloli.com/get/@:victical-astrbot_plugin_engram?theme=moebooru)
+
 `astrbot_plugin_engram` 是一款为 Astrbot 设计的工业级长期记忆增强插件。它模仿人类大脑的记忆机制，通过“双轨制”架构解决了 LLM 在即时通讯场景下记忆碎片化、遗忘快、无法回溯原文等痛点。
 
 ## 🌟 核心特性
