@@ -374,7 +374,11 @@ class MemoryLogic:
         
         # 按日期分组
         def get_date_key(m):
-            return m.timestamp.date()
+            timestamp = m.timestamp
+            # 处理时间戳可能是整数或浮点数的情况
+            if isinstance(timestamp, (int, float)):
+                timestamp = datetime.datetime.fromtimestamp(timestamp)
+            return timestamp.date()
             
         for date_key, group in groupby(raw_msgs, key=get_date_key):
             # 将 group 转为列表，因为 groupby 的迭代器只能用一次
