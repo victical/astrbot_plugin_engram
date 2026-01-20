@@ -5,6 +5,7 @@ import json
 import re
 import asyncio
 import time
+import datetime
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
 from .db_manager import DatabaseManager
@@ -106,6 +107,16 @@ class MemoryLogic:
 
     def _get_profile_path(self, user_id):
         return os.path.join(self.profiles_dir, f"{user_id}.json")
+    
+    @staticmethod
+    def _ensure_datetime(timestamp):
+        """
+        确保时间戳是 datetime 对象。
+        如果是整数或浮点数（Unix 时间戳），则转换为 datetime 对象。
+        """
+        if isinstance(timestamp, (int, float)):
+            return datetime.datetime.fromtimestamp(timestamp)
+        return timestamp
 
     @staticmethod
     def _is_valid_message_content(content: str) -> bool:
@@ -395,8 +406,6 @@ class MemoryLogic:
 
     async def _process_single_summary_batch(self, user_id, raw_msgs, date_key):
         """处理单批次（单日）消息的总结"""
-        import datetime
-        
         # 使用公共过滤方法
         filtered_msgs = [m for m in raw_msgs if self._is_valid_message_content(m.content)]
         
@@ -411,7 +420,9 @@ class MemoryLogic:
         # 构造对话文本
         chat_lines = [f"【日期：{date_key.strftime('%Y-%m-%d')}】"]
         for m in filtered_msgs:
-            time_str = m.timestamp.strftime("%H:%M")
+            # 确保时间戳是 datetime 对象
+            ts = self._ensure_datetime(m.timestamp)
+            time_str = ts.strftime("%H:%M")
             name = m.user_name if m.role == "user" and m.user_name else m.role
             chat_lines.append(f"[{time_str}] {name}: {m.content}")
         chat_text = "\n".join(chat_lines)
@@ -480,7 +491,8 @@ class MemoryLogic:
             ref_uuids = [m.uuid for m in raw_msgs] # 注意：归档标记原始的所有消息
             
             # 使用该批次最后一条消息的时间作为归档时间，确保历史重构时的顺序正确
-            created_at = raw_msgs[-1].timestamp
+            # 确保时间戳是 datetime 对象
+            created_at = self._ensure_datetime(raw_msgs[-1].timestamp)
             
             # 获取前一条记忆索引，形成链表（时间线）
             last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
@@ -993,10 +1005,11 @@ class MemoryLogic:
         for msg in raw_msgs:
             if not self._is_valid_message_content(msg.content):
                 continue
+            ts = self._ensure_datetime(msg.timestamp)
             obj = {
                 "role": "assistant" if msg.role == "assistant" else "user",
                 "content": msg.content,
-                "timestamp": msg.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "user_id": msg.user_id,
                 "user_name": msg.user_name
             }
@@ -1009,10 +1022,11 @@ class MemoryLogic:
         for msg in raw_msgs:
             if not self._is_valid_message_content(msg.content):
                 continue
+            ts = self._ensure_datetime(msg.timestamp)
             messages.append({
                 "role": "assistant" if msg.role == "assistant" else "user",
                 "content": msg.content,
-                "timestamp": msg.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
                 "user_id": msg.user_id,
                 "user_name": msg.user_name
             })
@@ -1024,8 +1038,9 @@ class MemoryLogic:
         for msg in raw_msgs:
             if not self._is_valid_message_content(msg.content):
                 continue
+            ts = self._ensure_datetime(msg.timestamp)
             role_name = "助手" if msg.role == "assistant" else (msg.user_name or "用户")
-            time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            time_str = ts.strftime("%Y-%m-%d %H:%M:%S")
             lines.append(f"[{time_str}] {role_name}: {msg.content}")
         return "\n".join(lines)
     

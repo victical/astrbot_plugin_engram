@@ -11,7 +11,7 @@ import sys
 import datetime
 import time
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.2.3")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.2.4")
 class EngramPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -329,7 +329,9 @@ class EngramPlugin(Star):
             return
         result = [f"📜 最近的 {len(memories)} 条长期记忆：\n" + "—" * 15]
         for i, m in enumerate(memories):
-            result.append(f"{i+1}. ⏰ {m.created_at.strftime('%m-%d %H:%M')}\n   📝 {m.summary}\n")
+            # 确保时间戳是 datetime 对象
+            created_at = self.logic._ensure_datetime(m.created_at)
+            result.append(f"{i+1}. ⏰ {created_at.strftime('%m-%d %H:%M')}\n   📝 {m.summary}\n")
         
         result.append("\n💡 发送 /mem_view <序号> 可查看某条记忆的完整对话原文。")
         result.append("💡 发送 /mem_list <数量> 可自定义查询条数。")
@@ -357,9 +359,11 @@ class EngramPlugin(Star):
             return
             
         # 格式化输出
+        # 确保时间戳是 datetime 对象
+        created_at = self.logic._ensure_datetime(memory_index.created_at)
         result = [
             f"📖 记忆详情 (序号 {seq})",
-            f"⏰ 时间：{memory_index.created_at.strftime('%Y-%m-%d %H:%M')}",
+            f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
             f"📝 归档：{memory_index.summary}",
             "————————————————",
             "🎙️ 原始对话回溯："
@@ -372,8 +376,10 @@ class EngramPlugin(Star):
                 # 使用公共过滤方法
                 if not self.logic._is_valid_message_content(m.content):
                     continue
-                    
-                time_str = m.timestamp.strftime("%H:%M:%S")
+                
+                # 确保时间戳是 datetime 对象
+                ts = self.logic._ensure_datetime(m.timestamp)
+                time_str = ts.strftime("%H:%M:%S")
                 role_name = "我" if m.role == "assistant" else (m.user_name or "你")
                 result.append(f"[{time_str}] {role_name}: {m.content}")
                 
