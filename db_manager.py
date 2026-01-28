@@ -100,6 +100,15 @@ class DatabaseManager:
     def get_memories_since(self, user_id, since_time):
         with self.db.connection_context():
             return list(MemoryIndex.select().where((MemoryIndex.user_id == user_id) & (MemoryIndex.created_at >= since_time)))
+    
+    def get_memories_in_range(self, user_id, start_time, end_time):
+        """获取指定时间范围内的记忆索引"""
+        with self.db.connection_context():
+            return list(MemoryIndex.select().where(
+                (MemoryIndex.user_id == user_id) &
+                (MemoryIndex.created_at >= start_time) &
+                (MemoryIndex.created_at < end_time)
+            ))
 
     def decay_active_scores(self, decay_rate=1):
         with self.db.connection_context():

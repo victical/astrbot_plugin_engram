@@ -46,6 +46,16 @@
     "default": "你是{{ai_name}}，请根据聊天记录，写一篇简短的日记。核心原则：简单！短小！像写手帐一样，一笔带过，不要写作文。 - 字数限制：100字以内。  - 视角：第一人称。-称呼：根据对话语境或你们的关系。 - 内容：      1. 简单记录发生了什么 (如：主人醒了)。2. 必须保留细节 (如：喜欢吃西瓜)，这是重点。3. 心情如何 (如：开心)。- 禁止：禁止长篇大论的心理描写，禁止啰嗦的铺垫。对话内容： {{chat_text}}",
     "hint": "{{ai_name}}：bot名字 {{chat_text}}：对话内容"
   },
+  "persona_update_prompt": {
+    "description": "画像更新的提示词",
+    "type": "string",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "你是一个严谨的【用户信息档案员】。你的任务是根据今日的新增记忆，更新用户的档案数据。\n\n【当前档案】：\n{{current_persona}}\n\n【今日新增记忆】：\n{{memory_texts}}\n\n【核心原则 - 严禁幻觉】：\n⚠️ 你只能从【今日新增记忆】的文字中提取**明确写出的**事实信息。\n⚠️ 如果记忆中没有**直接提及**某项内容，你**绝对不能**添加、推测或脑补任何信息。\n⚠️ 例如：如果记忆只写\"聊了美食\"，你不能推测用户喜欢任何具体食物。只有记忆明确写\"喜欢XX食物\"，你才能将其加入 favorite_foods。\n\n【更新规则】：\n1. **逐条对照**：检查【今日新增记忆】中的每一条，只有明确提及的信息才能更新到档案。\n2. **保持原值**：如果记忆中没有提到某字段，保持【当前档案】中的原值不变。\n3. **列表追加**：hobbies、favorite_foods、dislikes 等列表字段，只追加记忆中明确提及的新内容，并去重。\n4. **禁止推断**：不要基于上下文推断、联想或猜测任何信息。\n5. **保留原有 basic_info**：basic_info 中的 qq_id、nickname、avatar_url、signature 等字段必须保持原值不变。\n\n【标签简化规则 - 必须遵守】：\n⚠️ 所有 hobbies、favorite_activities、favorite_items、personality_tags 字段的值必须使用【2-5个字的简短词汇】。\n⚠️ 禁止使用长句子或带括号的详细描述。\n⚠️ 示例：\n  ✅ 正确：\"玩我的世界\"、\"AI绘画\"、\"听音乐\"、\"看动漫\"\n  ❌ 错误：\"使用MC指令连接服务器\"、\"AI绘画（要求特定服装和姿势）\"\n⚠️ 如果记忆中有详细描述，请提取其核心活动作为简短标签。\n\n【字段定义 - 严格分类】：\n- basic_info: gender(性别), age(年龄), location(所在地), job(职业) - 其他字段保持原值\n- attributes:\n  - hobbies: 用户的活动类爱好，使用2-5字简短词汇（如：编程、看电影、打游戏、玩我的世界）\n  - skills: 用户掌握的技能（如：Python、钢琴、绘画）\n  - personality_tags: 用户明显表现出的性格特征（如：幽默、严谨）\n- preferences（严格按类别分配，禁止混淆）：\n  - favorite_foods: 用户喜欢的【食物/饮品】，如：西瓜、奶茶、火锅、冰美式、拿铁\n  - favorite_items: 用户喜欢的【具体物品/事物】，如：猫咪、手办、机械键盘、盲盒\n  - favorite_activities: 用户喜欢的【活动/娱乐方式】，使用2-5字简短词汇（如：看电影、打游戏、逛街、听音乐、AI绘画）\n  - dislikes: 用户明确表示讨厌的事物\n- social_graph:\n  - relationship_status: 保持原值不变\n  - interaction_stats: 保持原值不变\n  - important_people: 用户提到的重要的人（家人、朋友、伴侣等）\n- dev_metadata: tech_stack(技术栈) - 只记录明确提及的技术\n- shared_secrets: 如果用户分享了心事、秘密、烦恼或深层情感，设置为 true\n\n【禁止录入以下内容到 preferences 字段】：\n❌ 情感状态词：开心、快乐、幸福、温馨、感动\n❌ 互动行为词：摸头、聊天、陪伴、夸奖、鼓励\n❌ 抽象概念词：温暖、舒适、自由、安全感\n❌ 以上词汇应该被忽略，而不是录入任何字段\n\n【输出要求】：\n请直接返回更新后的完整 JSON 数据。不要包含 Markdown 标记，不要包含其他解释。",
+    "hint": "{{current_persona}}：当前用户画像JSON {{memory_texts}}：新增记忆列表"
+  },
   "list_memory_count": {
     "description": "查询记忆指令默认返回的数量",
     "type": "int",
@@ -117,8 +127,8 @@
   "command_prefixes": {
     "description": "指令前缀列表",
     "type": "list",
-    "default": ["/", "!", "#"],
-    "hint": "需要过滤的指令前缀，如 /、!、# 等。当消息以这些前缀开头时，插件会跳过处理。"
+    "default": ["/", "!", "#", "~"],
+    "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
   },
   "enable_full_command_detection": {
     "description": "启用完整指令字符串检测",

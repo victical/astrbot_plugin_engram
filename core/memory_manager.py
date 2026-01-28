@@ -1,3 +1,24 @@
+"""
+记忆管理器 (Memory Manager)
+
+负责记忆的存储、检索、归档、删除等核心操作。
+从 memory_logic.py 提取而来，遵循单一职责原则。
+
+主要功能：
+- ChromaDB 向量库的延迟初始化与管理
+- 原始消息记录
+- 记忆归档与总结（按天分组）
+- 语义检索（支持关键词重排序）
+- 记忆删除与撤销
+- 数据导出（多格式支持）
+
+依赖：
+- context: AstrBot API 上下文（用于 LLM 调用）
+- config: 插件配置
+- db_manager: 数据库管理器
+- profile_manager: 用户画像管理器（用于实时更新画像）
+"""
+
 import chromadb
 import os
 import uuid
@@ -8,19 +29,32 @@ import time
 import datetime
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
-from .db_manager import DatabaseManager
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
 
-class MemoryLogic:
-    def __init__(self, context, config, data_dir):
+
+class MemoryManager:
+    """记忆管理器"""
+    
+    def __init__(self, context, config, data_dir, executor, db_manager, profile_manager=None):
+        """
+        初始化记忆管理器
+        
+        Args:
+            context: AstrBot API 上下文对象
+            config: 插件配置字典
+            data_dir: 数据目录路径
+            executor: ThreadPoolExecutor 实例
+            db_manager: DatabaseManager 实例
+            profile_manager: ProfileManager 实例（可选，用于实时画像更新）
+        """
         self.context = context
         self.config = config
         self.data_dir = data_dir
-        os.makedirs(self.data_dir, exist_ok=True)
-        
-        self.db = DatabaseManager(self.data_dir)
+        self.executor = executor
+        self.db = db_manager
+        self.profile_manager = profile_manager
         
         # ChromaDB 延迟初始化（避免构造函数阻塞）
         self.chroma_path = os.path.join(self.data_dir, "engram_chroma")
@@ -28,14 +62,6 @@ class MemoryLogic:
         self.collection = None
         self._chroma_init_lock = asyncio.Lock()
         self._chroma_initialized = False
-        
-        # 用户画像路径
-        self.profiles_dir = os.path.join(self.data_dir, "engram_personas")
-        os.makedirs(self.profiles_dir, exist_ok=True)
-        
-        # 线程池处理数据库和向量库操作
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self._is_shutdown = False
         
         # 内存中记录最后聊天时间（带自动清理机制）
         self.last_chat_time = {}     # {user_id: timestamp}
@@ -46,10 +72,14 @@ class MemoryLogic:
         # 撤销删除缓存：{user_id: [最近删除的记忆列表]}
         self._delete_history = {}  # 每个用户保留最近3次删除
         self._max_undo_history = 3
-
+        
+        self._is_shutdown = False
+    
     def shutdown(self):
+        """关闭记忆管理器"""
         self._is_shutdown = True
-        self.executor.shutdown(wait=False)
+    
+    # ========== ChromaDB 管理 ==========
     
     async def _ensure_chroma_initialized(self):
         """确保 ChromaDB 已初始化（延迟初始化，避免构造函数阻塞）"""
@@ -78,7 +108,9 @@ class MemoryLogic:
             except Exception as e:
                 logger.error(f"Engram: Failed to initialize ChromaDB: {e}")
                 raise
-
+    
+    # ========== 辅助方法 ==========
+    
     def _cleanup_inactive_users(self):
         """清理长期不活跃的用户缓存，防止内存泄漏"""
         now_ts = time.time()
@@ -104,9 +136,6 @@ class MemoryLogic:
                 if user_id not in users_to_keep and self.unsaved_msg_count.get(user_id, 0) == 0:
                     self.last_chat_time.pop(user_id, None)
                     self.unsaved_msg_count.pop(user_id, None)
-
-    def _get_profile_path(self, user_id):
-        return os.path.join(self.profiles_dir, f"{user_id}.json")
     
     @staticmethod
     def _ensure_datetime(timestamp):
@@ -117,7 +146,7 @@ class MemoryLogic:
         if isinstance(timestamp, (int, float)):
             return datetime.datetime.fromtimestamp(timestamp)
         return timestamp
-
+    
     @staticmethod
     def _is_valid_message_content(content: str) -> bool:
         """
@@ -130,7 +159,6 @@ class MemoryLogic:
         
         返回 True 表示消息有效，False 表示应被过滤。
         """
-        import re
         content = content.strip()
         
         # 1. 过滤以常见指令前缀开头的消息
@@ -147,117 +175,11 @@ class MemoryLogic:
             return False
         
         return True
-
-    async def get_user_profile(self, user_id):
-        """获取用户画像"""
-        loop = asyncio.get_event_loop()
-        path = self._get_profile_path(user_id)
-        
-        def _read():
-            if not os.path.exists(path):
-                # 新的、更具体的画像结构（v2.1 优化版）
-                return {
-                    "basic_info": {
-                        "qq_id": user_id,
-                        "nickname": "未知",
-                        "gender": "未知",
-                        "age": "未知",
-                        "location": "未知",
-                        "job": "未知",
-                        "avatar_url": "",
-                        "birthday": "未知",
-                        "constellation": "未知",
-                        "zodiac": "未知",
-                        "signature": "暂无个性签名"
-                    },
-                    "attributes": {
-                        "personality_tags": [],  # 例如：严谨、幽默 (仅当明显表现时)
-                        "hobbies": [],           # 例如：编程、看电影
-                        "skills": []             # 例如：Python、钢琴
-                    },
-                    "preferences": {
-                        "favorite_foods": [],      # 喜欢的食物：西瓜、奶茶、火锅
-                        "favorite_items": [],      # 喜欢的物品：猫咪、手办、机械键盘
-                        "favorite_activities": [], # 喜欢的活动：看电影、打游戏、逛街
-                        "likes": [],               # 兼容旧版：其他喜欢的事物
-                        "dislikes": []             # 明确讨厌的事物
-                    },
-                    "social_graph": {
-                        "relationship_status": "萍水相逢",  # 羁绊等级名称
-                        "important_people": [],              # 提到的朋友/家人
-                        "interaction_stats": {               # 互动统计（v2.1 新增）
-                            "first_chat_date": None,         # 首次聊天日期
-                            "last_chat_date": None,          # 最后聊天日期
-                            "total_chat_days": 0,            # 累计聊天天数（不要求连续）
-                            "total_valid_chats": 0           # 有效聊天总次数
-                        }
-                    },
-                    "dev_metadata": {            # 专门为开发者保留的元数据
-                        "os": [],
-                        "tech_stack": []
-                    },
-                    "shared_secrets": False      # 是否分享过秘密/心事（LLM 检测标记）
-                }
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                return {}
-        
-        return await loop.run_in_executor(self.executor, _read)
-
-    async def update_user_profile(self, user_id, update_data):
-        """更新用户画像 (Sidecar 模式)"""
-        if not update_data:
-            return
-            
-        loop = asyncio.get_event_loop()
-        path = self._get_profile_path(user_id)
-        
-        def _update():
-            profile = {}
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        profile = json.load(f)
-                except:
-                    pass
-            
-            # 合并逻辑
-            for key, value in update_data.items():
-                if isinstance(value, list):
-                    # 列表处理：去重并合并
-                    old_list = profile.get(key, [])
-                    if not isinstance(old_list, list): old_list = [old_list]
-                    new_list = list(set(old_list + value))
-                    profile[key] = new_list
-                elif isinstance(value, dict):
-                    # 字典处理：递归一级合并
-                    old_dict = profile.get(key, {})
-                    if not isinstance(old_dict, dict): old_dict = {}
-                    old_dict.update(value)
-                    profile[key] = old_dict
-                else:
-                    # 基本属性：直接覆盖
-                    profile[key] = value
-            
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(profile, f, ensure_ascii=False, indent=4)
-            return profile
-
-        return await loop.run_in_executor(self.executor, _update)
-
-    async def clear_user_profile(self, user_id):
-        """清除用户画像"""
-        loop = asyncio.get_event_loop()
-        path = self._get_profile_path(user_id)
-        def _delete():
-            if os.path.exists(path):
-                os.remove(path)
-        await loop.run_in_executor(self.executor, _delete)
-
+    
+    # ========== 消息记录 ==========
+    
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
-        import datetime
+        """记录原始消息"""
         msg_uuid = str(uuid.uuid4())
         
         # 异步保存到 SQLite
@@ -278,10 +200,11 @@ class MemoryLogic:
         if role == "user":
             self.last_chat_time[user_id] = datetime.datetime.now().timestamp()
             self.unsaved_msg_count[user_id] = self.unsaved_msg_count.get(user_id, 0) + 1
-
+    
+    # ========== 记忆归档与总结 ==========
+    
     async def check_and_summarize(self):
         """检查是否需要进行私聊归档（画像更新由独立调度器处理）"""
-        import datetime
         now_ts = datetime.datetime.now().timestamp()
         timeout = self.config.get("private_memory_timeout", 1800)
         min_count = self.config.get("min_msg_count", 3)
@@ -294,121 +217,14 @@ class MemoryLogic:
         
         # 定期清理不活跃用户缓存，防止内存泄漏
         self._cleanup_inactive_users()
-
-    async def _update_persona_daily(self, user_id, start_time=None, end_time=None):
-        """每日画像深度更新 (用户画像架构)
-        
-        Args:
-            user_id: 用户ID
-            start_time: 记忆查询起始时间（可选，默认为今天00:00）
-            end_time: 记忆查询结束时间（可选，None表示无上限）
-        """
-        import datetime
-        loop = asyncio.get_event_loop()
-        
-        # 1. 获取指定时间范围内的记忆索引
-        if start_time is not None:
-            if end_time is not None:
-                # 使用完整的时间范围（用于凌晨00:00调度时查询昨天的记忆，或指定多天范围）
-                memories = await loop.run_in_executor(
-                    self.executor,
-                    lambda: self.db.get_memories_in_range(user_id, start_time, end_time)
-                )
-            else:
-                # 只有起始时间，无结束时间（获取从start_time到现在的所有记忆）
-                memories = await loop.run_in_executor(
-                    self.executor,
-                    self.db.get_memories_since,
-                    user_id,
-                    start_time
-                )
-        else:
-            # 默认行为：查询今天的记忆（用于手动触发 /engram_force_persona 不带参数时）
-            today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            memories = await loop.run_in_executor(self.executor, self.db.get_memories_since, user_id, today)
-        
-        if not memories:
-            return
-
-        # 2. 结合现有画像和今日记忆进行深度更新
-        current_persona = await self.get_user_profile(user_id)
-        memory_texts = "\n".join([f"- {m.summary}" for m in memories])
-        
-        # 从配置获取画像更新提示词模板并替换占位符
-        custom_prompt = self.config.get("persona_update_prompt")
-        prompt = custom_prompt.replace("{{current_persona}}", json.dumps(current_persona, ensure_ascii=False, indent=2)).replace("{{memory_texts}}", memory_texts)
-        
-        
-        # 添加调试日志：记录用于画像更新的用户ID和记忆内容
-        logger.debug(f"Engram: Updating persona for user_id={user_id}, memory_count={len(memories)}")
-        if len(memories) <= 5:
-            logger.debug(f"Engram: Memory texts for persona update:\n{memory_texts}")
-        try:
-            # 获取指定的模型或默认模型
-            persona_model = self.config.get("persona_model", "").strip()
-            if persona_model:
-                provider = self.context.get_provider_by_id(persona_model)
-                if not provider:
-                    provider = self.context.get_using_provider()
-            else:
-                provider = self.context.get_using_provider()
-
-            if not provider:
-                return
-
-            resp = await provider.text_chat(prompt=prompt)
-            content = resp.completion_text
-            
-            # 解析并保存
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "{" in content:
-                content = content[content.find("{"):content.rfind("}")+1]
-                
-            new_persona = json.loads(content)
-            
-            # 【关键修复】保留 OneBot 同步的字段和互动统计，防止被 LLM 覆盖
-            # 这些字段由系统维护，不应被 LLM 修改
-            protected_basic_fields = ["qq_id", "nickname", "avatar_url", "signature",
-                                      "birthday", "constellation", "zodiac"]
-            
-            # 确保 new_persona 有正确的结构
-            if "basic_info" not in new_persona:
-                new_persona["basic_info"] = {}
-            if "social_graph" not in new_persona:
-                new_persona["social_graph"] = {}
-            
-            # 保留原有 basic_info 中的受保护字段
-            old_basic = current_persona.get("basic_info", {})
-            for field in protected_basic_fields:
-                if field in old_basic and old_basic[field] and old_basic[field] != "未知":
-                    # 只有当原值有效时才保留
-                    new_persona["basic_info"][field] = old_basic[field]
-            
-            # 保留原有的 interaction_stats（由 _update_interaction_stats 方法维护）
-            old_stats = current_persona.get("social_graph", {}).get("interaction_stats", {})
-            if old_stats:
-                new_persona["social_graph"]["interaction_stats"] = old_stats
-            
-            # 写入文件
-            path = self._get_profile_path(user_id)
-            def _write():
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(new_persona, f, ensure_ascii=False, indent=4)
-            await loop.run_in_executor(self.executor, _write)
-            
-        except Exception as e:
-            logger.error(f"Daily persona update error: {e}")
-
+    
     async def _summarize_private_chat(self, user_id):
         """对私聊进行总结并存入长期记忆（按天分组处理）"""
-        import datetime
         from itertools import groupby
         
         # 1. 获取未归档的原始消息
         loop = asyncio.get_event_loop()
         # 获取所有未归档消息，不设限制
-        # 使用 lambda 传递参数以避免 run_in_executor 的关键字参数限制
         raw_msgs = await loop.run_in_executor(self.executor, lambda: self.db.get_unarchived_raw(user_id, limit=None))
         if not raw_msgs:
             return
@@ -442,7 +258,7 @@ class MemoryLogic:
                 continue
                 
             await self._process_single_summary_batch(user_id, group_msgs, date_key)
-
+    
     async def _process_single_summary_batch(self, user_id, raw_msgs, date_key):
         """处理单批次（单日）消息的总结"""
         # 使用公共过滤方法
@@ -516,8 +332,8 @@ class MemoryLogic:
                 json_str = full_content.split("[JSON_START]")[1].split("[JSON_END]")[0].strip()
                 persona_update = json.loads(json_str)
                 # 实时更新画像
-                if persona_update:
-                    await self.update_user_profile(user_id, persona_update)
+                if persona_update and self.profile_manager:
+                    await self.profile_manager.update_user_profile(user_id, persona_update)
             except Exception as e:
                 logger.error(f"Failed to parse persona update: {e}")
             
@@ -568,7 +384,9 @@ class MemoryLogic:
             
         except Exception as e:
             logger.error(f"Save summarization error: {e}")
-
+    
+    # ========== 记忆检索 ==========
+    
     async def retrieve_memories(self, user_id, query, limit=3):
         """检索相关记忆并返回原文摘要及背景（基于时间链），使用关键词重排序提升精确匹配"""
         # 确保 ChromaDB 已初始化
@@ -598,7 +416,6 @@ class MemoryLogic:
             keyword_boost_weight = float(weight_config)
         except (ValueError, TypeError):
             # 向后兼容旧格式 "均衡模式 (0.5)"
-            import re
             match = re.search(r'\(([\d.]+)\)', str(weight_config))
             keyword_boost_weight = float(match.group(1)) if match else 0.5
         
@@ -608,9 +425,10 @@ class MemoryLogic:
         
         # 提取查询关键词（简单分词：按空格和标点分割）
         query_keywords = set()
+        query_for_keywords = query
         for char in ['，', '。', '！', '？', '、', ' ', ',', '.', '!', '?']:
-            query = query.replace(char, ' ')
-        query_keywords = set([w.strip().lower() for w in query.split() if len(w.strip()) > 0])
+            query_for_keywords = query_for_keywords.replace(char, ' ')
+        query_keywords = set([w.strip().lower() for w in query_for_keywords.split() if len(w.strip()) > 0])
         
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
@@ -722,7 +540,7 @@ class MemoryLogic:
             all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
             
         return all_memories
-
+    
     async def get_memory_detail(self, user_id, sequence_num):
         """获取指定序号记忆的完整原文详情"""
         loop = asyncio.get_event_loop()
@@ -746,6 +564,8 @@ class MemoryLogic:
         raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
         
         return target_memory, raw_msgs
+    
+    # ========== 记忆删除与撤销 ==========
     
     async def delete_memory_by_sequence(self, user_id, sequence_num, delete_raw=False):
         """
@@ -984,6 +804,8 @@ class MemoryLogic:
             logger.error(f"Delete memory by ID error: {e}")
             return False, f"删除失败：{e}", ""
     
+    # ========== 数据导出 ==========
+    
     async def export_raw_messages(self, user_id, format="jsonl", start_date=None, end_date=None, limit=None):
         """
         导出原始消息数据用于模型微调
@@ -1036,6 +858,58 @@ class MemoryLogic:
             
         except Exception as e:
             logger.error(f"Export raw messages error: {e}")
+            return False, f"导出失败：{e}", {}
+    
+    async def export_all_users_messages(self, format="jsonl", start_date=None, end_date=None, limit=None):
+        """
+        导出所有用户的原始消息数据
+        
+        Args:
+            format: 导出格式 (jsonl, json, txt, alpaca, sharegpt)
+            start_date: 开始日期
+            end_date: 结束日期
+            limit: 限制数量
+            
+        Returns:
+            (success: bool, data: str, stats: dict)
+        """
+        loop = asyncio.get_event_loop()
+        
+        try:
+            # 获取所有用户的消息
+            raw_msgs = await loop.run_in_executor(
+                self.executor,
+                self.db.get_all_users_messages,
+                start_date,
+                end_date,
+                limit
+            )
+            
+            if not raw_msgs:
+                return False, "没有找到可导出的消息", {}
+            
+            # 获取统计信息
+            stats = await loop.run_in_executor(self.executor, self.db.get_all_users_stats)
+            stats["exported"] = len(raw_msgs)
+            
+            # 根据格式导出
+            if format == "jsonl":
+                data = self._export_as_jsonl(raw_msgs)
+            elif format == "json":
+                data = self._export_as_json(raw_msgs)
+            elif format == "txt":
+                data = self._export_as_txt(raw_msgs)
+            elif format == "alpaca":
+                data = self._export_as_alpaca(raw_msgs)
+            elif format == "sharegpt":
+                data = self._export_as_sharegpt(raw_msgs)
+            else:
+                return False, f"不支持的导出格式：{format}", {}
+            
+            return True, data, stats
+            
+        except Exception as e:
+            logger.error(f"Export all users messages error: {e}")
             return False, f"导出失败：{e}", {}
     
     def _export_as_jsonl(self, raw_msgs):
@@ -1104,58 +978,6 @@ class MemoryLogic:
         
         return json.dumps(conversations, ensure_ascii=False, indent=2)
     
-    async def export_all_users_messages(self, format="jsonl", start_date=None, end_date=None, limit=None):
-        """
-        导出所有用户的原始消息数据
-        
-        Args:
-            format: 导出格式 (jsonl, json, txt, alpaca, sharegpt)
-            start_date: 开始日期
-            end_date: 结束日期
-            limit: 限制数量
-            
-        Returns:
-            (success: bool, data: str, stats: dict)
-        """
-        loop = asyncio.get_event_loop()
-        
-        try:
-            # 获取所有用户的消息
-            raw_msgs = await loop.run_in_executor(
-                self.executor,
-                self.db.get_all_users_messages,
-                start_date,
-                end_date,
-                limit
-            )
-            
-            if not raw_msgs:
-                return False, "没有找到可导出的消息", {}
-            
-            # 获取统计信息
-            stats = await loop.run_in_executor(self.executor, self.db.get_all_users_stats)
-            stats["exported"] = len(raw_msgs)
-            
-            # 根据格式导出
-            if format == "jsonl":
-                data = self._export_as_jsonl(raw_msgs)
-            elif format == "json":
-                data = self._export_as_json(raw_msgs)
-            elif format == "txt":
-                data = self._export_as_txt(raw_msgs)
-            elif format == "alpaca":
-                data = self._export_as_alpaca(raw_msgs)
-            elif format == "sharegpt":
-                data = self._export_as_sharegpt(raw_msgs)
-            else:
-                return False, f"不支持的导出格式：{format}", {}
-            
-            return True, data, stats
-            
-        except Exception as e:
-            logger.error(f"Export all users messages error: {e}")
-            return False, f"导出失败：{e}", {}
-    
     def _export_as_sharegpt(self, raw_msgs):
         """导出为 ShareGPT 格式（用于微调）"""
         conversations = []
@@ -1179,49 +1001,3 @@ class MemoryLogic:
                 current_conversation = []
         
         return json.dumps(conversations, ensure_ascii=False, indent=2)
-
-    async def _update_interaction_stats(self, user_id):
-        """
-        更新用户互动统计（每次有效聊天后调用）
-        
-        有效聊天定义：用户消息 + AI回复 = 1次有效互动
-        累计聊天天数：只要当天有聊天就计1天，无需连续
-        
-        Returns:
-            更新后的 interaction_stats 字典
-        """
-        from datetime import date
-        
-        loop = asyncio.get_event_loop()
-        profile = await self.get_user_profile(user_id)
-        social = profile.get("social_graph", {})
-        stats = social.get("interaction_stats", {})
-        
-        today = date.today().isoformat()
-        last_date = stats.get("last_chat_date")
-        
-        # 更新有效聊天次数
-        stats["total_valid_chats"] = stats.get("total_valid_chats", 0) + 1
-        
-        # 更新累计聊天天数（只要是新的一天就+1，无需连续）
-        if last_date is None:
-            # 首次聊天
-            stats["first_chat_date"] = today
-            stats["total_chat_days"] = 1
-        elif last_date != today:
-            # 新的一天聊天，累计天数+1（无需判断是否连续）
-            stats["total_chat_days"] = stats.get("total_chat_days", 0) + 1
-        # 如果 last_date == today，说明今天已经聊过，不重复计数
-        
-        stats["last_chat_date"] = today
-        
-        # 保存更新
-        await self.update_user_profile(user_id, {
-            "social_graph": {
-                "interaction_stats": stats
-            }
-        })
-        
-        logger.debug(f"Engram: Updated interaction stats for {user_id}: days={stats.get('total_chat_days', 0)}, chats={stats.get('total_valid_chats', 0)}")
-        
-        return stats

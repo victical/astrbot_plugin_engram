@@ -1,6 +1,6 @@
 name: astrbot_plugin_engram
 desc: 仿生双轨记忆系统 - 长期记忆增强插件
 help:
-version: 1.2.4
+version: 1.2.5
 author: victical
 repo: https://github.com/victical/astrbot_plugin_engram

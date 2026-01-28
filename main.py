@@ -11,7 +11,7 @@ import sys
 import datetime
 import time
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.2.4")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.2.5")
 class EngramPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -28,14 +28,17 @@ class EngramPlugin(Star):
     def _is_command_message(self, content: str) -> bool:
         """检测消息是否为指令"""
         if not self.config.get("enable_command_filter", True):
+            logger.debug(f"Engram: Command filter disabled, not filtering: {content[:30]}")
             return False
         
         text = content.strip()
         
         # 1. 检查指令前缀
-        command_prefixes = self.config.get("command_prefixes", ["/", "!", "#"])
+        command_prefixes = self.config.get("command_prefixes", ["/", "!", "#", "~"])
+        logger.debug(f"Engram: Checking command prefixes {command_prefixes} for message: {text[:30]}")
         for prefix in command_prefixes:
             if text.startswith(prefix):
+                logger.debug(f"Engram: Message matched prefix '{prefix}', filtering out")
                 return True
         
         # 2. 检查完整指令匹配
@@ -74,20 +77,27 @@ class EngramPlugin(Star):
                     """带并发控制的单用户画像更新"""
                     async with semaphore:
                         try:
-                            today = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                            # 关键修复：00:00 执行时应该查询的是【昨天】的记忆，而不是【今天】
+                            # 因为 00:00 时"今天"刚开始，还没有任何记忆
+                            now = datetime.datetime.now()
+                            yesterday_start = (now - datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                            
                             loop = asyncio.get_event_loop()
+                            # 查询昨天一整天的记忆（从昨天00:00到今天00:00）
                             memories = await loop.run_in_executor(
                                 self.logic.executor,
-                                self.logic.db.get_memories_since,
-                                user_id,
-                                today
+                                lambda: self.logic.db.get_memories_in_range(user_id, yesterday_start, today_start)
                             )
                             if len(memories) >= min_memories:
-                                await self.logic._update_persona_daily(user_id)
-                                logger.info(f"Engram: Daily persona updated for {user_id}")
+                                # 使用昨天的时间范围进行画像更新
+                                await self.logic._update_persona_daily(user_id, yesterday_start, today_start)
+                                logger.info(f"Engram: Daily persona updated for {user_id} (memories from yesterday: {len(memories)})")
                                 # 更新后延迟，避免瞬时压力
                                 if update_delay > 0:
                                     await asyncio.sleep(update_delay)
+                            else:
+                                logger.debug(f"Engram: Skipped persona update for {user_id} (only {len(memories)} memories, need {min_memories})")
                         except Exception as e:
                             logger.error(f"Engram: Failed to update persona for {user_id}: {e}")
                 
@@ -157,11 +167,19 @@ class EngramPlugin(Star):
             attrs = profile.get("attributes", {})
             prefs = profile.get("preferences", {})
             dev = profile.get("dev_metadata", {})
+            social = profile.get("social_graph", {})
+            
             hobbies = ", ".join(attrs.get("hobbies", [])) if isinstance(attrs.get("hobbies"), list) else ""
             skills = ", ".join(attrs.get("skills", [])) if isinstance(attrs.get("skills"), list) else ""
+            tech = ", ".join(dev.get("tech_stack", [])) if isinstance(dev.get("tech_stack"), list) else ""
+            
+            # v2.1 优化：细分喜好类别
+            favorite_foods = ", ".join(prefs.get("favorite_foods", [])) if isinstance(prefs.get("favorite_foods"), list) else ""
+            favorite_items = ", ".join(prefs.get("favorite_items", [])) if isinstance(prefs.get("favorite_items"), list) else ""
+            favorite_activities = ", ".join(prefs.get("favorite_activities", [])) if isinstance(prefs.get("favorite_activities"), list) else ""
             likes = ", ".join(prefs.get("likes", [])) if isinstance(prefs.get("likes"), list) else ""
             dislikes = ", ".join(prefs.get("dislikes", [])) if isinstance(prefs.get("dislikes"), list) else ""
-            tech = ", ".join(dev.get("tech_stack", [])) if isinstance(dev.get("tech_stack"), list) else ""
+            
             profile_block = f"【用户档案】\n- 称呼: {basic.get('nickname', '用户')} (QQ: {basic.get('qq_id')})\n"
             if basic.get('gender') and basic.get('gender') != "未知": profile_block += f"- 性别: {basic.get('gender')}\n"
             if basic.get('age') and basic.get('age') != "未知": profile_block += f"- 年龄: {basic.get('age')}\n"
@@ -172,10 +190,17 @@ class EngramPlugin(Star):
             if basic.get('zodiac') and basic.get('zodiac') != "未知": profile_block += f"- 生肖: {basic.get('zodiac')}\n"
             if hobbies: profile_block += f"- 爱好: {hobbies}\n"
             if skills or tech: profile_block += f"- 技能/技术栈: {skills} {tech}\n".strip() + "\n"
-            if likes: profile_block += f"- 喜欢: {likes}\n"
+            
+            # v2.1 优化：注入细分喜好
+            if favorite_foods: profile_block += f"- 喜欢的美食: {favorite_foods}\n"
+            if favorite_items: profile_block += f"- 喜欢的事物: {favorite_items}\n"
+            if favorite_activities: profile_block += f"- 喜欢的活动: {favorite_activities}\n"
+            if likes: profile_block += f"- 其他喜好: {likes}\n"
             if dislikes: profile_block += f"- 讨厌: {dislikes}\n"
-            status = profile.get("social_graph", {}).get("relationship_status", "初识")
-            profile_block += f"- 当前关系状态: {status}\n\n【交互指令】\n请基于以上档案事实，以最契合用户期望的方式与其交流。\n"
+            
+            # v2.1 优化：显示羁绊等级
+            status = social.get("relationship_status", "萍水相逢")
+            profile_block += f"- 当前羁绊: {status}\n\n【交互指令】\n请基于以上档案事实，以最契合用户期望的方式与其交流。\n"
         
         memories = await self.logic.retrieve_memories(user_id, query)
         memory_block = ""
@@ -190,9 +215,15 @@ class EngramPlugin(Star):
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
-        """在消息发送后记录 AI 的回复到原始记忆"""
+        """在消息发送后记录 AI 的回复到原始记忆，并更新互动统计"""
         # 只处理私聊
         if event.get_group_id(): return
+        
+        # 检查用户原始消息是否为指令，是则跳过记录 AI 回复
+        user_message = event.message_str
+        if self._is_command_message(user_message):
+            logger.debug(f"Engram: Skipping AI response recording for command: {user_message[:30]}")
+            return
         
         # 获取结果对象
         result = event.get_result()
@@ -206,6 +237,13 @@ class EngramPlugin(Star):
         
         if content:
             await self.logic.record_message(user_id=user_id, session_id=user_id, role="assistant", content=content)
+            
+            # v2.1 优化：更新互动统计（有效聊天 = 一问一答）
+            # AI 成功回复后才算一次有效互动
+            try:
+                await self.logic._update_interaction_stats(user_id)
+            except Exception as e:
+                logger.debug(f"Engram: Failed to update interaction stats for {user_id}: {e}")
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_private_message(self, event: AstrMessageEvent):
@@ -627,12 +665,37 @@ class EngramPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_persona")
-    async def force_persona(self, event: AstrMessageEvent):
-        """[管理员] 立即基于今日记忆强制深度更新画像"""
+    async def force_persona(self, event: AstrMessageEvent, days: str = ""):
+        """[管理员] 立即基于指定天数的记忆强制深度更新画像
+        
+        参数:
+            days: 回溯天数（可选，默认为1天/今天，设置为7则获取前7天的记忆）
+        """
         user_id = event.get_sender_id()
-        yield event.plain_result("⏳ 正在强制更新用户画像，请稍候...")
-        await self.logic._update_persona_daily(user_id)
-        yield event.plain_result("✅ 画像更新完成。您可以使用 /profile show 查看。")
+        
+        # 解析天数参数
+        if days and days.isdigit():
+            days_int = int(days)
+            if days_int <= 0:
+                yield event.plain_result("⚠️ 天数必须大于 0。")
+                return
+            if days_int > 365:
+                yield event.plain_result("⚠️ 天数不能超过 365 天。")
+                return
+        else:
+            days_int = 3  # 默认获取前3天的记忆
+        
+        # 计算时间范围：获取前N天的记忆
+        now = datetime.datetime.now()
+        start_time = (now - datetime.timedelta(days=days_int)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = now  # 到现在为止
+        time_desc = f"前 {days_int} 天"
+        
+        yield event.plain_result(f"⏳ 正在基于{time_desc}的记忆强制更新用户画像，请稍候...")
+        
+        # 调用画像更新
+        await self.logic._update_persona_daily(user_id, start_time, end_time)
+        yield event.plain_result(f"✅ 画像更新完成（基于{time_desc}的记忆）。您可以使用 /profile show 查看。")
 
     @filter.command("mem_export")
     async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
