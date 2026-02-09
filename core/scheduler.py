@@ -23,14 +23,17 @@ class MemoryScheduler:
         self.logic = logic
         self.config = config
         self._is_shutdown = False
+        self._tasks = []  # 追踪后台任务
     
     async def start(self):
         """启动所有调度任务"""
-        asyncio.create_task(self.background_worker())
-        asyncio.create_task(self.daily_persona_scheduler())
+        # 保存任务引用，以便关闭时取消
+        task1 = asyncio.create_task(self.background_worker())
+        task2 = asyncio.create_task(self.daily_persona_scheduler())
+        self._tasks.extend([task1, task2])
     
     def shutdown(self):
-        """停止调度器"""
+        """停止调度器（设置关闭标志）"""
         self._is_shutdown = True
     
     async def background_worker(self):
@@ -40,10 +43,29 @@ class MemoryScheduler:
                 # 计算下一次需要检测的时间
                 sleep_time = self._calculate_next_check_time()
                 await asyncio.sleep(sleep_time)
+                
+                # 关闭检查：在执行任何操作前检查状态
                 if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                    logger.debug("Engram: Background worker shutdown signal received")
                     break
+                
+                # 若线程池已关闭，直接退出
+                if getattr(self.logic.executor, "_shutdown", False):
+                    logger.debug("Engram: Executor shutdown detected in background worker")
+                    self._is_shutdown = True
+                    break
+                
                 await self.logic.check_and_summarize()
+            except asyncio.CancelledError:
+                # 任务被取消（插件关闭）
+                logger.debug("Engram: Background worker task cancelled")
+                break
             except Exception as e:
+                # 线程池已关闭时，终止任务避免重复报错
+                if "cannot schedule new futures after shutdown" in str(e):
+                    logger.debug("Engram: Background worker detected executor shutdown via exception")
+                    self._is_shutdown = True
+                    break
                 if not self._is_shutdown:
                     logger.error(f"Engram background worker error: {e}")
     
@@ -85,13 +107,29 @@ class MemoryScheduler:
                 logger.info(f"Engram: Daily persona update scheduled in {sleep_seconds/3600:.1f} hours")
                 await asyncio.sleep(sleep_seconds)
                 
+                # 关闭检查：在执行更新前检查状态
                 if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                    logger.debug("Engram: Daily persona scheduler shutdown signal received")
+                    break
+                
+                # 若线程池已关闭，直接退出
+                if getattr(self.logic.executor, "_shutdown", False):
+                    logger.debug("Engram: Executor shutdown detected in daily persona scheduler")
+                    self._is_shutdown = True
                     break
                 
                 # 执行画像更新 - 带并发控制和延迟
                 await self._execute_daily_persona_update()
                     
+            except asyncio.CancelledError:
+                # 任务被取消（插件关闭）
+                logger.debug("Engram: Daily persona scheduler task cancelled")
+                break
             except Exception as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    logger.debug("Engram: Daily persona scheduler detected executor shutdown via exception")
+                    self._is_shutdown = True
+                    break
                 if not self._is_shutdown:
                     logger.error(f"Engram daily persona scheduler error: {e}")
                 await asyncio.sleep(60)  # 出错后短暂休眠再重试
@@ -109,6 +147,15 @@ class MemoryScheduler:
             """带并发控制的单用户画像更新"""
             async with semaphore:
                 try:
+                    # 在执行前检查是否应该停止
+                    if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                        return
+                    
+                    # 检查线程池状态
+                    if getattr(self.logic.executor, "_shutdown", False):
+                        logger.debug(f"Engram: Skipping persona update for {user_id} - executor shutdown")
+                        return
+                    
                     # 关键修复：00:00 执行时应该查询的是【昨天】的记忆，而不是【今天】
                     # 因为 00:00 时"今天"刚开始，还没有任何记忆
                     now = datetime.datetime.now()

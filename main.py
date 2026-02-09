@@ -671,8 +671,31 @@ class EngramPlugin(Star):
             yield result
 
     async def terminate(self):
-        # 先停止调度器，避免线程池已关闭时仍提交任务
+        """优雅关闭插件：先设置标志，再取消任务，最后关闭资源"""
+        # 步骤1：设置关闭标志（但不关闭线程池）
+        self.logic._is_shutdown = True
         if hasattr(self, "_scheduler"):
-            self._scheduler.shutdown()
-        self.logic.shutdown()
+            self._scheduler._is_shutdown = True
+        
+        # 步骤2：取消所有后台任务
+        if hasattr(self, "_scheduler"):
+            for task in self._scheduler._tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # 等待任务清理完成（最多0.5秒）
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._scheduler._tasks, return_exceptions=True),
+                    timeout=0.5
+                )
+                logger.debug("Engram: All scheduler tasks stopped gracefully")
+            except asyncio.TimeoutError:
+                logger.debug("Engram: Some scheduler tasks did not complete in time")
+            except Exception as e:
+                logger.debug(f"Engram: Error waiting for scheduler tasks: {e}")
+        
+        # 步骤3：最后关闭线程池和其他资源
+        self.logic._memory_manager.shutdown()
+        self.logic.executor.shutdown(wait=False)
         await self.profile_renderer.close()
