@@ -2,6 +2,7 @@
 Engram 核心模块
 
 包含：
+- MemoryFacade: 记忆系统门面类（统一接口）
 - MemoryScheduler: 后台调度器（记忆归档、每日画像更新）
 - ProfileManager: 用户画像管理器
 - MemoryManager: 记忆管理器
@@ -10,5 +11,6 @@ Engram 核心模块
 from .scheduler import MemoryScheduler
 from .profile_manager import ProfileManager
 from .memory_manager import MemoryManager
+from .memory_facade import MemoryFacade
 
-__all__ = ['MemoryScheduler', 'ProfileManager', 'MemoryManager']
+__all__ = ['MemoryFacade', 'MemoryScheduler', 'ProfileManager', 'MemoryManager']

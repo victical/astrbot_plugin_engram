@@ -30,6 +30,18 @@
     "default": "",
     "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
   },
+  "embedding_provider": {
+    "description": "嵌入模型提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "用于 ChromaDB 向量检索的嵌入模型提供商 ID。留空则使用默认的 ChromaDB 内置嵌入。"
+  },
+  "debug_injection": {
+    "description": "调试模式：显示注入内容",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，每次 LLM 请求时会在日志中输出注入的用户画像和记忆内容，便于调试和排查问题。"
+  },
   "ai_name": {
     "description": "AI 名称",
     "type": "string",
@@ -85,6 +97,12 @@
     "type": "float",
     "default": 1.5,
     "hint": "向量搜索的距离阈值，超过此值的记忆将被过滤（距离越小相关性越高）。建议值：1.0-2.0。设置过小可能导致检索不到结果，过大会引入无关记忆"
+  },
+  "enable_memory_context_hint": {
+    "description": "显示前情提要",
+    "type": "bool",
+    "default": true,
+    "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
   },
   "show_relevance_score": {
     "description": "显示记忆相关性评分",

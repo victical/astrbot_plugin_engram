@@ -1,29 +1,62 @@
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
-from .memory_logic import MemoryLogic
+from astrbot.api.message_components import Image
+
+# 核心模块
+from .core import MemoryFacade, MemoryScheduler
+from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler
 from .export_handler import ExportHandler
 from .profile_renderer import ProfileRenderer
+from .services import LLMContextInjector
 from .utils import get_constellation, get_zodiac, get_career
+
 import asyncio
 import json
-import sys
 import datetime
 import time
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.2.5")
+
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.3.1")
 class EngramPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
+    """
+    Engram 仿生双轨记忆系统插件
+    
+    架构说明：
+    - main.py 作为纯路由层，仅负责装饰器绑定和参数解析
+    - 业务逻辑委托给 handlers/（命令处理）和 core/（核心功能）
+    - 调度任务由 MemoryScheduler 统一管理
+    """
+    
+    def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
-        self.config = config
+        # 兼容不同版本的 AstrBot 框架
+        self.config = config if config is not None else context.get_config() if hasattr(context, 'get_config') else {}
         from astrbot.api.star import StarTools
         self.plugin_data_dir = StarTools.get_data_dir()
-        self.logic = MemoryLogic(context, config, self.plugin_data_dir)
+        
+        # 初始化核心组件
+        self.logic = MemoryFacade(context, config, self.plugin_data_dir)
         self.export_handler = ExportHandler(self.logic, self.plugin_data_dir)
         self.profile_renderer = ProfileRenderer(config, self.plugin_data_dir)
+        
+        # 初始化命令处理器（委托业务逻辑）
+        self._mem_handler = MemoryCommandHandler(
+            config, self.logic._memory_manager, self.logic.db, self.logic.executor
+        )
+        self._profile_handler = ProfileCommandHandler(
+            config, self.logic._profile_manager, self.logic.db,
+            self.profile_renderer, self.logic.executor
+        )
+        self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager)
+        self._llm_injector = LLMContextInjector()
+        
+        # 初始化调度器
+        self._scheduler = MemoryScheduler(self.logic, config)
+        asyncio.create_task(self._scheduler.start())
+        
+        # OneBot 同步时间缓存
         self._last_onebot_sync = {}
-        asyncio.create_task(self.background_worker())
-        asyncio.create_task(self._daily_persona_scheduler())
         
     def _is_command_message(self, content: str) -> bool:
         """检测消息是否为指令"""
@@ -50,109 +83,6 @@ class EngramPlugin(Star):
                     return True
         
         return False
-
-    async def _daily_persona_scheduler(self):
-        """独立的每日画像更新调度器：精准在00:00执行，避免依赖轮询，支持并发控制"""
-        while not self.logic._is_shutdown:
-            try:
-                # 计算距离下一个00:00的秒数
-                now = datetime.datetime.now()
-                tomorrow = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                sleep_seconds = (tomorrow - now).total_seconds()
-                
-                logger.info(f"Engram: Daily persona update scheduled in {sleep_seconds/3600:.1f} hours")
-                await asyncio.sleep(sleep_seconds)
-                
-                if self.logic._is_shutdown: break
-                
-                # 执行画像更新 - 带并发控制和延迟
-                min_memories = self.config.get("min_persona_update_memories", 3)
-                max_concurrent = self.config.get("persona_update_max_concurrent", 3)
-                update_delay = self.config.get("persona_update_delay", 5)
-                
-                # 创建信号量控制并发数
-                semaphore = asyncio.Semaphore(max_concurrent)
-                
-                async def update_user_persona(user_id):
-                    """带并发控制的单用户画像更新"""
-                    async with semaphore:
-                        try:
-                            # 关键修复：00:00 执行时应该查询的是【昨天】的记忆，而不是【今天】
-                            # 因为 00:00 时"今天"刚开始，还没有任何记忆
-                            now = datetime.datetime.now()
-                            yesterday_start = (now - datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                            
-                            loop = asyncio.get_event_loop()
-                            # 查询昨天一整天的记忆（从昨天00:00到今天00:00）
-                            memories = await loop.run_in_executor(
-                                self.logic.executor,
-                                lambda: self.logic.db.get_memories_in_range(user_id, yesterday_start, today_start)
-                            )
-                            if len(memories) >= min_memories:
-                                # 使用昨天的时间范围进行画像更新
-                                await self.logic._update_persona_daily(user_id, yesterday_start, today_start)
-                                logger.info(f"Engram: Daily persona updated for {user_id} (memories from yesterday: {len(memories)})")
-                                # 更新后延迟，避免瞬时压力
-                                if update_delay > 0:
-                                    await asyncio.sleep(update_delay)
-                            else:
-                                logger.debug(f"Engram: Skipped persona update for {user_id} (only {len(memories)} memories, need {min_memories})")
-                        except Exception as e:
-                            logger.error(f"Engram: Failed to update persona for {user_id}: {e}")
-                
-                # 收集所有需要更新的用户
-                user_ids = list(self.logic.last_chat_time.keys())
-                if user_ids:
-                    logger.info(f"Engram: Starting daily persona update for {len(user_ids)} users (max concurrent: {max_concurrent}, delay: {update_delay}s)")
-                    
-                    # 并发执行所有用户的画像更新（受信号量限制）
-                    tasks = [update_user_persona(user_id) for user_id in user_ids]
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    
-                    logger.info(f"Engram: Daily persona update completed for {len(user_ids)} users")
-                    
-            except Exception as e:
-                if not self.logic._is_shutdown:
-                    logger.error(f"Engram daily persona scheduler error: {e}")
-                await asyncio.sleep(60)  # 出错后短暂休眠再重试
-
-    async def background_worker(self):
-        """智能休眠：根据最早需要处理的时间动态调整检测间隔"""
-        while not self.logic._is_shutdown:
-            try:
-                # 计算下一次需要检测的时间
-                sleep_time = self._calculate_next_check_time()
-                await asyncio.sleep(sleep_time)
-                if self.logic._is_shutdown: break
-                await self.logic.check_and_summarize()
-            except Exception as e:
-                if not self.logic._is_shutdown:
-                    logger.error(f"Engram background worker error: {e}")
-
-    def _calculate_next_check_time(self) -> int:
-        """计算下一次检测的休眠时间（秒）"""
-        now_ts = time.time()
-        timeout = self.config.get("private_memory_timeout", 1800)
-        
-        # 如果没有活跃用户，休眠较长时间（5分钟）
-        if not self.logic.last_chat_time:
-            return 300
-        
-        # 找出最早需要触发归档的时间
-        earliest_trigger = float('inf')
-        for user_id, last_time in self.logic.last_chat_time.items():
-            if self.logic.unsaved_msg_count.get(user_id, 0) >= self.config.get("min_msg_count", 3):
-                trigger_time = last_time + timeout
-                earliest_trigger = min(earliest_trigger, trigger_time)
-        
-        if earliest_trigger == float('inf'):
-            # 有用户但消息数不够，每2分钟检测一次
-            return 120
-        
-        # 计算距离最早触发时间的秒数，最少30秒，最多5分钟
-        wait_seconds = max(30, min(300, int(earliest_trigger - now_ts) + 5))
-        return wait_seconds
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
@@ -212,6 +142,15 @@ class EngramPlugin(Star):
             inject_text = f"\n\n{profile_block}{memory_block}"
             if req.system_prompt: req.system_prompt += inject_text
             else: req.system_prompt = f"你是一个有记忆的助手。以下是关于用户的信息：{inject_text}"
+            
+            # 调试模式：输出注入的内容
+            if self.config.get("debug_injection", False):
+                logger.info(f"=== Engram 调试模式 [用户: {user_id}] ===")
+                if profile_block:
+                    logger.info(f"📋 注入的用户画像:\n{profile_block}")
+                if memory_block:
+                    logger.info(f"🧠 注入的长期记忆:\n{memory_block}")
+                logger.info(f"=== Engram 调试结束 ===")
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
@@ -377,30 +316,45 @@ class EngramPlugin(Star):
 
     @filter.command("mem_view")
     async def mem_view(self, event: AstrMessageEvent, index: str):
-        """查看指定序号记忆的完整对话原文"""
+        """查看指定序号或 ID 记忆的完整对话原文"""
         user_id = event.get_sender_id()
         
-        if not index.isdigit():
-            yield event.plain_result("⚠️ 请输入正确的序号，例如：/mem_view 1")
-            return
+        # 智能判断：数字且 ≤ 50 使用序号查看，否则使用 ID 查看
+        if index.isdigit():
+            seq = int(index)
+            if seq <= 0:
+                yield event.plain_result("⚠️ 序号必须大于 0。")
+                return
+            if seq > 50:
+                yield event.plain_result("⚠️ 序号超过 50，请使用记忆 ID 进行查看。")
+                return
             
-        seq = int(index)
-        if seq <= 0:
-             yield event.plain_result("⚠️ 序号必须大于 0。")
-             return
-
-        # 调用逻辑获取详情
-        memory_index, raw_msgs = await self.logic.get_memory_detail(user_id, seq)
+            # 按序号查看
+            memory_index, raw_msgs = await self.logic.get_memory_detail(user_id, seq)
+            display_label = f"序号 {seq}"
+        else:
+            # 按 ID 查看
+            if len(index) < 8:
+                yield event.plain_result("⚠️ 记忆 ID 至少需要 8 位，例如：/mem_view bdd54504")
+                return
+            
+            # 使用新的 API 按 ID 获取详情
+            memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(user_id, index)
+            
+            if not memory_index:
+                yield event.plain_result(f"❌ {raw_msgs}")  # raw_msgs 是错误消息
+                return
+            
+            display_label = f"ID {memory_index.index_id[:8]}"
         
         if not memory_index:
-            yield event.plain_result(raw_msgs) # 这里 raw_msgs 返回的是错误提示字符串
+            yield event.plain_result(raw_msgs)  # 这里 raw_msgs 返回的是错误提示字符串
             return
             
         # 格式化输出
-        # 确保时间戳是 datetime 对象
         created_at = self.logic._ensure_datetime(memory_index.created_at)
         result = [
-            f"📖 记忆详情 (序号 {seq})",
+            f"📖 记忆详情 ({display_label})",
             f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
             f"📝 归档：{memory_index.summary}",
             "————————————————",
@@ -717,5 +671,8 @@ class EngramPlugin(Star):
             yield result
 
     async def terminate(self):
+        # 先停止调度器，避免线程池已关闭时仍提交任务
+        if hasattr(self, "_scheduler"):
+            self._scheduler.shutdown()
         self.logic.shutdown()
         await self.profile_renderer.close()

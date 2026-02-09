@@ -504,10 +504,10 @@ class MemoryManager:
                 # 使用向量得分
                 relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
             
-            # 尝试通过链表获取"前情提要"
+            # 尝试通过链表获取"前情提要"（可配置开关）
             context_hint = ""
             db_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, index_id)
-            if db_index and db_index.prev_index_id:
+            if self.config.get("enable_memory_context_hint", True) and db_index and db_index.prev_index_id:
                 prev_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, db_index.prev_index_id)
                 if prev_index:
                     context_hint = f"（前情提要：{prev_index.summary[:50]}...）"
@@ -519,14 +519,16 @@ class MemoryManager:
                 # 获取该总结对应的所有原文
                 raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
                 
-                # 使用公共过滤方法，取前 3 条有效原文作为证据参考
+                # 使用公共过滤方法，取前 2 条有效原文作为证据参考
                 filtered_raw = [
-                    m.content[:30] for m in raw_msgs
+                    m.content[:60] for m in raw_msgs
                     if self._is_valid_message_content(m.content)
-                ][:3]
+                ][:2]
                 
                 if filtered_raw:
-                    raw_preview = "\n   └ 📄 相关原文：" + " | ".join(filtered_raw)
+                    raw_preview = "\n   └ 📄 相关原文：\n" + "\n".join(
+                        [f"      {i+1}) {text}" for i, text in enumerate(filtered_raw)]
+                    )
             
             # 添加 ID 信息（UUID 前 8 位）和相关性评分
             short_id = index_id[:8]
@@ -557,6 +559,51 @@ class MemoryManager:
         target_memory = memories[sequence_num - 1]
         
         # 3. 解析原文 UUID
+        if not target_memory.ref_uuids:
+            return target_memory, []
+            
+        uuids = json.loads(target_memory.ref_uuids)
+        raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
+        
+        return target_memory, raw_msgs
+    
+    async def get_memory_detail_by_id(self, user_id, short_id):
+        """
+        根据记忆 ID（短 ID 或完整 UUID）获取记忆详情
+        
+        Args:
+            user_id: 用户ID
+            short_id: 记忆ID（可以是前8位短ID或完整UUID）
+            
+        Returns:
+            (memory_index, raw_msgs) 或 (None, error_message)
+        """
+        loop = asyncio.get_event_loop()
+        
+        # 1. 查找匹配的记忆索引
+        def _find_memory():
+            with self.db.db.connection_context():
+                from ..db_manager import MemoryIndex
+                # 如果是短ID（8位），查找匹配的完整UUID
+                if len(short_id) == 8:
+                    query = MemoryIndex.select().where(
+                        (MemoryIndex.user_id == user_id) &
+                        (MemoryIndex.index_id.startswith(short_id))
+                    )
+                else:
+                    # 完整UUID
+                    query = MemoryIndex.select().where(
+                        (MemoryIndex.user_id == user_id) &
+                        (MemoryIndex.index_id == short_id)
+                    )
+                return query.first()
+        
+        target_memory = await loop.run_in_executor(self.executor, _find_memory)
+        
+        if not target_memory:
+            return None, f"找不到 ID 为 {short_id} 的记忆，请确认 ID 是否正确。"
+        
+        # 2. 解析原文 UUID
         if not target_memory.ref_uuids:
             return target_memory, []
             
@@ -648,7 +695,7 @@ class MemoryManager:
                 # 不删除原始消息时，将其标记为未归档，以便重新总结
                 if deleted_uuids:
                     def _mark_unarchived():
-                        from .db_manager import RawMemory
+                        from ..db_manager import RawMemory
                         with self.db.db.connection_context():
                             RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
                     await loop.run_in_executor(self.executor, _mark_unarchived)
@@ -725,7 +772,7 @@ class MemoryManager:
             # 3. 恢复原始消息的归档状态
             if delete_record['deleted_uuids']:
                 def _mark_archived():
-                    from .db_manager import RawMemory
+                    from ..db_manager import RawMemory
                     with self.db.db.connection_context():
                         RawMemory.update(is_archived=True).where(
                             RawMemory.uuid << delete_record['deleted_uuids']
@@ -760,7 +807,7 @@ class MemoryManager:
         # 1. 查找匹配的记忆索引
         def _find_memory():
             with self.db.db.connection_context():
-                from .db_manager import MemoryIndex
+                from ..db_manager import MemoryIndex
                 # 如果是短ID（8位），查找匹配的完整UUID
                 if len(short_id) == 8:
                     query = MemoryIndex.select().where(

@@ -17,7 +17,7 @@ class MemoryScheduler:
         初始化调度器
         
         Args:
-            logic: MemoryLogic 实例
+            logic: MemoryFacade 或 MemoryLogic 实例
             config: 配置对象
         """
         self.logic = logic
@@ -40,7 +40,7 @@ class MemoryScheduler:
                 # 计算下一次需要检测的时间
                 sleep_time = self._calculate_next_check_time()
                 await asyncio.sleep(sleep_time)
-                if self._is_shutdown:
+                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
                     break
                 await self.logic.check_and_summarize()
             except Exception as e:
@@ -85,7 +85,7 @@ class MemoryScheduler:
                 logger.info(f"Engram: Daily persona update scheduled in {sleep_seconds/3600:.1f} hours")
                 await asyncio.sleep(sleep_seconds)
                 
-                if self._is_shutdown:
+                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
                     break
                 
                 # 执行画像更新 - 带并发控制和延迟
