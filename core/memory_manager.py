@@ -635,6 +635,20 @@ class MemoryManager:
                 relevance_badge = ""
             
             all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
+        
+        # 6. Reinforce：被成功召回的记忆增强 active_score
+        reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
+        if all_memories and reinforce_bonus > 0:
+            for data in memory_data:
+                try:
+                    await loop.run_in_executor(
+                        self.executor,
+                        self.db.update_active_score,
+                        data['index_id'],
+                        reinforce_bonus
+                    )
+                except Exception as e:
+                    logger.debug(f"Engram: Failed to reinforce memory {data['index_id'][:8]}: {e}")
             
         return all_memories
     

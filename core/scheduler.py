@@ -30,7 +30,8 @@ class MemoryScheduler:
         # 保存任务引用，以便关闭时取消
         task1 = asyncio.create_task(self.background_worker())
         task2 = asyncio.create_task(self.daily_persona_scheduler())
-        self._tasks.extend([task1, task2])
+        task3 = asyncio.create_task(self.daily_memory_maintenance())
+        self._tasks.extend([task1, task2, task3])
     
     def shutdown(self):
         """停止调度器（设置关闭标志）"""
@@ -206,3 +207,90 @@ class MemoryScheduler:
             await asyncio.gather(*tasks, return_exceptions=True)
             
             logger.info(f"Engram: Daily persona update completed for {len(user_ids)} users")
+
+    # ========== 记忆衰减与修剪 ==========
+
+    async def daily_memory_maintenance(self):
+        """每日记忆维护：衰减 active_score + 修剪冷记忆（在凌晨 01:00 执行，避开画像更新）"""
+        while not self._is_shutdown:
+            try:
+                # 计算距离下一个 01:00 的秒数
+                now = datetime.datetime.now()
+                next_run = now.replace(hour=1, minute=0, second=0, microsecond=0)
+                if now >= next_run:
+                    next_run += datetime.timedelta(days=1)
+                sleep_seconds = (next_run - now).total_seconds()
+
+                logger.info(f"Engram: Memory maintenance scheduled in {sleep_seconds/3600:.1f} hours")
+                await asyncio.sleep(sleep_seconds)
+
+                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                    break
+                if getattr(self.logic.executor, "_shutdown", False):
+                    self._is_shutdown = True
+                    break
+
+                await self._execute_memory_maintenance()
+
+            except asyncio.CancelledError:
+                logger.debug("Engram: Memory maintenance task cancelled")
+                break
+            except Exception as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    self._is_shutdown = True
+                    break
+                if not self._is_shutdown:
+                    logger.error(f"Engram memory maintenance error: {e}")
+                await asyncio.sleep(60)
+
+    async def _execute_memory_maintenance(self):
+        """执行衰减 + 修剪"""
+        loop = asyncio.get_event_loop()
+
+        enable_decay = self.config.get("enable_memory_decay", True)
+        decay_rate = self.config.get("memory_decay_rate", 1)
+        enable_prune = self.config.get("enable_memory_prune", True)
+        prune_threshold = self.config.get("memory_prune_threshold", 0)
+
+        # 1. Decay：全局衰减
+        if enable_decay and decay_rate > 0:
+            try:
+                await loop.run_in_executor(
+                    self.logic.executor,
+                    self.logic.db.decay_active_scores,
+                    decay_rate
+                )
+                logger.info(f"Engram: Decayed all memory active_scores by {decay_rate}")
+            except Exception as e:
+                logger.error(f"Engram: Memory decay failed: {e}")
+
+        # 2. Prune：从 ChromaDB 删除冷记忆（SQLite 保留）
+        if enable_prune:
+            try:
+                cold_ids = await loop.run_in_executor(
+                    self.logic.executor,
+                    self.logic.db.get_cold_memory_ids,
+                    prune_threshold
+                )
+                if cold_ids:
+                    # 确保 ChromaDB 已初始化
+                    await self.logic._ensure_chroma_initialized()
+                    
+                    # 批量从 ChromaDB 删除（每批最多 100 条，避免单次操作过大）
+                    pruned = 0
+                    for i in range(0, len(cold_ids), 100):
+                        batch = cold_ids[i:i+100]
+                        try:
+                            await loop.run_in_executor(
+                                self.logic.executor,
+                                lambda ids=batch: self.logic.collection.delete(ids=ids)
+                            )
+                            pruned += len(batch)
+                        except Exception as e:
+                            logger.warning(f"Engram: Failed to prune batch {i//100+1}: {e}")
+
+                    logger.info(f"Engram: Pruned {pruned}/{len(cold_ids)} cold memories from ChromaDB (threshold={prune_threshold})")
+                else:
+                    logger.debug("Engram: No cold memories to prune")
+            except Exception as e:
+                logger.error(f"Engram: Memory prune failed: {e}")

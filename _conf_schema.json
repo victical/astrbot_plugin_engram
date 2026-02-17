@@ -180,5 +180,56 @@
     "type": "list",
     "default": ["new", "help", "reset", "clear"],
     "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
+  },
+  "memory_intent_mode": {
+    "description": "记忆检索意图过滤模式",
+    "type": "string",
+    "options": ["disabled", "keyword", "llm"],
+    "labels": ["禁用（每条消息都检索）", "关键词匹配（零成本）", "LLM 小模型判断（高精度）"],
+    "default": "keyword",
+    "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
+  },
+  "intent_llm_model": {
+    "description": "意图判断使用的模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "仅在意图过滤模式为 llm 时生效。选择一个低成本小模型来判断是否需要检索记忆。留空则依次尝试归档模型、默认模型。"
+  },
+  "intent_min_length": {
+    "description": "意图触发最小文本长度",
+    "type": "int",
+    "default": 4,
+    "hint": "过滤极短的无意义文本。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
+  },
+  "enable_memory_decay": {
+    "description": "启用记忆衰减",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，每日凌晨自动降低所有记忆的活跃度评分。长期未被召回的记忆会逐渐被遗忘（从向量库移除但保留在数据库中）。"
+  },
+  "memory_decay_rate": {
+    "description": "每日衰减速率",
+    "type": "int",
+    "default": 1,
+    "hint": "每天从所有记忆的 active_score 中减去的分数。默认值 1 表示 100 天不被召回的记忆将被修剪。"
+  },
+  "memory_reinforce_bonus": {
+    "description": "记忆召回增强分数",
+    "type": "int",
+    "default": 20,
+    "hint": "当一条记忆被成功检索并返回给用户时，其 active_score 会增加此值。较高的值使经常被召回的记忆更难被遗忘。"
+  },
+  "enable_memory_prune": {
+    "description": "启用冷记忆修剪",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，active_score 降至阈值以下的记忆将从 ChromaDB 向量库中移除（节省存储和检索性能），但原始数据保留在 SQLite 中用于导出和考古。"
+  },
+  "memory_prune_threshold": {
+    "description": "修剪阈值",
+    "type": "int",
+    "default": 0,
+    "hint": "active_score 小于等于此值的记忆将被从向量库中修剪。默认值 0，配合衰减速率 1，意味着约 100 天未被召回的记忆会被修剪。"
   }
 }

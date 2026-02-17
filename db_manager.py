@@ -111,12 +111,19 @@ class DatabaseManager:
             ))
 
     def decay_active_scores(self, decay_rate=1):
+        """全局衰减所有记忆的 active_score"""
         with self.db.connection_context():
             MemoryIndex.update(active_score=MemoryIndex.active_score - decay_rate).execute()
 
     def update_active_score(self, index_id, bonus=10):
+        """给指定记忆加分（被召回时增强）"""
         with self.db.connection_context():
             MemoryIndex.update(active_score=MemoryIndex.active_score + bonus).where(MemoryIndex.index_id == index_id).execute()
+
+    def get_cold_memory_ids(self, threshold=0):
+        """获取 active_score <= threshold 的记忆 ID 列表（用于从 ChromaDB 修剪）"""
+        with self.db.connection_context():
+            return [m.index_id for m in MemoryIndex.select(MemoryIndex.index_id).where(MemoryIndex.active_score <= threshold)]
 
     def delete_memory_index(self, index_id):
         """删除单条总结记忆索引"""
@@ -187,6 +194,11 @@ class DatabaseManager:
                 query = query.limit(limit)
             
             return list(query)
+
+    def get_all_user_ids(self):
+        """获取所有出现过的用户ID"""
+        with self.db.connection_context():
+            return [row.user_id for row in RawMemory.select(RawMemory.user_id).distinct()]
     
     def get_all_users_stats(self):
         """获取所有用户的统计信息"""

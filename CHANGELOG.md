@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-02-17
+
+### Added
+- **仿生遗忘机制**：active_score 衰减 + 召回增强 + 冷记忆修剪
+  - Decay：每日凌晨 01:00 全局衰减所有记忆的 active_score（默认 -1/天）
+  - Reinforce：被成功召回的记忆获得 active_score 加分（默认 +20）
+  - Prune：active_score ≤ 0 的冷记忆从 ChromaDB 物理删除，SQLite 保留用于导出和考古
+  - 新增配置项：`enable_memory_decay`、`memory_decay_rate`、`memory_reinforce_bonus`、`enable_memory_prune`、`memory_prune_threshold`
+- 新增 `db_manager.get_cold_memory_ids()` 方法
+- 新增 `MemoryScheduler.daily_memory_maintenance()` 后台任务
+
 ## [1.4.0] - 2026-02-17
 
 ### Added
