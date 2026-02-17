@@ -5,5 +5,6 @@
 
 from .bond_calculator import BondCalculator
 from .llm_injector import LLMContextInjector
+from .intent_classifier import IntentClassifier
 
-__all__ = ['BondCalculator', 'LLMContextInjector']
+__all__ = ['BondCalculator', 'LLMContextInjector', 'IntentClassifier']

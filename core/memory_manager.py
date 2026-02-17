@@ -147,13 +147,12 @@ class MemoryManager:
             return datetime.datetime.fromtimestamp(timestamp)
         return timestamp
     
-    @staticmethod
-    def _is_valid_message_content(content: str) -> bool:
+    def _is_valid_message_content(self, content: str) -> bool:
         """
         统一的消息内容过滤逻辑，用于判断消息是否应被纳入归档/检索。
         
         过滤规则：
-        1. 以常见指令前缀开头的消息
+        1. 以配置的指令前缀开头的消息
         2. 带下划线且无空格的内部指令
         3. 中文字符不足2个且总长度不足10的短消息
         
@@ -161,9 +160,14 @@ class MemoryManager:
         """
         content = content.strip()
         
-        # 1. 过滤以常见指令前缀开头的消息
-        if content.startswith(('/', '#', '~', '!', '！', '／', '&', '*')):
-            return False
+        # 1. 过滤以配置的指令前缀开头的消息
+        if self.config.get("enable_command_filter", True):
+            command_prefixes = self.config.get("command_prefixes", ["/", "!", "#", "~"])
+            if isinstance(command_prefixes, str):
+                command_prefixes = [command_prefixes]
+            command_prefixes = [str(p) for p in command_prefixes if str(p)]
+            if command_prefixes and content.startswith(tuple(command_prefixes)):
+                return False
         
         # 2. 专门清洗带下划线的内部指令
         if "_" in content and " " not in content:
@@ -246,18 +250,108 @@ class MemoryManager:
                 timestamp = datetime.datetime.fromtimestamp(timestamp)
             return timestamp.date()
             
+        # 仅查询一次最近的记忆索引，构建新批次的链表
+        last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
+        prev_index_id = last_index.index_id if last_index else None
+
+        batch_add = {
+            "ids": [],
+            "documents": [],
+            "metadatas": []
+        }
+        index_params_list = []
+        archive_uuids_forced = []
+        archive_uuids_summarized = []
+
         for date_key, group in groupby(raw_msgs, key=get_date_key):
             # 将 group 转为列表，因为 groupby 的迭代器只能用一次
             group_msgs = list(group)
+            ref_uuids = [m.uuid for m in group_msgs]
             
             # 检查是否超过回溯天数限制
             if cutoff_date and date_key < cutoff_date:
                 # 超过限制，直接标记为已归档，不进行总结
-                ref_uuids = [m.uuid for m in group_msgs]
-                await loop.run_in_executor(self.executor, self.db.mark_as_archived, ref_uuids)
+                archive_uuids_forced.extend(ref_uuids)
                 continue
                 
-            await self._process_single_summary_batch(user_id, group_msgs, date_key)
+            summary_result = await self._process_single_summary_batch(user_id, group_msgs, date_key)
+            if not summary_result:
+                continue
+
+            summary = summary_result.get("summary")
+            if not summary:
+                if summary_result.get("archive", False):
+                    archive_uuids_forced.extend(summary_result.get("ref_uuids", ref_uuids))
+                continue
+
+            created_at = summary_result["created_at"]
+            ref_uuids = summary_result["ref_uuids"]
+
+            index_id = str(uuid.uuid4())
+            ai_name = self.config.get("ai_name", "助手")
+            batch_add["ids"].append(index_id)
+            batch_add["documents"].append(summary)
+            batch_add["metadatas"].append({
+                "user_id": user_id,
+                "source_type": "private",
+                "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "ai_name": ai_name
+            })
+
+            index_params_list.append({
+                "index_id": index_id,
+                "summary": summary,
+                "ref_uuids": json.dumps(ref_uuids),
+                "prev_index_id": prev_index_id,
+                "source_type": "private",
+                "user_id": user_id,
+                "created_at": created_at
+            })
+            prev_index_id = index_id
+            archive_uuids_summarized.extend(ref_uuids)
+
+        # 先归档无需总结的消息
+        if archive_uuids_forced:
+            await loop.run_in_executor(self.executor, self.db.mark_as_archived, archive_uuids_forced)
+
+        if not batch_add["ids"]:
+            return
+
+        max_retries = 3
+        retry_delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 确保 ChromaDB 已初始化
+                await self._ensure_chroma_initialized()
+                # 批量写入向量数据
+                await loop.run_in_executor(self.executor, lambda: self.collection.add(**batch_add))
+                logger.info(
+                    "Engram: Batch add %d memories for user %s",
+                    len(batch_add["ids"]),
+                    user_id
+                )
+                break
+            except Exception as e:
+                if attempt >= max_retries:
+                    logger.error(f"Save summarization error: {e}")
+                    return
+                logger.warning(
+                    "Engram: Batch add failed (attempt %d/%d), retrying in %ss: %s",
+                    attempt,
+                    max_retries,
+                    retry_delay,
+                    e
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+
+        # 批量写入索引（逐条写入 SQLite）
+        for index_params in index_params_list:
+            await loop.run_in_executor(self.executor, lambda p=index_params: self.db.save_memory_index(**p))
+
+        # 归档已总结的消息
+        if archive_uuids_summarized:
+            await loop.run_in_executor(self.executor, self.db.mark_as_archived, archive_uuids_summarized)
     
     async def _process_single_summary_batch(self, user_id, raw_msgs, date_key):
         """处理单批次（单日）消息的总结"""
@@ -269,8 +363,12 @@ class MemoryManager:
         if not filtered_msgs:
             # 如果没有符合条件的消息，也标记原本的所有消息为已归档
             ref_uuids = [m.uuid for m in raw_msgs]
-            await loop.run_in_executor(self.executor, self.db.mark_as_archived, ref_uuids)
-            return
+            return {
+                "summary": None,
+                "created_at": None,
+                "ref_uuids": ref_uuids,
+                "archive": True
+            }
 
         # 构造对话文本
         chat_lines = [f"【日期：{date_key.strftime('%Y-%m-%d')}】"]
@@ -321,69 +419,47 @@ class MemoryManager:
         
         if not full_content or len(full_content) < 5:
             logger.error(f"Failed to summarize chat for user {user_id} after {max_retries} attempts.")
-            return
+            return None
 
-        # 解析日记和画像
+        # 总结仅用于归档，不在此处做画像更新
         summary = full_content
-        persona_update = {}
-        if "[JSON_START]" in full_content and "[JSON_END]" in full_content:
+
+        ref_uuids = [m.uuid for m in raw_msgs]
+        created_at = self._ensure_datetime(raw_msgs[-1].timestamp)
+
+        return {
+            "summary": summary,
+            "created_at": created_at,
+            "ref_uuids": ref_uuids,
+            "archive": False
+        }
+
+    async def summarize_all_users(self):
+        """强制归档所有用户的未归档消息"""
+        loop = asyncio.get_event_loop()
+        user_ids = await loop.run_in_executor(self.executor, self.db.get_all_user_ids)
+        if not user_ids:
+            return 0
+
+        summarized = 0
+        for uid in user_ids:
+            if self._is_shutdown or getattr(self.executor, "_shutdown", False):
+                logger.debug("Engram: Global summarize aborted due to shutdown")
+                break
+
+            # 跳过空值或系统内置账号
+            if uid is None:
+                continue
+            uid_str = str(uid).lower()
+            if uid_str in {"system", "astrbot"}:
+                continue
+
             try:
-                summary = full_content.split("[JSON_START]")[0].strip()
-                json_str = full_content.split("[JSON_START]")[1].split("[JSON_END]")[0].strip()
-                persona_update = json.loads(json_str)
-                # 实时更新画像
-                if persona_update and self.profile_manager:
-                    await self.profile_manager.update_user_profile(user_id, persona_update)
+                await self._summarize_private_chat(uid)
+                summarized += 1
             except Exception as e:
-                logger.error(f"Failed to parse persona update: {e}")
-            
-        try:
-            # 确保 ChromaDB 已初始化
-            await self._ensure_chroma_initialized()
-            
-            # 3. 存入 ChromaDB 和 SQLite Index
-            index_id = str(uuid.uuid4())
-            ref_uuids = [m.uuid for m in raw_msgs] # 注意：归档标记原始的所有消息
-            
-            # 使用该批次最后一条消息的时间作为归档时间，确保历史重构时的顺序正确
-            # 确保时间戳是 datetime 对象
-            created_at = self._ensure_datetime(raw_msgs[-1].timestamp)
-            
-            # 获取前一条记忆索引，形成链表（时间线）
-            last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
-            prev_index_id = last_index.index_id if last_index else None
-            
-            # 向量化存储（使用配置的 AI 名称）
-            ai_name = self.config.get("ai_name", "助手")
-            add_params = {
-                "ids": [index_id],
-                "documents": [summary],
-                "metadatas": [{
-                    "user_id": user_id,
-                    "source_type": "private",
-                    "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    "ai_name": ai_name
-                }]
-            }
-            await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
-            
-            # 索引存储
-            index_params = {
-                "index_id": index_id,
-                "summary": summary,
-                "ref_uuids": json.dumps(ref_uuids),
-                "prev_index_id": prev_index_id, # 链接到前一条
-                "source_type": "private",
-                "user_id": user_id,
-                "created_at": created_at
-            }
-            await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
-            
-            # 4. 标记这些消息为已归档，防止重复总结
-            await loop.run_in_executor(self.executor, self.db.mark_as_archived, ref_uuids)
-            
-        except Exception as e:
-            logger.error(f"Save summarization error: {e}")
+                logger.error(f"Engram: Force summarize failed for {uid}: {e}")
+        return summarized
     
     # ========== 记忆检索 ==========
     
@@ -419,16 +495,17 @@ class MemoryManager:
             match = re.search(r'\(([\d.]+)\)', str(weight_config))
             keyword_boost_weight = float(match.group(1)) if match else 0.5
         
-        # 2. 预处理结果并计算关键词匹配度
+        # 2. 预处理结果并计算关键词匹配度（BM25 风格）
         distances = results.get('distances', [[]])[0] if 'distances' in results else []
         memory_data = []
         
-        # 提取查询关键词（简单分词：按空格和标点分割）
-        query_keywords = set()
-        query_for_keywords = query
-        for char in ['，', '。', '！', '？', '、', ' ', ',', '.', '!', '?']:
-            query_for_keywords = query_for_keywords.replace(char, ' ')
-        query_keywords = set([w.strip().lower() for w in query_for_keywords.split() if len(w.strip()) > 0])
+        # 提取查询关键词（正则一次性分割：匹配所有非单词字符）
+        query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
+        
+        # BM25 参数
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80  # 摘要的典型长度估计
         
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
@@ -442,44 +519,57 @@ class MemoryManager:
             summary = results['documents'][0][i]
             metadata = results['metadatas'][0][i]
             
-            # 计算关键词匹配度（关键词在summary中出现的次数）
-            keyword_score = 0
+            # BM25 风格关键词匹配：TF 饱和 + 文档长度归一化
+            keyword_score = 0.0
             summary_lower = summary.lower()
-            for keyword in query_keywords:
-                # 精确匹配得分更高
-                if keyword in summary_lower:
-                    # 统计出现次数
-                    count = summary_lower.count(keyword)
-                    keyword_score += count * len(keyword)  # 长关键词权重更高
+            doc_len = max(1, len(summary_lower))
             
-            # 归一化关键词得分（0-1之间）
-            keyword_score_normalized = min(1.0, keyword_score / max(1, len(query) * 2))
+            for keyword in query_keywords:
+                if keyword in summary_lower:
+                    tf = summary_lower.count(keyword)
+                    # BM25 TF 饱和公式：高频词收益递减
+                    norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+                    # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
+                    keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
+                    keyword_score += norm_tf * keyword_weight
             
             memory_data.append({
                 'index_id': index_id,
                 'summary': summary,
                 'metadata': metadata,
                 'distance': distance,
-                'keyword_score': keyword_score_normalized
+                'keyword_score': keyword_score
             })
         
-        # 3. 混合排序：结合向量相似度和关键词匹配度
-        if enable_keyword_boost and query_keywords:
-            # 计算综合得分（距离越小越好，关键词得分越高越好）
-            for data in memory_data:
-                # 向量得分：将距离转换为0-1的得分（距离越小得分越高）
-                vector_score = max(0, 1 - data['distance'] / 2.0)
-                
-                # 综合得分 = 向量得分 * (1 - weight) + 关键词得分 * weight
-                data['combined_score'] = (
-                    vector_score * (1 - keyword_boost_weight) +
-                    data['keyword_score'] * keyword_boost_weight
-                )
+        # 3. RRF (Reciprocal Rank Fusion) 融合排序
+        #    RRF_score(d) = w_v / (k + rank_vector(d)) + w_k / (k + rank_keyword(d))
+        #    k=60 是标准值，keyword_boost_weight 控制两路信号的权重比例
+        rrf_k = 60
+        
+        if enable_keyword_boost and query_keywords and len(memory_data) > 1:
+            vector_w = 1.0 - keyword_boost_weight
+            keyword_w = keyword_boost_weight
             
-            # 按综合得分排序（得分越高越靠前）
-            memory_data.sort(key=lambda x: x['combined_score'], reverse=True)
+            # 按向量距离排名（距离越小排名越靠前，rank 从 1 开始）
+            sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
+            vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
+            
+            # 按关键词得分排名（得分越高排名越靠前）
+            sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
+            keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
+            
+            # 计算 RRF 融合得分
+            for i, data in enumerate(memory_data):
+                rrf_vector = vector_w / (rrf_k + vector_rank[i])
+                rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
+                data['rrf_score'] = rrf_vector + rrf_keyword
+            
+            # 按 RRF 得分排序（得分越高越靠前）
+            memory_data.sort(key=lambda x: x['rrf_score'], reverse=True)
         else:
-            # 仅按向量距离排序
+            # 纯向量模式或无关键词：退化为按距离排序
+            for data in memory_data:
+                data['rrf_score'] = max(0, 1 - data['distance'] / 2.0)
             memory_data.sort(key=lambda x: x['distance'])
         
         # 4. 只保留前 limit 条
@@ -497,11 +587,16 @@ class MemoryManager:
             created_at = metadata.get("created_at", "未知时间")
             
             # 计算显示的相关性百分比
-            if enable_keyword_boost and query_keywords:
-                # 使用综合得分
-                relevance_percent = int(data['combined_score'] * 100)
+            # 用向量距离做"绝对质量"惩罚：距离越大，分数打折越多
+            quality_factor = max(0.0, 1.5 - distance) / 1.5
+            
+            if enable_keyword_boost and query_keywords and memory_data:
+                # RRF 模式：相对于最佳结果归一化，再乘以质量因子
+                best_rrf = memory_data[0].get('rrf_score', 1e-9)
+                raw_percent = data.get('rrf_score', 0) / max(best_rrf, 1e-9) * 100
+                relevance_percent = max(0, min(100, int(raw_percent * quality_factor)))
             else:
-                # 使用向量得分
+                # 纯向量模式
                 relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
             
             # 尝试通过链表获取"前情提要"（可配置开关）

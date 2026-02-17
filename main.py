@@ -8,7 +8,7 @@ from .core import MemoryFacade, MemoryScheduler
 from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler
 from .export_handler import ExportHandler
 from .profile_renderer import ProfileRenderer
-from .services import LLMContextInjector
+from .services import LLMContextInjector, IntentClassifier
 from .utils import get_constellation, get_zodiac, get_career
 
 import asyncio
@@ -17,7 +17,7 @@ import datetime
 import time
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.3.1")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.3.3")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -50,6 +50,7 @@ class EngramPlugin(Star):
         )
         self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager)
         self._llm_injector = LLMContextInjector()
+        self._intent_classifier = IntentClassifier(config=self.config, context=context)
         
         # 初始化调度器
         self._scheduler = MemoryScheduler(self.logic, config)
@@ -132,11 +133,14 @@ class EngramPlugin(Star):
             status = social.get("relationship_status", "萍水相逢")
             profile_block += f"- 当前羁绊: {status}\n\n【交互指令】\n请基于以上档案事实，以最契合用户期望的方式与其交流。\n"
         
-        memories = await self.logic.retrieve_memories(user_id, query)
         memory_block = ""
-        if memories:
-            memory_prompt = "\n".join(memories)
-            memory_block = f"【长期记忆回溯】：\n{memory_prompt}\n"
+        if await self._intent_classifier.should_retrieve_memory(query):
+            memories = await self.logic.retrieve_memories(user_id, query)
+            if memories:
+                memory_prompt = "\n".join(memories)
+                memory_block = f"【长期记忆回溯】：\n{memory_prompt}\n"
+        else:
+            logger.debug(f"Engram: Skipping memory retrieval for trivial query: {query[:30]}")
         
         if profile_block or memory_block:
             inject_text = f"\n\n{profile_block}{memory_block}"
@@ -616,6 +620,14 @@ class EngramPlugin(Star):
         yield event.plain_result("⏳ 正在强制执行记忆归档，请稍候...")
         await self.logic._summarize_private_chat(user_id)
         yield event.plain_result("✅ 记忆归档完成。您可以使用 /mem_list 查看。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("engram_force_summarize_all")
+    async def force_summarize_all(self, event: AstrMessageEvent):
+        """[管理员] 立即对所有用户未处理对话进行记忆归档"""
+        yield event.plain_result("⏳ 正在强制执行全局记忆归档，请稍候...")
+        total = await self.logic.summarize_all_users()
+        yield event.plain_result(f"✅ 全局记忆归档完成。已处理 {total} 位用户。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_persona")

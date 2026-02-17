@@ -92,6 +92,27 @@
     "default": 5,
     "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
   },
+  "memory_intent_mode": {
+    "description": "记忆检索意图过滤模式",
+    "type": "string",
+    "options": ["disabled", "keyword", "llm"],
+    "labels": ["禁用（每条消息都检索）", "关键词匹配（零成本）", "LLM 小模型判断（高精度）"],
+    "default": "keyword",
+    "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
+  },
+  "intent_llm_model": {
+    "description": "意图判断使用的模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "仅在意图过滤模式为 llm 时生效。选择一个低成本小模型来判断是否需要检索记忆。留空则依次尝试归档模型、默认模型。"
+  },
+  "intent_min_length": {
+    "description": "意图触发最小文本长度",
+    "type": "int",
+    "default": 4,
+    "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
+  },
   "memory_similarity_threshold": {
     "description": "记忆检索相关性阈值",
     "type": "float",
@@ -117,12 +138,12 @@
     "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
   },
   "keyword_boost_weight": {
-    "description": "关键词匹配权重",
+    "description": "RRF 融合权重（关键词 vs 向量）",
     "type": "string",
     "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
-    "labels": ["纯向量模式", "向量优先", "均衡模式", "关键词优先", "纯关键词模式"],
+    "labels": ["纯向量模式", "向量优先", "均衡融合（推荐）", "关键词优先", "纯关键词模式"],
     "default": "0.5",
-    "hint": "选择搜索排序策略：向量模式适合语义搜索，关键词模式适合精确匹配，均衡模式兼顾两者。"
+    "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
   },
   "pillowmd_style_path": {
     "description": "PillowMD 样式目录路径",
