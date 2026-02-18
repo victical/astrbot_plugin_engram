@@ -70,6 +70,33 @@ class DatabaseManager:
         self.db.create_tables([RawMemory, MemoryIndex])
         self.db.close()
 
+    def get_summaries_by_type(self, user_id, source_type, days=7):
+        """按时间倒序拉取指定类型的记忆索引"""
+        since_time = datetime.datetime.now() - datetime.timedelta(days=days)
+        with self.db.connection_context():
+            query = MemoryIndex.select().where(
+                (MemoryIndex.user_id == user_id)
+                & (MemoryIndex.created_at >= since_time)
+            )
+            if isinstance(source_type, (list, tuple, set)):
+                query = query.where(MemoryIndex.source_type.in_(list(source_type)))
+            else:
+                query = query.where(MemoryIndex.source_type == source_type)
+            return list(query.order_by(MemoryIndex.created_at.desc()))
+
+    def decay_scores_by_ids(self, index_ids, decay_amount=50):
+        """指定记忆列表原子减分（active_score 不低于 0）"""
+        if not index_ids:
+            return 0
+        with self.db.connection_context():
+            return (
+                MemoryIndex.update(
+                    active_score=fn.MAX(0, MemoryIndex.active_score - decay_amount)
+                )
+                .where(MemoryIndex.index_id << index_ids)
+                .execute()
+            )
+
     def save_raw_memory(self, **kwargs):
         with self.db.connection_context():
             return RawMemory.create(**kwargs)
@@ -119,9 +146,9 @@ class DatabaseManager:
             ))
 
     def decay_active_scores(self, decay_rate=1):
-        """全局衰减所有记忆的 active_score"""
+        """全局衰减所有记忆的 active_score（不低于 0）"""
         with self.db.connection_context():
-            MemoryIndex.update(active_score=MemoryIndex.active_score - decay_rate).execute()
+            MemoryIndex.update(active_score=fn.MAX(0, MemoryIndex.active_score - decay_rate)).execute()
 
     def update_active_score(self, index_id, bonus=10):
         """给指定记忆加分（被召回时增强）"""

@@ -153,8 +153,9 @@ class MemoryManager:
         
         过滤规则：
         1. 以配置的指令前缀开头的消息
-        2. 带下划线且无空格的内部指令
-        3. 中文字符不足2个且总长度不足10的短消息
+        2. 去掉前缀后的指令文本（命令词命中）
+        3. 带下划线且无空格的内部指令
+        4. 中文字符不足2个且总长度不足10的短消息
         
         返回 True 表示消息有效，False 表示应被过滤。
         """
@@ -166,14 +167,75 @@ class MemoryManager:
             if isinstance(command_prefixes, str):
                 command_prefixes = [command_prefixes]
             command_prefixes = [str(p) for p in command_prefixes if str(p)]
-            if command_prefixes and content.startswith(tuple(command_prefixes)):
+            prefix_tuple = tuple(command_prefixes)
+
+            # 激进过滤：遍历每一行，只要有任何一行以指令前缀开头，就视为整句是指令
+            lines = content.splitlines()
+            for raw_line in lines:
+                line = raw_line.lstrip()
+                if not line: continue
+                
+                # 直接以前缀开头
+                if prefix_tuple and line.startswith(prefix_tuple):
+                    return False
+                
+                # 兼容“昵称: /指令”格式
+                for sep in (":", "："):
+                    if sep in line:
+                        after_sep = line.split(sep, 1)[1].lstrip()
+                        if prefix_tuple and after_sep.startswith(prefix_tuple):
+                            return False
+
+            # 2. 过滤可能被框架去掉前缀的指令文本
+            normalized = " ".join(content.split()).lower()
+            tokens = normalized.split(" ") if normalized else []
+            cmd = tokens[0] if tokens else ""
+            sub = tokens[1] if len(tokens) > 1 else ""
+            known_commands = {
+                "mem_list",
+                "mem_view",
+                "mem_search",
+                "mem_delete",
+                "mem_delete_all",
+                "mem_undo",
+                "mem_clear_raw",
+                "mem_clear_archive",
+                "mem_clear_all",
+                "mem_export",
+                "mem_stats",
+                "mem_export_all",
+                "engram_force_summarize",
+                "engram_force_summarize_all",
+                "engram_force_persona",
+            }
+            if cmd in known_commands:
                 return False
+            if cmd == "profile" and sub in {"show", "set", "clear"}:
+                return False
+
+            if self.config.get("enable_full_command_detection", False):
+                full_cmds = self.config.get("full_command_list", [])
+                if isinstance(full_cmds, str):
+                    full_cmds = [full_cmds]
+                cleaned = content.strip().lower()
+                if cleaned in [str(c).lower() for c in full_cmds if c]:
+                    return False
         
-        # 2. 专门清洗带下划线的内部指令
+        # 3. 【新增】正则表达式高级过滤（处理 "provider 3" 这种动态参数指令）
+        if self.config.get("enable_regex_filter", True):
+            regex_list = self.config.get("regex_filter_list", ["^provider\\s+\\d+$"])
+            for pattern in regex_list:
+                try:
+                    if re.search(pattern, content.strip(), re.IGNORECASE):
+                        return False
+                except re.error:
+                    continue  # 忽略错误的正则表达式
+        
+        # 4. 专门清洗带下划线的内部指令
         if "_" in content and " " not in content:
             return False
         
-        # 3. 统计中文数量或检查总长度
+        # 5. 统计中文数量或检查总长度
         chinese_chars = _CHINESE_PATTERN.findall(content)
         if len(chinese_chars) < 2 and len(content) < 10:
             return False
@@ -184,6 +246,10 @@ class MemoryManager:
     
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
         """记录原始消息"""
+        # 【强制前置过滤】：如果是用户消息且不合法（比如指令），直接丢弃，绝对不进数据库！
+        if role == "user" and not self._is_valid_message_content(content):
+            return
+        
         msg_uuid = str(uuid.uuid4())
         
         # 异步保存到 SQLite
@@ -293,7 +359,7 @@ class MemoryManager:
             batch_add["documents"].append(summary)
             batch_add["metadatas"].append({
                 "user_id": user_id,
-                "source_type": "private",
+                "source_type": "daily_summary",
                 "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "ai_name": ai_name
             })
@@ -303,7 +369,7 @@ class MemoryManager:
                 "summary": summary,
                 "ref_uuids": json.dumps(ref_uuids),
                 "prev_index_id": prev_index_id,
-                "source_type": "private",
+                "source_type": "daily_summary",
                 "user_id": user_id,
                 "created_at": created_at
             })
@@ -460,6 +526,231 @@ class MemoryManager:
             except Exception as e:
                 logger.error(f"Engram: Force summarize failed for {uid}: {e}")
         return summarized
+
+    async def fold_weekly_summaries(self, user_id, days=7):
+        """每周折叠：daily_summary -> weekly_summary"""
+        loop = asyncio.get_event_loop()
+        min_samples = self.config.get("folding_min_samples", 3)
+
+        # 取最近 N 天的 daily_summary
+        summaries = await loop.run_in_executor(
+            self.executor,
+            self.db.get_summaries_by_type,
+            user_id,
+            "daily_summary",
+            days
+        )
+
+        if not summaries or len(summaries) < min_samples:
+            logger.debug(
+                f"Engram: Weekly fold skipped for {user_id} (samples={len(summaries) if summaries else 0}, min={min_samples})"
+            )
+            return None
+
+        # 关键修复：按时间正序让 LLM 顺序阅读因果关系
+        summaries_chronological = list(summaries)
+        summaries_chronological.reverse()
+
+        capsule_lines = [f"- {m.summary}" for m in summaries_chronological]
+        capsule_text = "\n".join(capsule_lines)
+
+        prompt_tpl = self.config.get("weekly_folding_prompt")
+        if not prompt_tpl:
+            return None
+        prompt = prompt_tpl.replace("{{memory_texts}}", capsule_text)
+
+        summarize_model = self.config.get("summarize_model", "").strip()
+        provider = self.context.get_provider_by_id(summarize_model) if summarize_model else None
+        if not provider:
+            provider = self.context.get_using_provider()
+        if not provider:
+            return None
+
+        max_retries = 3
+        retry_delay = 2
+        summary_text = ""
+
+        for attempt in range(max_retries):
+            try:
+                resp = await provider.text_chat(prompt=prompt)
+                raw_text = resp.completion_text if resp and resp.completion_text else ""
+                summary_text = raw_text.strip()
+
+                if summary_text and len(summary_text) > 10:
+                    break
+
+                logger.warning(
+                    f"Engram: Weekly folding attempt {attempt + 1} produced empty/short result for {user_id}"
+                )
+            except Exception as e:
+                logger.error(f"Engram: Weekly folding attempt {attempt + 1} error for {user_id}: {e}")
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+
+        if not summary_text or len(summary_text) < 10:
+            logger.error(
+                f"Engram: Failed to generate weekly fold for {user_id} after {max_retries} attempts."
+            )
+            return None
+
+        created_at = self._ensure_datetime(summaries[0].created_at)
+        ref_ids = [m.index_id for m in summaries]
+        index_id = str(uuid.uuid4())
+
+        await self._ensure_chroma_initialized()
+        ai_name = self.config.get("ai_name", "助手")
+        metadata = {
+            "user_id": user_id,
+            "source_type": "weekly_summary",
+            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "ai_name": ai_name
+        }
+
+        await loop.run_in_executor(
+            self.executor,
+            lambda: self.collection.add(
+                ids=[index_id],
+                documents=[summary_text],
+                metadatas=[metadata]
+            )
+        )
+
+        await loop.run_in_executor(
+            self.executor,
+            lambda: self.db.save_memory_index(
+                index_id=index_id,
+                summary=summary_text,
+                ref_uuids=json.dumps(ref_ids),
+                prev_index_id=None,
+                source_type="weekly_summary",
+                user_id=user_id,
+                created_at=created_at
+            )
+        )
+
+        # 原子衰减 daily_summary 活跃度
+        await loop.run_in_executor(
+            self.executor,
+            self.db.decay_scores_by_ids,
+            ref_ids,
+            self.config.get("weekly_decay_amount", 50)
+        )
+
+        return index_id
+
+    async def fold_monthly_summaries(self, user_id, days=30):
+        """每月折叠：weekly_summary -> monthly_summary"""
+        loop = asyncio.get_event_loop()
+        min_samples = self.config.get("folding_min_samples", 3)
+
+        summaries = await loop.run_in_executor(
+            self.executor,
+            self.db.get_summaries_by_type,
+            user_id,
+            "weekly_summary",
+            days
+        )
+
+        if not summaries or len(summaries) < min_samples:
+            logger.debug(
+                f"Engram: Monthly fold skipped for {user_id} (samples={len(summaries) if summaries else 0}, min={min_samples})"
+            )
+            return None
+
+        # 关键修复：按时间正序让 LLM 顺序阅读因果关系
+        summaries_chronological = list(summaries)
+        summaries_chronological.reverse()
+
+        capsule_lines = [f"- {m.summary}" for m in summaries_chronological]
+        capsule_text = "\n".join(capsule_lines)
+
+        prompt_tpl = self.config.get("monthly_folding_prompt")
+        if not prompt_tpl:
+            return None
+        prompt = prompt_tpl.replace("{{memory_texts}}", capsule_text)
+
+        summarize_model = self.config.get("summarize_model", "").strip()
+        provider = self.context.get_provider_by_id(summarize_model) if summarize_model else None
+        if not provider:
+            provider = self.context.get_using_provider()
+        if not provider:
+            return None
+
+        max_retries = 3
+        retry_delay = 2
+        summary_text = ""
+
+        for attempt in range(max_retries):
+            try:
+                resp = await provider.text_chat(prompt=prompt)
+                raw_text = resp.completion_text if resp and resp.completion_text else ""
+                summary_text = raw_text.strip()
+
+                if summary_text and len(summary_text) > 10:
+                    break
+
+                logger.warning(
+                    f"Engram: Monthly folding attempt {attempt + 1} produced empty/short result for {user_id}"
+                )
+            except Exception as e:
+                logger.error(f"Engram: Monthly folding attempt {attempt + 1} error for {user_id}: {e}")
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+
+        if not summary_text or len(summary_text) < 10:
+            logger.error(
+                f"Engram: Failed to generate monthly fold for {user_id} after {max_retries} attempts."
+            )
+            return None
+
+        created_at = self._ensure_datetime(summaries[0].created_at)
+        ref_ids = [m.index_id for m in summaries]
+        index_id = str(uuid.uuid4())
+
+        await self._ensure_chroma_initialized()
+        ai_name = self.config.get("ai_name", "助手")
+        metadata = {
+            "user_id": user_id,
+            "source_type": "monthly_summary",
+            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "ai_name": ai_name
+        }
+
+        await loop.run_in_executor(
+            self.executor,
+            lambda: self.collection.add(
+                ids=[index_id],
+                documents=[summary_text],
+                metadatas=[metadata]
+            )
+        )
+
+        await loop.run_in_executor(
+            self.executor,
+            lambda: self.db.save_memory_index(
+                index_id=index_id,
+                summary=summary_text,
+                ref_uuids=json.dumps(ref_ids),
+                prev_index_id=None,
+                source_type="monthly_summary",
+                user_id=user_id,
+                created_at=created_at
+            )
+        )
+
+        # 原子衰减 weekly_summary 活跃度
+        await loop.run_in_executor(
+            self.executor,
+            self.db.decay_scores_by_ids,
+            ref_ids,
+            self.config.get("monthly_decay_amount", 50)
+        )
+
+        return index_id
     
     # ========== 记忆检索 ==========
     
@@ -499,8 +790,31 @@ class MemoryManager:
         distances = results.get('distances', [[]])[0] if 'distances' in results else []
         memory_data = []
         
-        # 提取查询关键词（正则一次性分割：匹配所有非单词字符）
-        query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
+        # ---------------- 智能提取中英文本 (Zero-dependency Bi-gram) ----------------
+        query_keywords = set()
+        
+        # 提取英文和数字 (如 Python, 1980)
+        for word in re.findall(r'[a-zA-Z0-9]+', query):
+            query_keywords.add(word.lower())
+            
+        # 提取中文单字和双字词 (Bi-gram 覆盖率极高且无需分词库)
+        chinese_chars = re.findall(r'[\u4e00-\u9fa5]', query)
+        for i, char in enumerate(chinese_chars):
+            query_keywords.add(char)
+            if i < len(chinese_chars) - 1:
+                query_keywords.add(char + chinese_chars[i+1])
+                
+        # 🚨 致命关键：过滤停用词和机器人的名字！
+        ai_name = self.config.get("ai_name", "助手")
+        stop_words = {
+            ai_name, "我", "你", "他", "她", "它",
+            "的", "了", "吗", "呢", "啊", "呀", "是", "在", "还", "有", "什么", "怎么"
+        }
+        # 如果名字是多个字，把单字也加进去防止 Bi-gram 产生的单字颗粒度干扰
+        if ai_name and len(ai_name) > 1:
+            for char in ai_name:
+                stop_words.add(char)
+        query_keywords = {k for k in query_keywords if k not in stop_words and len(k.strip()) > 0}
         
         # BM25 参数
         _bm25_k1 = 1.2
@@ -529,7 +843,7 @@ class MemoryManager:
                     tf = summary_lower.count(keyword)
                     # BM25 TF 饱和公式：高频词收益递减
                     norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
-                    # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
+                    # 英文长词或中文双字词权重大
                     keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
                     keyword_score += norm_tf * keyword_weight
             
@@ -542,19 +856,19 @@ class MemoryManager:
             })
         
         # 3. RRF (Reciprocal Rank Fusion) 融合排序
-        #    RRF_score(d) = w_v / (k + rank_vector(d)) + w_k / (k + rank_keyword(d))
-        #    k=60 是标准值，keyword_boost_weight 控制两路信号的权重比例
         rrf_k = 60
+        # 🚨 安全锁：必须至少有一条记忆的 keyword_score > 0，否则 RRF 只会产生噪音干扰向量排序！
+        has_valid_keyword_match = any(d.get('keyword_score', 0) > 0 for d in memory_data)
         
-        if enable_keyword_boost and query_keywords and len(memory_data) > 1:
+        if enable_keyword_boost and query_keywords and len(memory_data) > 1 and has_valid_keyword_match:
             vector_w = 1.0 - keyword_boost_weight
             keyword_w = keyword_boost_weight
             
-            # 按向量距离排名（距离越小排名越靠前，rank 从 1 开始）
+            # 按向量距离排名
             sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
             vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
             
-            # 按关键词得分排名（得分越高排名越靠前）
+            # 按关键词得分排名
             sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
             keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
             
@@ -564,12 +878,11 @@ class MemoryManager:
                 rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
                 data['rrf_score'] = rrf_vector + rrf_keyword
             
-            # 按 RRF 得分排序（得分越高越靠前）
             memory_data.sort(key=lambda x: x['rrf_score'], reverse=True)
         else:
-            # 纯向量模式或无关键词：退化为按距离排序
+            # 纯向量模式或无有效关键词匹配：退化为按距离排序
             for data in memory_data:
-                data['rrf_score'] = max(0, 1 - data['distance'] / 2.0)
+                data['rrf_score'] = max(0, 1 - data['distance'] / similarity_threshold)
             memory_data.sort(key=lambda x: x['distance'])
         
         # 4. 只保留前 limit 条

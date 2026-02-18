@@ -157,6 +157,50 @@
     "default": 3,
     "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
   },
+  "enable_memory_folding": {
+    "description": "启用全自动记忆折叠",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，将在周日凌晨和月初凌晨自动对零散的记忆进行层级总结（周结/月结）。关闭则只保留基础的每日归档。"
+  },
+  "folding_min_samples": {
+    "description": "总结最小样本数",
+    "type": "int",
+    "default": 3,
+    "hint": "周/月总结前要求的最少摘要数量（不足则跳过），避免生成垃圾总结。"
+  },
+  "weekly_folding_prompt": {
+    "description": "周总结提示词",
+    "type": "string",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "请从以下【daily_summary 列表】提炼内容。\n需要提炼三类信息：\n核心事件：影响未来的重要节点，用简短句子描述。\n关系演进：围绕关键关系节点，描述互动深度的变化。\n记忆胶囊：一句话概括本周期最重要的信息，作为下一级总结的唯一输入。\n\n输出要求：\n只输出纯文本，不要任何 Markdown 标题、列表、编号或符号。\n不要使用项目符号或分隔线。\n使用自然语言分段即可（建议三段，分别以“核心事件：”“关系演进：”“记忆胶囊：”开头）。\n\n【daily_summary 列表】\n{{memory_texts}}",
+    "hint": "{{memory_texts}}：daily_summary 列表"
+  },
+  "monthly_folding_prompt": {
+    "description": "月总结提示词",
+    "type": "string",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "请从以下【weekly_summary 列表】提炼内容。\n需要提炼三类信息：\n核心事件：影响未来的重要节点，用简短句子描述。\n关系演进：围绕关键关系节点，描述互动深度的变化。\n记忆胶囊：一句话概括本周期最重要的信息，作为下一级总结的唯一输入。\n\n输出要求：\n只输出纯文本，不要任何 Markdown 标题、列表、编号或符号。\n不要使用项目符号或分隔线。\n使用自然语言分段即可（建议三段，分别以“核心事件：”“关系演进：”“记忆胶囊：”开头）。\n\n【weekly_summary 列表】\n{{memory_texts}}",
+    "hint": "{{memory_texts}}：weekly_summary 列表"
+  },
+  "weekly_decay_amount": {
+    "description": "周总结衰减分",
+    "type": "int",
+    "default": 50,
+    "hint": "周总结完成后，对被总结的 daily_summary 进行原子衰减的分值。"
+  },
+  "monthly_decay_amount": {
+    "description": "月总结衰减分",
+    "type": "int",
+    "default": 50,
+    "hint": "月总结完成后，对被总结的 weekly_summary 进行原子衰减的分值。"
+  },
   "persona_update_max_concurrent": {
     "description": "每日画像更新最大并发数",
     "type": "int",
@@ -216,6 +260,18 @@
     "type": "list",
     "default": ["new", "help", "reset", "clear"],
     "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
+  },
+  "enable_regex_filter": {
+    "description": "启用正则表达式过滤",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，匹配正则表达式的消息将被丢弃（如特定格式的内部指令）。"
+  },
+  "regex_filter_list": {
+    "description": "正则过滤规则列表",
+    "type": "list",
+    "default": ["^provider\\s+\\d+$", "^画图.*"],
+    "hint": "例如 ^provider\\s+\\d+$ 会拦截 'provider 3' 这种消息。"
   },
   "embedding_provider": {
     "description": "嵌入模型提供商 ID",

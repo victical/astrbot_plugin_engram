@@ -17,7 +17,7 @@ import datetime
 import time
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.4.3")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.4.4")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -55,6 +55,9 @@ class EngramPlugin(Star):
         # 初始化调度器
         self._scheduler = MemoryScheduler(self.logic, config)
         asyncio.create_task(self._scheduler.start())
+
+        # [v1.4.4] 历史数据清理一次性任务
+        asyncio.create_task(self._run_once_history_cleanup())
         
         # OneBot 同步时间缓存
         self._last_onebot_sync = {}
@@ -84,6 +87,26 @@ class EngramPlugin(Star):
                     return True
         
         return False
+
+    async def _run_once_history_cleanup(self):
+        """[v1.4.4] 启动时执行一次历史指令消息清理"""
+        # 简单标志位，防止重载时反复执行（虽然逻辑幂等）
+        cleanup_flag = os.path.join(self.plugin_data_dir, ".v144_cleanup_done")
+        if os.path.exists(cleanup_flag):
+            return
+
+        logger.info("Engram: Starting one-time history cleanup for v1.4.4...")
+        try:
+            from .maintenance_clean_history import run_migration
+            # 在单独的线程中执行，避免阻塞启动
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self.logic.executor, run_migration)
+            
+            with open(cleanup_flag, "w") as f:
+                f.write(str(datetime.datetime.now()))
+            logger.info("Engram: History cleanup completed successfully.")
+        except Exception as e:
+            logger.error(f"Engram: History cleanup failed: {e}")
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
@@ -157,7 +180,7 @@ class EngramPlugin(Star):
                 logger.info(f"=== Engram 调试结束 ===")
 
     @filter.after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent):
+    async def after_message_sent(self, event: AstrMessageEvent, *args, **kwargs):
         """在消息发送后记录 AI 的回复到原始记忆，并更新互动统计"""
         # 只处理私聊
         if event.get_group_id(): return

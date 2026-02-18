@@ -163,6 +163,14 @@ class MemoryFacade:
     async def summarize_all_users(self):
         """强制归档所有用户的未归档消息"""
         return await self._memory_manager.summarize_all_users()
+
+    async def fold_weekly_summaries(self, user_id, days=7):
+        """每周折叠：daily_summary -> weekly_summary"""
+        return await self._memory_manager.fold_weekly_summaries(user_id, days=days)
+
+    async def fold_monthly_summaries(self, user_id, days=30):
+        """每月折叠：weekly_summary -> monthly_summary"""
+        return await self._memory_manager.fold_monthly_summaries(user_id, days=days)
     
     # ========== 用户画像方法（委托给 ProfileManager） ==========
     

@@ -5,6 +5,7 @@
 import asyncio
 import datetime
 import time
+import random
 from typing import Dict, Callable, Awaitable
 from astrbot.api import logger
 
@@ -31,7 +32,9 @@ class MemoryScheduler:
         task1 = asyncio.create_task(self.background_worker())
         task2 = asyncio.create_task(self.daily_persona_scheduler())
         task3 = asyncio.create_task(self.daily_memory_maintenance())
-        self._tasks.extend([task1, task2, task3])
+        task4 = asyncio.create_task(self.weekly_folding_task())
+        task5 = asyncio.create_task(self.monthly_folding_task())
+        self._tasks.extend([task1, task2, task3, task4, task5])
     
     def shutdown(self):
         """停止调度器（设置关闭标志）"""
@@ -207,6 +210,129 @@ class MemoryScheduler:
             await asyncio.gather(*tasks, return_exceptions=True)
             
             logger.info(f"Engram: Daily persona update completed for {len(user_ids)} users")
+
+    # ========== 周/月总结任务 ==========
+
+    async def weekly_folding_task(self):
+        """每周总结任务（周日 02:00）"""
+        while not self._is_shutdown:
+            try:
+                now = datetime.datetime.now()
+                # 找到下一个周日 02:00
+                days_ahead = (6 - now.weekday()) % 7  # 周日=6
+                next_run = (now + datetime.timedelta(days=days_ahead)).replace(
+                    hour=2, minute=0, second=0, microsecond=0
+                )
+                if next_run <= now:
+                    next_run += datetime.timedelta(days=7)
+
+                sleep_seconds = (next_run - now).total_seconds()
+                logger.info(f"Engram: Weekly folding scheduled in {sleep_seconds/3600:.1f} hours")
+                await asyncio.sleep(sleep_seconds)
+
+                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                    break
+                if getattr(self.logic.executor, "_shutdown", False):
+                    self._is_shutdown = True
+                    break
+
+                await self._execute_weekly_folding()
+            except asyncio.CancelledError:
+                logger.debug("Engram: Weekly folding task cancelled")
+                break
+            except Exception as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    self._is_shutdown = True
+                    break
+                logger.error(f"Engram weekly folding error: {e}")
+                await asyncio.sleep(60)
+
+    async def monthly_folding_task(self):
+        """每月总结任务（每月 1 号 03:00）"""
+        while not self._is_shutdown:
+            try:
+                now = datetime.datetime.now()
+                # 下一个月 1 号 03:00
+                if now.day == 1 and now.hour < 3:
+                    next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+                else:
+                    year = now.year + (1 if now.month == 12 else 0)
+                    month = 1 if now.month == 12 else now.month + 1
+                    next_run = datetime.datetime(year, month, 1, 3, 0, 0)
+
+                sleep_seconds = (next_run - now).total_seconds()
+                logger.info(f"Engram: Monthly folding scheduled in {sleep_seconds/3600:.1f} hours")
+                await asyncio.sleep(sleep_seconds)
+
+                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                    break
+                if getattr(self.logic.executor, "_shutdown", False):
+                    self._is_shutdown = True
+                    break
+
+                await self._execute_monthly_folding()
+            except asyncio.CancelledError:
+                logger.debug("Engram: Monthly folding task cancelled")
+                break
+            except Exception as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    self._is_shutdown = True
+                    break
+                logger.error(f"Engram monthly folding error: {e}")
+                await asyncio.sleep(60)
+
+    async def _execute_weekly_folding(self):
+        """执行周总结（带抖动 + 串行）"""
+        if not self.config.get("enable_memory_folding", True):
+            return
+
+        loop = asyncio.get_event_loop()
+        user_ids = list(self.logic.last_chat_time.keys())
+        if not user_ids:
+            return
+
+        # 抖动：0-1800 秒（推迟整个批次启动）
+        jitter = random.randint(0, 1800)
+        logger.info(f"Engram: Jittering {jitter}s before starting weekly fold batch")
+        await asyncio.sleep(jitter)
+
+        for user_id in user_ids:
+            if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                return
+            if getattr(self.logic.executor, "_shutdown", False):
+                return
+
+            try:
+                await self.logic.fold_weekly_summaries(user_id, days=7)
+            except Exception as e:
+                logger.error(f"Engram: Weekly fold failed for {user_id}: {e}")
+
+            await asyncio.sleep(5)
+
+    async def _execute_monthly_folding(self):
+        """执行月总结（带抖动 + 串行）"""
+        loop = asyncio.get_event_loop()
+        user_ids = list(self.logic.last_chat_time.keys())
+        if not user_ids:
+            return
+
+        # 抖动：0-1800 秒（推迟整个批次启动）
+        jitter = random.randint(0, 1800)
+        logger.info(f"Engram: Jittering {jitter}s before starting monthly fold batch")
+        await asyncio.sleep(jitter)
+
+        for user_id in user_ids:
+            if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                return
+            if getattr(self.logic.executor, "_shutdown", False):
+                return
+
+            try:
+                await self.logic.fold_monthly_summaries(user_id, days=30)
+            except Exception as e:
+                logger.error(f"Engram: Monthly fold failed for {user_id}: {e}")
+
+            await asyncio.sleep(5)
 
     # ========== 记忆衰减与修剪 ==========
 
