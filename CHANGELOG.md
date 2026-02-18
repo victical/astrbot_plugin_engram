@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-02-17
+
+### Added
+- **画像幻觉阻断机制**：新增 `ProfileGuardian` 服务，防止 LLM 产生的错误信息污染用户画像
+  - 置信度机制：新属性作为提案暂存，需多次确认才能转正
+  - 冲突检测：检测新旧属性矛盾（如"喜欢猫" vs "猫毛过敏"），冲突时保留旧值
+  - 强证据保护：basic_info 核心字段（性别、年龄、所在地、职业）需记忆中有明确陈述才能修改
+  - 新增配置项：`enable_profile_confidence`、`profile_confidence_threshold`、`enable_conflict_detection`、`enable_strong_evidence_protection`
+
+## [1.4.2] - 2026-02-17
+
+### Changed
+- **配置重组**：`_conf_schema.json` 按功能类别重新组织配置项
+  - 基础设置：ai_name、debug_injection
+  - 记忆归档：private_memory_timeout、min_msg_count、max_history_days、summarize_model、summarize_prompt
+  - 记忆检索：max_recent_memories、memory_similarity_threshold、enable_keyword_boost、keyword_boost_weight、show_relevance_score、enable_memory_context_hint
+  - 意图过滤：memory_intent_mode、intent_llm_model、intent_min_length
+  - 记忆衰减与修剪：enable_memory_decay、memory_decay_rate、memory_reinforce_bonus、enable_memory_prune、memory_prune_threshold
+  - 用户画像：persona_model、persona_update_prompt、min_persona_update_memories、persona_update_max_concurrent、persona_update_delay
+  - 指令过滤：enable_command_filter、command_prefixes、enable_full_command_detection、full_command_list
+  - 其他：embedding_provider、pillowmd_style_path、list_memory_count
+- 修复配置项重复问题（memory_intent_mode、intent_llm_model、intent_min_length）
+
 ## [1.4.1] - 2026-02-17
 
 ### Added

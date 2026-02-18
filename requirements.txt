@@ -1,4 +1,4 @@
-peewee
-chromadb
-pillow
-zhdate
+peewee>=3.16,<4.0
+chromadb>=0.4.13,<0.5.0
+pillow>=9.5,<11.0
+zhdate>=0.1.5,<1.0

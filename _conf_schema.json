@@ -1,4 +1,16 @@
 {
+  "ai_name": {
+    "description": "AI 名称",
+    "type": "string",
+    "default": "助手",
+    "hint": "用于记忆归档时标记 AI 的名称，将存入向量数据库元信息中。"
+  },
+  "debug_injection": {
+    "description": "调试模式：显示注入内容",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，每次 LLM 请求时会在日志中输出注入的用户画像和记忆内容，便于调试和排查问题。"
+  },
   "private_memory_timeout": {
     "description": "私聊记忆归档触发时间（秒）",
     "type": "int",
@@ -11,10 +23,11 @@
     "default": 4,
     "hint": "未保存的消息达到此数量且超时后触发归档"
   },
-  "max_recent_memories": {
-    "description": "检索时召回的最大长期记忆数量",
+  "max_history_days": {
+    "description": "强制总结回溯天数限制",
     "type": "int",
-    "default": 3
+    "default": 0,
+    "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
   },
   "summarize_model": {
     "description": "归档记忆使用的模型",
@@ -22,31 +35,6 @@
     "_special": "select_provider",
     "default": "",
     "hint": "选择一个大模型来归档记忆（建议选择低成本模型）。留空则使用当前默认模型。"
-  },
-  "persona_model": {
-    "description": "更新画像使用的模型",
-    "type": "string",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
-  },
-  "embedding_provider": {
-    "description": "嵌入模型提供商 ID",
-    "type": "string",
-    "default": "",
-    "hint": "用于 ChromaDB 向量检索的嵌入模型提供商 ID。留空则使用默认的 ChromaDB 内置嵌入。"
-  },
-  "debug_injection": {
-    "description": "调试模式：显示注入内容",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，每次 LLM 请求时会在日志中输出注入的用户画像和记忆内容，便于调试和排查问题。"
-  },
-  "ai_name": {
-    "description": "AI 名称",
-    "type": "string",
-    "default": "助手",
-    "hint": "用于记忆归档时标记 AI 的名称，将存入向量数据库元信息中。"
   },
   "summarize_prompt": {
     "description": "归档记忆的提示词",
@@ -58,39 +46,42 @@
     "default": "你是{{ai_name}}，请根据聊天记录，写一篇简短的日记。核心原则：简单！短小！像写手帐一样，一笔带过，不要写作文。 - 字数限制：100字以内。  - 视角：第一人称。-称呼：根据对话语境或你们的关系。 - 内容：      1. 简单记录发生了什么 (如：主人醒了)。2. 必须保留细节 (如：喜欢吃西瓜)，这是重点。3. 心情如何 (如：开心)。- 禁止：禁止长篇大论的心理描写，禁止啰嗦的铺垫。对话内容： {{chat_text}}",
     "hint": "{{ai_name}}：bot名字 {{chat_text}}：对话内容"
   },
-  "persona_update_prompt": {
-    "description": "画像更新的提示词",
+  "max_recent_memories": {
+    "description": "检索时召回的最大长期记忆数量",
+    "type": "int",
+    "default": 3
+  },
+  "memory_similarity_threshold": {
+    "description": "记忆检索相关性阈值",
+    "type": "float",
+    "default": 1.5,
+    "hint": "向量搜索的距离阈值，超过此值的记忆将被过滤（距离越小相关性越高）。建议值：1.0-2.0。设置过小可能导致检索不到结果，过大会引入无关记忆"
+  },
+  "enable_keyword_boost": {
+    "description": "启用关键词匹配增强",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
+  },
+  "keyword_boost_weight": {
+    "description": "RRF 融合权重（关键词 vs 向量）",
     "type": "string",
-    "obvious_hint": true,
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "editor_theme": "vs-dark",
-    "default": "你是一个严谨的【用户信息档案员】。你的任务是根据今日的新增记忆，更新用户的档案数据。\n\n【当前档案】：\n{{current_persona}}\n\n【今日新增记忆】：\n{{memory_texts}}\n\n【核心原则 - 严禁幻觉】：\n⚠️ 你只能从【今日新增记忆】的文字中提取**明确写出的**事实信息。\n⚠️ 如果记忆中没有**直接提及**某项内容，你**绝对不能**添加、推测或脑补任何信息。\n⚠️ 例如：如果记忆只写\"聊了美食\"，你不能推测用户喜欢任何具体食物。只有记忆明确写\"喜欢XX食物\"，你才能将其加入 favorite_foods。\n\n【更新规则】：\n1. **逐条对照**：检查【今日新增记忆】中的每一条，只有明确提及的信息才能更新到档案。\n2. **保持原值**：如果记忆中没有提到某字段，保持【当前档案】中的原值不变。\n3. **列表追加**：hobbies、favorite_foods、dislikes 等列表字段，只追加记忆中明确提及的新内容，并去重。\n4. **禁止推断**：不要基于上下文推断、联想或猜测任何信息。\n5. **保留原有 basic_info**：basic_info 中的 qq_id、nickname、avatar_url、signature 等字段必须保持原值不变。\n\n【标签简化规则 - 必须遵守】：\n⚠️ 所有 hobbies、favorite_activities、favorite_items、personality_tags 字段的值必须使用【2-5个字的简短词汇】。\n⚠️ 禁止使用长句子或带括号的详细描述。\n⚠️ 示例：\n  ✅ 正确：\"玩我的世界\"、\"AI绘画\"、\"听音乐\"、\"看动漫\"\n  ❌ 错误：\"使用MC指令连接服务器\"、\"AI绘画（要求特定服装和姿势）\"\n⚠️ 如果记忆中有详细描述，请提取其核心活动作为简短标签。\n\n【字段定义 - 严格分类】：\n- basic_info: gender(性别), age(年龄), location(所在地), job(职业) - 其他字段保持原值\n- attributes:\n  - hobbies: 用户的活动类爱好，使用2-5字简短词汇（如：编程、看电影、打游戏、玩我的世界）\n  - skills: 用户掌握的技能（如：Python、钢琴、绘画）\n  - personality_tags: 用户明显表现出的性格特征（如：幽默、严谨）\n- preferences（严格按类别分配，禁止混淆）：\n  - favorite_foods: 用户喜欢的【食物/饮品】，如：西瓜、奶茶、火锅、冰美式、拿铁\n  - favorite_items: 用户喜欢的【具体物品/事物】，如：猫咪、手办、机械键盘、盲盒\n  - favorite_activities: 用户喜欢的【活动/娱乐方式】，使用2-5字简短词汇（如：看电影、打游戏、逛街、听音乐、AI绘画）\n  - dislikes: 用户明确表示讨厌的事物\n- social_graph:\n  - relationship_status: 保持原值不变\n  - interaction_stats: 保持原值不变\n  - important_people: 用户提到的重要的人（家人、朋友、伴侣等）\n- dev_metadata: tech_stack(技术栈) - 只记录明确提及的技术\n- shared_secrets: 如果用户分享了心事、秘密、烦恼或深层情感，设置为 true\n\n【禁止录入以下内容到 preferences 字段】：\n❌ 情感状态词：开心、快乐、幸福、温馨、感动\n❌ 互动行为词：摸头、聊天、陪伴、夸奖、鼓励\n❌ 抽象概念词：温暖、舒适、自由、安全感\n❌ 以上词汇应该被忽略，而不是录入任何字段\n\n【输出要求】：\n请直接返回更新后的完整 JSON 数据。不要包含 Markdown 标记，不要包含其他解释。",
-    "hint": "{{current_persona}}：当前用户画像JSON {{memory_texts}}：新增记忆列表"
+    "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
+    "labels": ["纯向量模式", "向量优先", "均衡融合（推荐）", "关键词优先", "纯关键词模式"],
+    "default": "0.5",
+    "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
   },
-  "list_memory_count": {
-    "description": "查询记忆指令默认返回的数量",
-    "type": "int",
-    "default": 5,
-    "hint": "使用 /mem_list 指令时默认返回的记忆条数。可在指令中使用 /mem_list <数量> 临时覆盖此值（最多50条）"
+  "show_relevance_score": {
+    "description": "显示记忆相关性评分",
+    "type": "bool",
+    "default": true,
+    "hint": "在搜索记忆结果中显示相关性百分比（🎯 85%）。关闭后仅显示记忆 ID 和时间。"
   },
-  "min_persona_update_memories": {
-    "description": "触发画像更新所需的最小新增记忆数",
-    "type": "int",
-    "default": 3,
-    "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
-  },
-  "persona_update_max_concurrent": {
-    "description": "每日画像更新最大并发数",
-    "type": "int",
-    "default": 3,
-    "hint": "控制凌晨00:00画像更新时的最大并发LLM请求数，避免API限流。建议值：3-5"
-  },
-  "persona_update_delay": {
-    "description": "画像更新间隔延迟（秒）",
-    "type": "int",
-    "default": 5,
-    "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
+  "enable_memory_context_hint": {
+    "description": "显示前情提要",
+    "type": "bool",
+    "default": true,
+    "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
   },
   "memory_intent_mode": {
     "description": "记忆检索意图过滤模式",
@@ -112,95 +103,6 @@
     "type": "int",
     "default": 4,
     "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
-  },
-  "memory_similarity_threshold": {
-    "description": "记忆检索相关性阈值",
-    "type": "float",
-    "default": 1.5,
-    "hint": "向量搜索的距离阈值，超过此值的记忆将被过滤（距离越小相关性越高）。建议值：1.0-2.0。设置过小可能导致检索不到结果，过大会引入无关记忆"
-  },
-  "enable_memory_context_hint": {
-    "description": "显示前情提要",
-    "type": "bool",
-    "default": true,
-    "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
-  },
-  "show_relevance_score": {
-    "description": "显示记忆相关性评分",
-    "type": "bool",
-    "default": true,
-    "hint": "在搜索记忆结果中显示相关性百分比（🎯 85%）。关闭后仅显示记忆 ID 和时间。"
-  },
-  "enable_keyword_boost": {
-    "description": "启用关键词匹配增强",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
-  },
-  "keyword_boost_weight": {
-    "description": "RRF 融合权重（关键词 vs 向量）",
-    "type": "string",
-    "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
-    "labels": ["纯向量模式", "向量优先", "均衡融合（推荐）", "关键词优先", "纯关键词模式"],
-    "default": "0.5",
-    "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
-  },
-  "pillowmd_style_path": {
-    "description": "PillowMD 样式目录路径",
-    "type": "string",
-    "default": "",
-    "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
-  },
-  "max_history_days": {
-    "description": "强制总结回溯天数限制",
-    "type": "int",
-    "default": 0,
-    "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
-  },
-  "enable_command_filter": {
-    "description": "启用指令标识过滤",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），避免将其记入长期记忆。"
-  },
-  "command_prefixes": {
-    "description": "指令前缀列表",
-    "type": "list",
-    "default": ["/", "!", "#", "~"],
-    "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
-  },
-  "enable_full_command_detection": {
-    "description": "启用完整指令字符串检测",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，会检测消息是否为完整的指令（全字符串匹配）。例如 'new' 会被识别为指令并跳过，但 'new world' 不会。"
-  },
-  "full_command_list": {
-    "description": "完整指令列表",
-    "type": "list",
-    "default": ["new", "help", "reset", "clear"],
-    "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
-  },
-  "memory_intent_mode": {
-    "description": "记忆检索意图过滤模式",
-    "type": "string",
-    "options": ["disabled", "keyword", "llm"],
-    "labels": ["禁用（每条消息都检索）", "关键词匹配（零成本）", "LLM 小模型判断（高精度）"],
-    "default": "keyword",
-    "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
-  },
-  "intent_llm_model": {
-    "description": "意图判断使用的模型",
-    "type": "string",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "仅在意图过滤模式为 llm 时生效。选择一个低成本小模型来判断是否需要检索记忆。留空则依次尝试归档模型、默认模型。"
-  },
-  "intent_min_length": {
-    "description": "意图触发最小文本长度",
-    "type": "int",
-    "default": 4,
-    "hint": "过滤极短的无意义文本。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
   },
   "enable_memory_decay": {
     "description": "启用记忆衰减",
@@ -231,5 +133,106 @@
     "type": "int",
     "default": 0,
     "hint": "active_score 小于等于此值的记忆将被从向量库中修剪。默认值 0，配合衰减速率 1，意味着约 100 天未被召回的记忆会被修剪。"
+  },
+  "persona_model": {
+    "description": "更新画像使用的模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
+  },
+  "persona_update_prompt": {
+    "description": "画像更新的提示词",
+    "type": "string",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "你是一个严谨的【用户信息档案员】。你的任务是根据今日的新增记忆，更新用户的档案数据。\n\n【当前档案】：\n{{current_persona}}\n\n【今日新增记忆】：\n{{memory_texts}}\n\n【核心原则 - 严禁幻觉】：\n⚠️ 你只能从【今日新增记忆】的文字中提取**明确写出的**事实信息。\n⚠️ 如果记忆中没有**直接提及**某项内容，你**绝对不能**添加、推测或脑补任何信息。\n⚠️ 例如：如果记忆只写\"聊了美食\"，你不能推测用户喜欢任何具体食物。只有记忆明确写\"喜欢XX食物\"，你才能将其加入 favorite_foods。\n\n【更新规则】：\n1. **逐条对照**：检查【今日新增记忆】中的每一条，只有明确提及的信息才能更新到档案。\n2. **保持原值**：如果记忆中没有提到某字段，保持【当前档案】中的原值不变。\n3. **列表追加**：hobbies、favorite_foods、dislikes 等列表字段，只追加记忆中明确提及的新内容，并去重。\n4. **禁止推断**：不要基于上下文推断、联想或猜测任何信息。\n5. **保留原有 basic_info**：basic_info 中的 qq_id、nickname、avatar_url、signature 等字段必须保持原值不变。\n\n【标签简化规则 - 必须遵守】：\n⚠️ 所有 hobbies、favorite_activities、favorite_items、personality_tags 字段的值必须使用【2-5个字的简短词汇】。\n⚠️ 禁止使用长句子或带括号的详细描述。\n⚠️ 示例：\n  ✅ 正确：\"玩我的世界\"、\"AI绘画\"、\"听音乐\"、\"看动漫\"\n  ❌ 错误：\"使用MC指令连接服务器\"、\"AI绘画（要求特定服装和姿势）\"\n⚠️ 如果记忆中有详细描述，请提取其核心活动作为简短标签。\n\n【字段定义 - 严格分类】：\n- basic_info: gender(性别), age(年龄), location(所在地), job(职业) - 其他字段保持原值\n- attributes:\n  - hobbies: 用户的活动类爱好，使用2-5字简短词汇（如：编程、看电影、打游戏、玩我的世界）\n  - skills: 用户掌握的技能（如：Python、钢琴、绘画）\n  - personality_tags: 用户明显表现出的性格特征（如：幽默、严谨）\n- preferences（严格按类别分配，禁止混淆）：\n  - favorite_foods: 用户喜欢的【食物/饮品】，如：西瓜、奶茶、火锅、冰美式、拿铁\n  - favorite_items: 用户喜欢的【具体物品/事物】，如：猫咪、手办、机械键盘、盲盒\n  - favorite_activities: 用户喜欢的【活动/娱乐方式】，使用2-5字简短词汇（如：看电影、打游戏、逛街、听音乐、AI绘画）\n  - dislikes: 用户明确表示讨厌的事物\n- social_graph:\n  - relationship_status: 保持原值不变\n  - interaction_stats: 保持原值不变\n  - important_people: 用户提到的重要的人（家人、朋友、伴侣等）\n- dev_metadata: tech_stack(技术栈) - 只记录明确提及的技术\n- shared_secrets: 如果用户分享了心事、秘密、烦恼或深层情感，设置为 true\n\n【禁止录入以下内容到 preferences 字段】：\n❌ 情感状态词：开心、快乐、幸福、温馨、感动\n❌ 互动行为词：摸头、聊天、陪伴、夸奖、鼓励\n❌ 抽象概念词：温暖、舒适、自由、安全感\n❌ 以上词汇应该被忽略，而不是录入任何字段\n\n【输出要求】：\n请直接返回更新后的完整 JSON 数据。不要包含 Markdown 标记，不要包含其他解释。",
+    "hint": "{{current_persona}}：当前用户画像JSON {{memory_texts}}：新增记忆列表"
+  },
+  "min_persona_update_memories": {
+    "description": "触发画像更新所需的最小新增记忆数",
+    "type": "int",
+    "default": 3,
+    "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
+  },
+  "persona_update_max_concurrent": {
+    "description": "每日画像更新最大并发数",
+    "type": "int",
+    "default": 3,
+    "hint": "控制凌晨00:00画像更新时的最大并发LLM请求数，避免API限流。建议值：3-5"
+  },
+  "persona_update_delay": {
+    "description": "画像更新间隔延迟（秒）",
+    "type": "int",
+    "default": 5,
+    "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
+  },
+  "enable_profile_confidence": {
+    "description": "启用画像置信度机制",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，LLM 提取的新属性不会立即写入正式画像，而是作为提案暂存，需多次确认后转正。防止单次幻觉污染画像。"
+  },
+  "profile_confidence_threshold": {
+    "description": "提案转正阈值",
+    "type": "int",
+    "default": 2,
+    "hint": "新属性需要连续被 LLM 提取多少次才能转正写入画像。默认值 2 表示需要连续 2 次更新都提取到相同属性才确认。"
+  },
+  "enable_conflict_detection": {
+    "description": "启用偏好冲突检测",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，检测新属性与旧属性的矛盾（如喜欢猫 vs 猫毛过敏），冲突时保留旧值（保守策略）。"
+  },
+  "enable_strong_evidence_protection": {
+    "description": "启用强证据保护",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，basic_info 核心字段（性别、年龄、所在地、职业）需要记忆中有明确陈述才能修改，防止 LLM 推测性修改。"
+  },
+  "enable_command_filter": {
+    "description": "启用指令标识过滤",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），避免将其记入长期记忆。"
+  },
+  "command_prefixes": {
+    "description": "指令前缀列表",
+    "type": "list",
+    "default": ["/", "!", "#", "~"],
+    "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
+  },
+  "enable_full_command_detection": {
+    "description": "启用完整指令字符串检测",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，会检测消息是否为完整的指令（全字符串匹配）。例如 'new' 会被识别为指令并跳过，但 'new world' 不会。"
+  },
+  "full_command_list": {
+    "description": "完整指令列表",
+    "type": "list",
+    "default": ["new", "help", "reset", "clear"],
+    "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
+  },
+  "embedding_provider": {
+    "description": "嵌入模型提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "用于 ChromaDB 向量检索的嵌入模型提供商 ID。留空则使用默认的 ChromaDB 内置嵌入。"
+  },
+  "pillowmd_style_path": {
+    "description": "PillowMD 样式目录路径",
+    "type": "string",
+    "default": "",
+    "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
+  },
+  "list_memory_count": {
+    "description": "查询记忆指令默认返回的数量",
+    "type": "int",
+    "default": 5,
+    "hint": "使用 /mem_list 指令时默认返回的记忆条数。可在指令中使用 /mem_list <数量> 临时覆盖此值（最多50条）"
   }
 }

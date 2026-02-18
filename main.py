@@ -17,7 +17,7 @@ import datetime
 import time
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.3.3")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.4.3")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件

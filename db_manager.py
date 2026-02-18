@@ -2,7 +2,7 @@ import os
 import json
 import datetime
 from peewee import *
-from playhouse.sqlite_ext import JSONField
+from playhouse.sqlite_ext import JSONField, SqliteExtDatabase
 from astrbot.api.star import StarTools
 
 class BaseModel(Model):
@@ -49,7 +49,15 @@ class DatabaseManager:
         self.db_path = os.path.join(self.data_dir, "engram_memories.db")
         os.makedirs(self.data_dir, exist_ok=True)
 
-        self.db = SqliteDatabase(self.db_path)
+        self.db = SqliteExtDatabase(
+            self.db_path,
+            pragmas={
+                "journal_mode": "wal",
+                "cache_size": -64 * 1024,
+                "synchronous": 1,
+                "foreign_keys": 1
+            }
+        )
         
         # 将模型与数据库绑定
         RawMemory._meta.database = self.db

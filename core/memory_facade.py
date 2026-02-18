@@ -91,10 +91,9 @@ class MemoryFacade:
         """确保时间戳是 datetime 对象"""
         return MemoryManager._ensure_datetime(timestamp)
     
-    @staticmethod
-    def _is_valid_message_content(content: str) -> bool:
+    def _is_valid_message_content(self, content: str) -> bool:
         """验证消息内容是否有效"""
-        return MemoryManager._is_valid_message_content(content)
+        return self._memory_manager._is_valid_message_content(content)
     
     # ========== 生命周期管理 ==========
     
@@ -160,6 +159,10 @@ class MemoryFacade:
     async def export_all_users_messages(self, format="jsonl", start_date=None, end_date=None, limit=None):
         """导出所有用户消息"""
         return await self._memory_manager.export_all_users_messages(format, start_date, end_date, limit)
+
+    async def summarize_all_users(self):
+        """强制归档所有用户的未归档消息"""
+        return await self._memory_manager.summarize_all_users()
     
     # ========== 用户画像方法（委托给 ProfileManager） ==========
     

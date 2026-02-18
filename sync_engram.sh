@@ -7,6 +7,8 @@ DEST="/opt/1panel/apps/astrbot/astrbot/data/plugins/astrbot_plugin_engram/"
 echo "== Syncing Engram plugin to server =="
 
 rsync -av --delete \
+  -e "ssh -t" \
+  --rsync-path="sudo rsync" \
   --exclude ".git" \
   --exclude "__pycache__" \
   --exclude "*.pyc" \

@@ -55,6 +55,7 @@
 | 指令 | 说明 |
 | :--- | :--- |
 | `/engram_force_summarize` | 立即对当前所有未处理对话进行记忆归档 |
+| `/engram_force_summarize_all` | 立即对所有用户未处理对话进行记忆归档 |
 | `/engram_force_persona` | 立即基于今日记忆强制深度更新画像 |
 
 ## 📤 数据导出功能

@@ -24,6 +24,7 @@ import json
 import asyncio
 from datetime import date
 from astrbot.api import logger
+from ..services.profile_guardian import ProfileGuardian
 
 
 class ProfileManager:
@@ -49,6 +50,9 @@ class ProfileManager:
         # 用户画像存储目录
         self.profiles_dir = os.path.join(self.data_dir, "engram_personas")
         os.makedirs(self.profiles_dir, exist_ok=True)
+        
+        # 画像更新防护器（幻觉阻断）
+        self._guardian = ProfileGuardian(config=config)
     
     def _get_profile_path(self, user_id):
         """获取用户画像文件路径"""
@@ -112,7 +116,8 @@ class ProfileManager:
                         "os": [],
                         "tech_stack": []
                     },
-                    "shared_secrets": False      # 是否分享过秘密/心事（LLM 检测标记）
+                    "shared_secrets": False,     # 是否分享过秘密/心事（LLM 检测标记）
+                    "pending_proposals": []      # 画像更新提案池（置信度晋升机制）
                 }
             try:
                 with open(path, 'r', encoding='utf-8') as f:
@@ -271,34 +276,19 @@ class ProfileManager:
                 
             new_persona = json.loads(content)
             
-            # 【关键修复】保留 OneBot 同步的字段和互动统计，防止被 LLM 覆盖
-            # 这些字段由系统维护，不应被 LLM 修改
-            protected_basic_fields = ["qq_id", "nickname", "avatar_url", "signature",
-                                      "birthday", "constellation", "zodiac"]
-            
-            # 确保 new_persona 有正确的结构
-            if "basic_info" not in new_persona:
-                new_persona["basic_info"] = {}
-            if "social_graph" not in new_persona:
-                new_persona["social_graph"] = {}
-            
-            # 保留原有 basic_info 中的受保护字段
-            old_basic = current_persona.get("basic_info", {})
-            for field in protected_basic_fields:
-                if field in old_basic and old_basic[field] and old_basic[field] != "未知":
-                    # 只有当原值有效时才保留
-                    new_persona["basic_info"][field] = old_basic[field]
-            
-            # 保留原有的 interaction_stats（由 update_interaction_stats 方法维护）
-            old_stats = current_persona.get("social_graph", {}).get("interaction_stats", {})
-            if old_stats:
-                new_persona["social_graph"]["interaction_stats"] = old_stats
+            # 【幻觉阻断】使用 ProfileGuardian 验证更新
+            # - 保护 basic_info 核心字段（需强证据才能修改）
+            # - 检测偏好冲突（如"喜欢猫" vs "猫毛过敏"）
+            # - 置信度机制（新属性作为提案）
+            validated_persona, conflicts = self._guardian.validate_update(
+                current_persona, new_persona, memory_texts
+            )
             
             # 写入文件
             path = self._get_profile_path(user_id)
             def _write():
                 with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(new_persona, f, ensure_ascii=False, indent=4)
+                    json.dump(validated_persona, f, ensure_ascii=False, indent=4)
             await loop.run_in_executor(self.executor, _write)
             
         except Exception as e:
