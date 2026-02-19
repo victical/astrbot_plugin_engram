@@ -101,6 +101,50 @@
     "default": "0.5",
     "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
   },
+  "rank_strategy": {
+    "description": "记忆排序策略",
+    "type": "string",
+    "options": [
+      "rrf",
+      "hybrid"
+    ],
+    "labels": [
+      "RRF（可回退，兼容旧行为）",
+      "Hybrid（向量+关键词+时效+活跃度）"
+    ],
+    "default": "rrf",
+    "hint": "rrf 使用倒数排序融合（旧逻辑）；hybrid 使用统一混合分。建议先从 rrf 平滑迁移。"
+  },
+  "rank_weight_vector": {
+    "description": "Hybrid 向量分权重",
+    "type": "float",
+    "default": 0.5,
+    "hint": "仅在 rank_strategy=hybrid 时生效。由向量 distance 归一化得到 vector_score。"
+  },
+  "rank_weight_keyword": {
+    "description": "Hybrid 关键词分权重",
+    "type": "float",
+    "default": 0.5,
+    "hint": "仅在 rank_strategy=hybrid 时生效。由 BM25 风格关键词匹配归一化得到 keyword_score。"
+  },
+  "rank_weight_recency": {
+    "description": "Hybrid 时效分权重",
+    "type": "float",
+    "default": 0.08,
+    "hint": "仅在 rank_strategy=hybrid 时生效。基于 created_at 时间衰减计算 recency_score。"
+  },
+  "rank_weight_activity": {
+    "description": "Hybrid 活跃分权重",
+    "type": "float",
+    "default": 0.06,
+    "hint": "仅在 rank_strategy=hybrid 时生效。基于 active_score 归一化计算 activity_score；当 enable_memory_decay=false 时会自动降权。"
+  },
+  "rank_recency_half_life_days": {
+    "description": "Hybrid 时效半衰期（天）",
+    "type": "float",
+    "default": 30,
+    "hint": "仅在 rank_strategy=hybrid 时生效。值越小越偏向近期记忆。"
+  },
   "show_relevance_score": {
     "description": "显示记忆相关性评分",
     "type": "bool",
