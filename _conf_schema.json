@@ -63,6 +63,24 @@
     "default": true,
     "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
   },
+  "enable_ngram_keyword_rank": {
+    "description": "启用中英混合 n-gram 关键词排序",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，关键词打分采用英文词边界+中文 n-gram 精确匹配，并结合候选集词频进行稀有词提升（近似 IDF）。关闭后退化为原有关键词增强流程。"
+  },
+  "keyword_ngram_min": {
+    "description": "中文关键词 n-gram 最小长度",
+    "type": "int",
+    "default": 2,
+    "hint": "用于中文关键词切分的最小 n 值。建议 2，过小容易误命中。"
+  },
+  "keyword_ngram_max": {
+    "description": "中文关键词 n-gram 最大长度",
+    "type": "int",
+    "default": 4,
+    "hint": "用于中文关键词切分的最大 n 值。建议 4，过大可能降低召回。"
+  },
   "keyword_boost_weight": {
     "description": "RRF 融合权重（关键词 vs 向量）",
     "type": "string",
@@ -139,6 +157,12 @@
     "default": true,
     "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
   },
+  "memory_context_window": {
+    "description": "前情提要上下文窗口",
+    "type": "int",
+    "default": 2,
+    "hint": "控制每条命中记忆向前追溯多少条链路用于展示前情提要。建议 2-3；设置为 0 则仅展示当前命中摘要。"
+  },
   "memory_intent_mode": {
     "description": "记忆检索意图过滤模式",
     "type": "string",
@@ -167,6 +191,28 @@
     "type": "int",
     "default": 4,
     "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
+  },
+  "intent_weak_triggers": {
+    "description": "意图弱触发词列表",
+    "type": "list",
+    "default": [
+      "我喜欢什么",
+      "我说过吗",
+      "你知道我"
+    ],
+    "hint": "仅在 keyword 模式下生效。弱触发词每命中一次计 1 分，通常用于补充语义较弱但可能需要回溯的问法。"
+  },
+  "intent_pattern_mode": {
+    "description": "启用意图句式匹配",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在 keyword 模式下生效。开启后会额外匹配“我...喜欢/讨厌/说过/提过”等自我信息回溯句式，每命中一次计 1 分。"
+  },
+  "intent_trigger_score_threshold": {
+    "description": "意图触发分数阈值",
+    "type": "int",
+    "default": 2,
+    "hint": "仅在 keyword 模式下生效。总分达到该阈值才触发记忆检索：强触发词 +2，弱触发词 +1，句式命中 +1。"
   },
   "enable_memory_decay": {
     "description": "启用记忆衰减",

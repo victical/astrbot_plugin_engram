@@ -27,11 +27,14 @@ import re
 import asyncio
 import time
 import datetime
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
+_ENGLISH_WORD_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
+_CHINESE_BLOCK_PATTERN = re.compile(r"[\u4e00-\u9fa5]+")
 
 
 class MemoryManager:
@@ -179,7 +182,129 @@ class MemoryManager:
             return False
         
         return True
+
+    def _generate_query_keywords(self, query: str):
+        """生成中英混合关键词：英文按词切分，中文按 2~4 gram 切分。"""
+        min_n = max(2, int(self.config.get("keyword_ngram_min", 2)))
+        max_n = max(min_n, int(self.config.get("keyword_ngram_max", 4)))
+        max_n = min(max_n, 6)  # 防御性上限，避免极端配置导致组合爆炸
+
+        common_stopwords = {
+            "a", "an", "the", "to", "of", "in", "on", "at", "is", "are", "i", "you", "he", "she", "it",
+            "我", "你", "他", "她", "它", "这", "那", "了", "啊", "呀", "吗", "呢", "吧", "和", "与", "及", "就", "也"
+        }
+        protected_tokens = {"ai", "ml", "db", "go", "c", "r"}
+
+        english_tokens = _ENGLISH_WORD_PATTERN.findall(query.lower())
+        query_keywords = set()
+
+        for token in english_tokens:
+            if not token:
+                continue
+            if len(token) <= 1 and token not in protected_tokens:
+                continue
+            if token in common_stopwords:
+                continue
+            query_keywords.add(token)
+
+        chinese_blocks = _CHINESE_BLOCK_PATTERN.findall(query)
+        for block in chinese_blocks:
+            block_len = len(block)
+            if block_len == 0:
+                continue
+            for n in range(min_n, max_n + 1):
+                if block_len < n:
+                    continue
+                for i in range(0, block_len - n + 1):
+                    gram = block[i:i + n]
+                    if gram in common_stopwords:
+                        continue
+                    query_keywords.add(gram)
+
+        return query_keywords
+
+    def _count_keyword_matches(self, keyword: str, summary_tokens_en, summary_ngrams_zh):
+        """边界感知匹配：英文按词边界，中文按 n-gram 精确计数。"""
+        if not keyword:
+            return 0
+
+        if _CHINESE_PATTERN.search(keyword):
+            return summary_ngrams_zh.get(keyword, 0)
+
+        return summary_tokens_en.get(keyword.lower(), 0)
+
+    def _calc_keyword_score(self, query: str, summary: str, corpus_stats: dict):
+        """计算关键词得分（边界感知匹配 + 近似 IDF）。"""
+        query_keywords = self._generate_query_keywords(query)
+        if not query_keywords or not summary:
+            return 0.0, query_keywords
+
+        summary_lower = summary.lower()
+        summary_tokens_en = Counter(_ENGLISH_WORD_PATTERN.findall(summary_lower))
+
+        min_n = max(2, int(self.config.get("keyword_ngram_min", 2)))
+        max_n = max(min_n, int(self.config.get("keyword_ngram_max", 4)))
+        max_n = min(max_n, 6)
+
+        summary_ngrams_zh = Counter()
+        chinese_blocks = _CHINESE_BLOCK_PATTERN.findall(summary)
+        for block in chinese_blocks:
+            block_len = len(block)
+            for n in range(min_n, max_n + 1):
+                if block_len < n:
+                    continue
+                for i in range(0, block_len - n + 1):
+                    summary_ngrams_zh[block[i:i + n]] += 1
+
+        matched_tf_sum = 0
+        doc_len = max(1, len(summary_tokens_en) + sum(summary_ngrams_zh.values()))
+
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80
+
+        keyword_score = 0.0
+        total_docs = max(1, int(corpus_stats.get("total_docs", 1)))
+        keyword_df = corpus_stats.get("keyword_doc_freq", {})
+
+        for keyword in query_keywords:
+            tf = self._count_keyword_matches(keyword, summary_tokens_en, summary_ngrams_zh)
+            if tf <= 0:
+                continue
+
+            matched_tf_sum += tf
+            norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+
+            # 稀有词提升（近似 IDF）：出现越少，权重越高
+            df = keyword_df.get(keyword, 0)
+            idf = 1.0 + ((total_docs + 1.0) / (df + 1.0))
+            keyword_score += norm_tf * min(4.0, idf)
+
+        coverage_bonus = min(1.5, matched_tf_sum / max(1, len(query_keywords)))
+        return keyword_score * (1.0 + 0.15 * coverage_bonus), query_keywords
     
+    def _calc_keyword_score_legacy(self, query_keywords, summary: str):
+        """旧版关键词打分：子串匹配 + BM25 风格 TF 饱和。"""
+        if not query_keywords or not summary:
+            return 0.0
+
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80
+
+        score = 0.0
+        summary_lower = summary.lower()
+        doc_len = max(1, len(summary_lower))
+
+        for keyword in query_keywords:
+            if keyword in summary_lower:
+                tf = summary_lower.count(keyword)
+                norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+                keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
+                score += norm_tf * keyword_weight
+
+        return score
+
     # ========== 消息记录 ==========
     
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
@@ -647,10 +772,62 @@ class MemoryManager:
         
         # 4. 只保留前 limit 条
         memory_data = memory_data[:limit]
-        
-        # 5. 构造带时间线背景和评分的记忆文本
+
+        # 5. 批量拉取索引、前序链路、原文，避免循环内多次 run_in_executor
+        index_ids = [item['index_id'] for item in memory_data]
+        db_indices = {}
+        prev_index_map = {}
+        raw_map = {}
+
+        if index_ids:
+            db_indices = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, index_ids)
+
+            # 按窗口宽度批量向前追溯上下文链路
+            if enable_context_hint and memory_context_window > 0:
+                pending_prev_ids = {
+                    db_indices[idx].prev_index_id
+                    for idx in index_ids
+                    if idx in db_indices and db_indices[idx].prev_index_id
+                }
+                for _ in range(memory_context_window):
+                    if not pending_prev_ids:
+                        break
+                    fetched_prev = await loop.run_in_executor(
+                        self.executor,
+                        self.db.get_prev_indices_by_ids,
+                        list(pending_prev_ids)
+                    )
+                    if not fetched_prev:
+                        break
+                    prev_index_map.update(fetched_prev)
+                    pending_prev_ids = {
+                        item.prev_index_id
+                        for item in fetched_prev.values()
+                        if item.prev_index_id and item.prev_index_id not in prev_index_map
+                    }
+
+            # 批量解析 ref_uuids 后，一次性获取所有原文
+            index_uuid_map = {}
+            for idx, db_index in db_indices.items():
+                if not db_index.ref_uuids:
+                    continue
+                try:
+                    uuids = json.loads(db_index.ref_uuids)
+                except (TypeError, ValueError):
+                    uuids = []
+                if uuids:
+                    index_uuid_map[idx] = uuids
+
+            if index_uuid_map:
+                raw_map = await loop.run_in_executor(
+                    self.executor,
+                    self.db.get_raw_memories_map_by_uuid_lists,
+                    index_uuid_map
+                )
+
+        # 6. 构造带时间线背景和评分的记忆文本
         all_memories = []
-        
+
         for data in memory_data:
             index_id = data['index_id']
             summary = data['summary']
@@ -668,42 +845,47 @@ class MemoryManager:
             
             # 尝试通过链表获取"前情提要"（可配置开关）
             context_hint = ""
-            db_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, index_id)
-            if self.config.get("enable_memory_context_hint", True) and db_index and db_index.prev_index_id:
-                prev_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, db_index.prev_index_id)
-                if prev_index:
-                    context_hint = f"（前情提要：{prev_index.summary[:50]}...）"
-            
-            # 获取原文 UUID 列表
+            db_index = db_indices.get(index_id)
+            if enable_context_hint and memory_context_window > 0 and db_index and db_index.prev_index_id:
+                timeline_snippets = []
+                prev_id = db_index.prev_index_id
+                step = 0
+                while prev_id and step < memory_context_window:
+                    prev_item = prev_index_map.get(prev_id)
+                    if not prev_item:
+                        break
+                    timeline_snippets.append(prev_item.summary[:24].replace("\n", " "))
+                    prev_id = prev_item.prev_index_id
+                    step += 1
+
+                if timeline_snippets:
+                    timeline_text = " ⟶ ".join(timeline_snippets)
+                    if len(timeline_text) > 80:
+                        timeline_text = timeline_text[:77] + "..."
+                    context_hint = f"\n   └ ⏪ 前情时间线：{timeline_text}"
+
+            # 获取原文预览（控制长度，避免提示词膨胀）
             raw_preview = ""
-            if db_index and db_index.ref_uuids:
-                uuids = json.loads(db_index.ref_uuids)
-                # 获取该总结对应的所有原文
-                raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
-                
-                # 使用公共过滤方法，取前 2 条有效原文作为证据参考
-                filtered_raw = [
-                    m.content[:60] for m in raw_msgs
-                    if self._is_valid_message_content(m.content)
-                ][:2]
-                
-                if filtered_raw:
-                    raw_preview = "\n   └ 📄 相关原文：\n" + "\n".join(
-                        [f"      {i+1}) {text}" for i, text in enumerate(filtered_raw)]
-                    )
-            
+            raw_msgs = raw_map.get(index_id, [])
+            filtered_raw = [
+                m.content[:50] for m in raw_msgs
+                if self._is_valid_message_content(m.content)
+            ][:1]
+            if filtered_raw:
+                raw_preview = f"\n   └ 📄 相关原文：{filtered_raw[0]}"
+
             # 添加 ID 信息（UUID 前 8 位）和相关性评分
             short_id = index_id[:8]
-            
+
             # 根据配置决定是否显示相关性评分
             if show_relevance_score:
                 relevance_badge = f"🎯 {relevance_percent}% | "
             else:
                 relevance_badge = ""
-            
+
             all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
-        
-        # 6. Reinforce：被成功召回的记忆增强 active_score
+
+        # 7. Reinforce：被成功召回的记忆增强 active_score
         reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
         if all_memories and reinforce_bonus > 0:
             for data in memory_data:
@@ -716,9 +898,9 @@ class MemoryManager:
                     )
                 except Exception as e:
                     logger.debug(f"Engram: Failed to reinforce memory {data['index_id'][:8]}: {e}")
-            
+
         return all_memories
-    
+
     async def get_memory_detail(self, user_id, sequence_num):
         """获取指定序号记忆的完整原文详情"""
         loop = asyncio.get_event_loop()
