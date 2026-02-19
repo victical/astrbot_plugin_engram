@@ -101,6 +101,42 @@ class DatabaseManager:
         with self.db.connection_context():
             return MemoryIndex.get_or_none(MemoryIndex.index_id == index_id)
 
+    def get_memory_indices_by_ids(self, index_ids):
+        """批量获取记忆索引，返回 {index_id: MemoryIndex} 映射"""
+        if not index_ids:
+            return {}
+        with self.db.connection_context():
+            query = MemoryIndex.select().where(MemoryIndex.index_id << list(index_ids))
+            return {item.index_id: item for item in query}
+
+    def get_memories_by_uuids_map(self, uuid_lists):
+        """批量获取原始消息，返回 {tuple(sorted_uuids): [RawMemory, ...]} 映射"""
+        if not uuid_lists:
+            return {}
+
+        normalized = []
+        all_uuids = set()
+        for uuids in uuid_lists:
+            if not uuids:
+                continue
+            key = tuple(sorted(str(u) for u in uuids if u))
+            if not key:
+                continue
+            normalized.append(key)
+            all_uuids.update(key)
+
+        if not all_uuids:
+            return {}
+
+        with self.db.connection_context():
+            rows = RawMemory.select().where(RawMemory.uuid << list(all_uuids)).order_by(RawMemory.timestamp.asc())
+            by_uuid = {row.uuid: row for row in rows}
+
+        result = {}
+        for key in normalized:
+            result[key] = [by_uuid[u] for u in key if u in by_uuid]
+        return result
+
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
             return list(MemoryIndex.select().where(MemoryIndex.user_id == user_id).order_by(MemoryIndex.created_at.desc()).limit(limit))

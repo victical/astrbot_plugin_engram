@@ -713,68 +713,93 @@ class MemoryManager:
         
         # 4. 只保留前 limit 条
         memory_data = memory_data[:limit]
-        
-        # 5. 构造带时间线背景和评分的记忆文本
+        # 5. 构造带时间线背景和评分的记忆文本（批量查询，避免 N+1）
         all_memories = []
-        
+
+        index_ids = [item['index_id'] for item in memory_data]
+        index_map = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, index_ids)
+
+        context_window = max(1, int(self.config.get("memory_context_window", 1)))
+        context_window = min(context_window, 5)
+
+        # 按配置窗口收集前情索引 ID（链路展开）
+        context_prev_ids = set()
+        context_prev_map = {}
+        if self.config.get("enable_memory_context_hint", True):
+            frontier = [index_map[idx].prev_index_id for idx in index_ids if index_map.get(idx) and index_map[idx].prev_index_id]
+            for _ in range(context_window):
+                if not frontier:
+                    break
+                prev_map = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, frontier)
+                next_frontier = []
+                for pid, pidx in prev_map.items():
+                    context_prev_ids.add(pid)
+                    if pidx and pidx.prev_index_id:
+                        next_frontier.append(pidx.prev_index_id)
+                frontier = next_frontier
+            if context_prev_ids:
+                context_prev_map = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, list(context_prev_ids))
+
+        # 批量拉取原文消息
+        uuid_lists = []
+        for idx in index_ids:
+            db_index = index_map.get(idx)
+            if not db_index or not db_index.ref_uuids:
+                continue
+            try:
+                uuids = json.loads(db_index.ref_uuids)
+            except Exception:
+                uuids = []
+            if uuids:
+                uuid_lists.append(uuids)
+
+        raw_map = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids_map, uuid_lists) if uuid_lists else {}
+
         for data in memory_data:
             index_id = data['index_id']
             summary = data['summary']
             metadata = data['metadata']
             distance = data['distance']
-            keyword_score = data.get('keyword_score', 0)
             created_at = metadata.get("created_at", "未知时间")
-            
-            # 计算显示的相关性百分比
-            # 用向量距离做"绝对质量"惩罚：距离越大，分数打折越多
+
             quality_factor = max(0.0, 1.5 - distance) / 1.5
-            
             if enable_keyword_boost and query_keywords and memory_data:
-                # RRF 模式：相对于最佳结果归一化，再乘以质量因子
                 best_rrf = memory_data[0].get('rrf_score', 1e-9)
                 raw_percent = data.get('rrf_score', 0) / max(best_rrf, 1e-9) * 100
                 relevance_percent = max(0, min(100, int(raw_percent * quality_factor)))
             else:
-                # 纯向量模式
                 relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
-            
-            # 尝试通过链表获取"前情提要"（可配置开关）
+
+            db_index = index_map.get(index_id)
             context_hint = ""
-            db_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, index_id)
-            if self.config.get("enable_memory_context_hint", True) and db_index and db_index.prev_index_id:
-                prev_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, db_index.prev_index_id)
-                if prev_index:
-                    context_hint = f"（前情提要：{prev_index.summary[:50]}...）"
-            
-            # 获取原文 UUID 列表
+            if self.config.get("enable_memory_context_hint", True) and db_index:
+                snippets = []
+                prev_id = db_index.prev_index_id
+                for _ in range(context_window):
+                    if not prev_id:
+                        break
+                    prev_index = context_prev_map.get(prev_id)
+                    if not prev_index:
+                        break
+                    snippets.append(prev_index.summary[:50])
+                    prev_id = prev_index.prev_index_id
+                if snippets:
+                    context_hint = f"（前情提要：{' → '.join(snippets)}...）"
+
             raw_preview = ""
             if db_index and db_index.ref_uuids:
-                uuids = json.loads(db_index.ref_uuids)
-                # 获取该总结对应的所有原文
-                raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
-                
-                # 使用公共过滤方法，取前 2 条有效原文作为证据参考
-                filtered_raw = [
-                    m.content[:60] for m in raw_msgs
-                    if self._is_valid_message_content(m.content)
-                ][:2]
-                
+                try:
+                    uuids = tuple(sorted(str(u) for u in json.loads(db_index.ref_uuids) if u))
+                except Exception:
+                    uuids = tuple()
+                raw_msgs = raw_map.get(uuids, []) if uuids else []
+                filtered_raw = [m.content[:60] for m in raw_msgs if self._is_valid_message_content(m.content)][:2]
                 if filtered_raw:
-                    raw_preview = "\n   └ 📄 相关原文：\n" + "\n".join(
-                        [f"      {i+1}) {text}" for i, text in enumerate(filtered_raw)]
-                    )
-            
-            # 添加 ID 信息（UUID 前 8 位）和相关性评分
+                    raw_preview = "\n   └ 📄 相关原文：\n" + "\n".join([f"      {i+1}) {text}" for i, text in enumerate(filtered_raw)])
+
             short_id = index_id[:8]
-            
-            # 根据配置决定是否显示相关性评分
-            if show_relevance_score:
-                relevance_badge = f"🎯 {relevance_percent}% | "
-            else:
-                relevance_badge = ""
-            
+            relevance_badge = f"🎯 {relevance_percent}% | " if show_relevance_score else ""
             all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
-        
         # 6. Reinforce：被成功召回的记忆增强 active_score
         reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
         if all_memories and reinforce_bonus > 0:
