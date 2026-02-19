@@ -719,15 +719,16 @@ class MemoryManager:
         index_ids = [item['index_id'] for item in memory_data]
         index_map = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, index_ids)
 
-        context_window = max(1, int(self.config.get("memory_context_window", 1)))
-        context_window = min(context_window, 5)
+        enable_context_hint = self.config.get("enable_memory_context_hint", True)
+        memory_context_window = max(0, int(self.config.get("memory_context_window", 1)))
+        memory_context_window = min(memory_context_window, 5)
 
         # 按配置窗口收集前情索引 ID（链路展开）
         context_prev_ids = set()
         context_prev_map = {}
-        if self.config.get("enable_memory_context_hint", True):
+        if enable_context_hint and memory_context_window > 0:
             frontier = [index_map[idx].prev_index_id for idx in index_ids if index_map.get(idx) and index_map[idx].prev_index_id]
-            for _ in range(context_window):
+            for _ in range(memory_context_window):
                 if not frontier:
                     break
                 prev_map = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, frontier)
@@ -772,19 +773,23 @@ class MemoryManager:
 
             db_index = index_map.get(index_id)
             context_hint = ""
-            if self.config.get("enable_memory_context_hint", True) and db_index:
+            if enable_context_hint and memory_context_window > 0 and db_index:
                 snippets = []
                 prev_id = db_index.prev_index_id
-                for _ in range(context_window):
+                for _ in range(memory_context_window):
                     if not prev_id:
                         break
                     prev_index = context_prev_map.get(prev_id)
                     if not prev_index:
                         break
-                    snippets.append(prev_index.summary[:50])
+                    snippet = prev_index.summary[:24].replace("\n", " ")
+                    snippets.append(snippet)
                     prev_id = prev_index.prev_index_id
                 if snippets:
-                    context_hint = f"（前情提要：{' → '.join(snippets)}...）"
+                    timeline_text = " → ".join(snippets)
+                    if len(timeline_text) > 80:
+                        timeline_text = timeline_text[:77] + "..."
+                    context_hint = f"（前情提要：{timeline_text}）"
 
             raw_preview = ""
             if db_index and db_index.ref_uuids:
