@@ -101,6 +101,40 @@ class DatabaseManager:
         with self.db.connection_context():
             return MemoryIndex.get_or_none(MemoryIndex.index_id == index_id)
 
+    def get_memory_indices_by_ids(self, ids):
+        """批量获取记忆索引，返回 {index_id: MemoryIndex} 映射"""
+        if not ids:
+            return {}
+        with self.db.connection_context():
+            indices = MemoryIndex.select().where(MemoryIndex.index_id << ids)
+            return {item.index_id: item for item in indices}
+
+    def get_prev_indices_by_ids(self, prev_ids):
+        """批量获取前序记忆索引，返回 {index_id: MemoryIndex} 映射"""
+        if not prev_ids:
+            return {}
+        with self.db.connection_context():
+            prev_indices = MemoryIndex.select().where(MemoryIndex.index_id << prev_ids)
+            return {item.index_id: item for item in prev_indices}
+
+    def get_raw_memories_map_by_uuid_lists(self, index_uuid_map):
+        """按 index_id 批量获取原始消息，返回 {index_id: [RawMemory, ...]}"""
+        if not index_uuid_map:
+            return {}
+
+        all_uuids = list({u for uuid_list in index_uuid_map.values() for u in uuid_list})
+        if not all_uuids:
+            return {index_id: [] for index_id in index_uuid_map.keys()}
+
+        with self.db.connection_context():
+            raw_msgs = list(RawMemory.select().where(RawMemory.uuid << all_uuids))
+
+        uuid_to_msg = {msg.uuid: msg for msg in raw_msgs}
+        grouped = {}
+        for index_id, uuid_list in index_uuid_map.items():
+            grouped[index_id] = [uuid_to_msg[u] for u in uuid_list if u in uuid_to_msg]
+        return grouped
+
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
             return list(MemoryIndex.select().where(MemoryIndex.user_id == user_id).order_by(MemoryIndex.created_at.desc()).limit(limit))

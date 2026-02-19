@@ -467,9 +467,9 @@ class MemoryManager:
         """检索相关记忆并返回原文摘要及背景（基于时间链），使用关键词重排序提升精确匹配"""
         # 确保 ChromaDB 已初始化
         await self._ensure_chroma_initialized()
-        
+
         loop = asyncio.get_event_loop()
-        
+
         # 1. ChromaDB 检索（多取一些结果以便过滤和重排序后仍有足够数据）
         query_params = {
             "query_texts": [query],
@@ -477,15 +477,21 @@ class MemoryManager:
             "where": {"user_id": user_id}
         }
         results = await loop.run_in_executor(self.executor, lambda: self.collection.query(**query_params))
-        
+
         if not results or not results['ids'] or not results['ids'][0]:
             return []
-        
+
         # 获取配置
         similarity_threshold = self.config.get("memory_similarity_threshold", 1.5)
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
-        
+        enable_context_hint = self.config.get("enable_memory_context_hint", True)
+        try:
+            memory_context_window = int(self.config.get("memory_context_window", 2))
+        except (ValueError, TypeError):
+            memory_context_window = 2
+        memory_context_window = max(0, min(memory_context_window, 5))
+
         # 解析关键词权重（新格式直接是数值字符串 "0.5"）
         weight_config = self.config.get("keyword_boost_weight", "0.5")
         try:
@@ -494,36 +500,36 @@ class MemoryManager:
             # 向后兼容旧格式 "均衡模式 (0.5)"
             match = re.search(r'\(([\d.]+)\)', str(weight_config))
             keyword_boost_weight = float(match.group(1)) if match else 0.5
-        
+
         # 2. 预处理结果并计算关键词匹配度（BM25 风格）
         distances = results.get('distances', [[]])[0] if 'distances' in results else []
         memory_data = []
-        
+
         # 提取查询关键词（正则一次性分割：匹配所有非单词字符）
         query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
-        
+
         # BM25 参数
         _bm25_k1 = 1.2
         _bm25_b = 0.75
         _avg_doc_len = 80  # 摘要的典型长度估计
-        
+
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
-            
+
             # 过滤低相关性结果
             if distance > similarity_threshold:
                 logger.debug(f"Skipping memory with distance {distance:.3f} (threshold: {similarity_threshold})")
                 continue
-            
+
             index_id = results['ids'][0][i]
             summary = results['documents'][0][i]
             metadata = results['metadatas'][0][i]
-            
+
             # BM25 风格关键词匹配：TF 饱和 + 文档长度归一化
             keyword_score = 0.0
             summary_lower = summary.lower()
             doc_len = max(1, len(summary_lower))
-            
+
             for keyword in query_keywords:
                 if keyword in summary_lower:
                     tf = summary_lower.count(keyword)
@@ -532,7 +538,7 @@ class MemoryManager:
                     # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
                     keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
                     keyword_score += norm_tf * keyword_weight
-            
+
             memory_data.append({
                 'index_id': index_id,
                 'summary': summary,
@@ -540,30 +546,30 @@ class MemoryManager:
                 'distance': distance,
                 'keyword_score': keyword_score
             })
-        
+
         # 3. RRF (Reciprocal Rank Fusion) 融合排序
         #    RRF_score(d) = w_v / (k + rank_vector(d)) + w_k / (k + rank_keyword(d))
         #    k=60 是标准值，keyword_boost_weight 控制两路信号的权重比例
         rrf_k = 60
-        
+
         if enable_keyword_boost and query_keywords and len(memory_data) > 1:
             vector_w = 1.0 - keyword_boost_weight
             keyword_w = keyword_boost_weight
-            
+
             # 按向量距离排名（距离越小排名越靠前，rank 从 1 开始）
             sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
             vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
-            
+
             # 按关键词得分排名（得分越高排名越靠前）
             sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
             keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
-            
+
             # 计算 RRF 融合得分
             for i, data in enumerate(memory_data):
                 rrf_vector = vector_w / (rrf_k + vector_rank[i])
                 rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
                 data['rrf_score'] = rrf_vector + rrf_keyword
-            
+
             # 按 RRF 得分排序（得分越高越靠前）
             memory_data.sort(key=lambda x: x['rrf_score'], reverse=True)
         else:
@@ -571,25 +577,76 @@ class MemoryManager:
             for data in memory_data:
                 data['rrf_score'] = max(0, 1 - data['distance'] / 2.0)
             memory_data.sort(key=lambda x: x['distance'])
-        
+
         # 4. 只保留前 limit 条
         memory_data = memory_data[:limit]
-        
-        # 5. 构造带时间线背景和评分的记忆文本
+
+        # 5. 批量拉取索引、前序链路、原文，避免循环内多次 run_in_executor
+        index_ids = [item['index_id'] for item in memory_data]
+        db_indices = {}
+        prev_index_map = {}
+        raw_map = {}
+
+        if index_ids:
+            db_indices = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, index_ids)
+
+            # 按窗口宽度批量向前追溯上下文链路
+            if enable_context_hint and memory_context_window > 0:
+                pending_prev_ids = {
+                    db_indices[idx].prev_index_id
+                    for idx in index_ids
+                    if idx in db_indices and db_indices[idx].prev_index_id
+                }
+                for _ in range(memory_context_window):
+                    if not pending_prev_ids:
+                        break
+                    fetched_prev = await loop.run_in_executor(
+                        self.executor,
+                        self.db.get_prev_indices_by_ids,
+                        list(pending_prev_ids)
+                    )
+                    if not fetched_prev:
+                        break
+                    prev_index_map.update(fetched_prev)
+                    pending_prev_ids = {
+                        item.prev_index_id
+                        for item in fetched_prev.values()
+                        if item.prev_index_id and item.prev_index_id not in prev_index_map
+                    }
+
+            # 批量解析 ref_uuids 后，一次性获取所有原文
+            index_uuid_map = {}
+            for idx, db_index in db_indices.items():
+                if not db_index.ref_uuids:
+                    continue
+                try:
+                    uuids = json.loads(db_index.ref_uuids)
+                except (TypeError, ValueError):
+                    uuids = []
+                if uuids:
+                    index_uuid_map[idx] = uuids
+
+            if index_uuid_map:
+                raw_map = await loop.run_in_executor(
+                    self.executor,
+                    self.db.get_raw_memories_map_by_uuid_lists,
+                    index_uuid_map
+                )
+
+        # 6. 构造带时间线背景和评分的记忆文本
         all_memories = []
-        
+
         for data in memory_data:
             index_id = data['index_id']
             summary = data['summary']
             metadata = data['metadata']
             distance = data['distance']
-            keyword_score = data.get('keyword_score', 0)
             created_at = metadata.get("created_at", "未知时间")
-            
+
             # 计算显示的相关性百分比
             # 用向量距离做"绝对质量"惩罚：距离越大，分数打折越多
             quality_factor = max(0.0, 1.5 - distance) / 1.5
-            
+
             if enable_keyword_boost and query_keywords and memory_data:
                 # RRF 模式：相对于最佳结果归一化，再乘以质量因子
                 best_rrf = memory_data[0].get('rrf_score', 1e-9)
@@ -598,45 +655,50 @@ class MemoryManager:
             else:
                 # 纯向量模式
                 relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
-            
-            # 尝试通过链表获取"前情提要"（可配置开关）
+
+            # 可配置上下文窗口：优先当前命中摘要，再附简短时间线片段，避免提示膨胀
             context_hint = ""
-            db_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, index_id)
-            if self.config.get("enable_memory_context_hint", True) and db_index and db_index.prev_index_id:
-                prev_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, db_index.prev_index_id)
-                if prev_index:
-                    context_hint = f"（前情提要：{prev_index.summary[:50]}...）"
-            
-            # 获取原文 UUID 列表
+            db_index = db_indices.get(index_id)
+            if enable_context_hint and memory_context_window > 0 and db_index and db_index.prev_index_id:
+                timeline_snippets = []
+                prev_id = db_index.prev_index_id
+                step = 0
+                while prev_id and step < memory_context_window:
+                    prev_item = prev_index_map.get(prev_id)
+                    if not prev_item:
+                        break
+                    timeline_snippets.append(prev_item.summary[:24].replace("\n", " "))
+                    prev_id = prev_item.prev_index_id
+                    step += 1
+
+                if timeline_snippets:
+                    timeline_text = " ⟶ ".join(timeline_snippets)
+                    if len(timeline_text) > 80:
+                        timeline_text = timeline_text[:77] + "..."
+                    context_hint = f"\n   └ ⏪ 前情时间线：{timeline_text}"
+
+            # 获取原文预览（控制长度，避免提示词膨胀）
             raw_preview = ""
-            if db_index and db_index.ref_uuids:
-                uuids = json.loads(db_index.ref_uuids)
-                # 获取该总结对应的所有原文
-                raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
-                
-                # 使用公共过滤方法，取前 2 条有效原文作为证据参考
-                filtered_raw = [
-                    m.content[:60] for m in raw_msgs
-                    if self._is_valid_message_content(m.content)
-                ][:2]
-                
-                if filtered_raw:
-                    raw_preview = "\n   └ 📄 相关原文：\n" + "\n".join(
-                        [f"      {i+1}) {text}" for i, text in enumerate(filtered_raw)]
-                    )
-            
+            raw_msgs = raw_map.get(index_id, [])
+            filtered_raw = [
+                m.content[:50] for m in raw_msgs
+                if self._is_valid_message_content(m.content)
+            ][:1]
+            if filtered_raw:
+                raw_preview = f"\n   └ 📄 相关原文：{filtered_raw[0]}"
+
             # 添加 ID 信息（UUID 前 8 位）和相关性评分
             short_id = index_id[:8]
-            
+
             # 根据配置决定是否显示相关性评分
             if show_relevance_score:
                 relevance_badge = f"🎯 {relevance_percent}% | "
             else:
                 relevance_badge = ""
-            
+
             all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
-        
-        # 6. Reinforce：被成功召回的记忆增强 active_score
+
+        # 7. Reinforce：被成功召回的记忆增强 active_score
         reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
         if all_memories and reinforce_bonus > 0:
             for data in memory_data:
@@ -649,9 +711,9 @@ class MemoryManager:
                     )
                 except Exception as e:
                     logger.debug(f"Engram: Failed to reinforce memory {data['index_id'][:8]}: {e}")
-            
+
         return all_memories
-    
+
     async def get_memory_detail(self, user_id, sequence_num):
         """获取指定序号记忆的完整原文详情"""
         loop = asyncio.get_event_loop()
