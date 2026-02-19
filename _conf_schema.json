@@ -66,10 +66,66 @@
   "keyword_boost_weight": {
     "description": "RRF 融合权重（关键词 vs 向量）",
     "type": "string",
-    "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
-    "labels": ["纯向量模式", "向量优先", "均衡融合（推荐）", "关键词优先", "纯关键词模式"],
+    "options": [
+      "0.0",
+      "0.3",
+      "0.5",
+      "0.7",
+      "1.0"
+    ],
+    "labels": [
+      "纯向量模式",
+      "向量优先",
+      "均衡融合（推荐）",
+      "关键词优先",
+      "纯关键词模式"
+    ],
     "default": "0.5",
     "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
+  },
+  "rank_strategy": {
+    "description": "记忆排序策略",
+    "type": "string",
+    "options": [
+      "rrf",
+      "hybrid"
+    ],
+    "labels": [
+      "RRF（可回退，兼容旧行为）",
+      "Hybrid（向量+关键词+时效+活跃度）"
+    ],
+    "default": "rrf",
+    "hint": "rrf 使用倒数排序融合（旧逻辑）；hybrid 使用统一混合分。建议先从 rrf 平滑迁移。"
+  },
+  "rank_weight_vector": {
+    "description": "Hybrid 向量分权重",
+    "type": "float",
+    "default": 0.5,
+    "hint": "仅在 rank_strategy=hybrid 时生效。由向量 distance 归一化得到 vector_score。"
+  },
+  "rank_weight_keyword": {
+    "description": "Hybrid 关键词分权重",
+    "type": "float",
+    "default": 0.5,
+    "hint": "仅在 rank_strategy=hybrid 时生效。由 BM25 风格关键词匹配归一化得到 keyword_score。"
+  },
+  "rank_weight_recency": {
+    "description": "Hybrid 时效分权重",
+    "type": "float",
+    "default": 0.08,
+    "hint": "仅在 rank_strategy=hybrid 时生效。基于 created_at 时间衰减计算 recency_score。"
+  },
+  "rank_weight_activity": {
+    "description": "Hybrid 活跃分权重",
+    "type": "float",
+    "default": 0.06,
+    "hint": "仅在 rank_strategy=hybrid 时生效。基于 active_score 归一化计算 activity_score；当 enable_memory_decay=false 时会自动降权。"
+  },
+  "rank_recency_half_life_days": {
+    "description": "Hybrid 时效半衰期（天）",
+    "type": "float",
+    "default": 30,
+    "hint": "仅在 rank_strategy=hybrid 时生效。值越小越偏向近期记忆。"
   },
   "show_relevance_score": {
     "description": "显示记忆相关性评分",
@@ -86,8 +142,16 @@
   "memory_intent_mode": {
     "description": "记忆检索意图过滤模式",
     "type": "string",
-    "options": ["disabled", "keyword", "llm"],
-    "labels": ["禁用（每条消息都检索）", "关键词匹配（零成本）", "LLM 小模型判断（高精度）"],
+    "options": [
+      "disabled",
+      "keyword",
+      "llm"
+    ],
+    "labels": [
+      "禁用（每条消息都检索）",
+      "关键词匹配（零成本）",
+      "LLM 小模型判断（高精度）"
+    ],
     "default": "keyword",
     "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
   },
@@ -202,7 +266,12 @@
   "command_prefixes": {
     "description": "指令前缀列表",
     "type": "list",
-    "default": ["/", "!", "#", "~"],
+    "default": [
+      "/",
+      "!",
+      "#",
+      "~"
+    ],
     "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
   },
   "enable_full_command_detection": {
@@ -214,7 +283,12 @@
   "full_command_list": {
     "description": "完整指令列表",
     "type": "list",
-    "default": ["new", "help", "reset", "clear"],
+    "default": [
+      "new",
+      "help",
+      "reset",
+      "clear"
+    ],
     "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
   },
   "embedding_provider": {

@@ -464,12 +464,12 @@ class MemoryManager:
     # ========== 记忆检索 ==========
     
     async def retrieve_memories(self, user_id, query, limit=3):
-        """检索相关记忆并返回原文摘要及背景（基于时间链），使用关键词重排序提升精确匹配"""
+        """检索相关记忆并返回原文摘要及背景（基于时间链），支持 RRF/混合策略排序"""
         # 确保 ChromaDB 已初始化
         await self._ensure_chroma_initialized()
-        
+
         loop = asyncio.get_event_loop()
-        
+
         # 1. ChromaDB 检索（多取一些结果以便过滤和重排序后仍有足够数据）
         query_params = {
             "query_texts": [query],
@@ -477,15 +477,19 @@ class MemoryManager:
             "where": {"user_id": user_id}
         }
         results = await loop.run_in_executor(self.executor, lambda: self.collection.query(**query_params))
-        
+
         if not results or not results['ids'] or not results['ids'][0]:
             return []
-        
+
         # 获取配置
         similarity_threshold = self.config.get("memory_similarity_threshold", 1.5)
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
-        
+        enable_memory_decay = self.config.get("enable_memory_decay", True)
+        rank_strategy = str(self.config.get("rank_strategy", "rrf")).lower()
+        if rank_strategy not in {"rrf", "hybrid"}:
+            rank_strategy = "rrf"
+
         # 解析关键词权重（新格式直接是数值字符串 "0.5"）
         weight_config = self.config.get("keyword_boost_weight", "0.5")
         try:
@@ -494,36 +498,47 @@ class MemoryManager:
             # 向后兼容旧格式 "均衡模式 (0.5)"
             match = re.search(r'\(([\d.]+)\)', str(weight_config))
             keyword_boost_weight = float(match.group(1)) if match else 0.5
-        
+
+        # 混合排序权重（默认近似现有行为：向量+关键词主导）
+        weight_vector = float(self.config.get("rank_weight_vector", max(0.0, 1.0 - keyword_boost_weight)))
+        weight_keyword = float(self.config.get("rank_weight_keyword", keyword_boost_weight))
+        weight_recency = float(self.config.get("rank_weight_recency", 0.08))
+        weight_activity = float(self.config.get("rank_weight_activity", 0.06))
+
+        # 仅在启用记忆衰减时保留 activity 强影响，否则降权，避免语义冲突
+        if not enable_memory_decay:
+            weight_activity *= 0.2
+
         # 2. 预处理结果并计算关键词匹配度（BM25 风格）
         distances = results.get('distances', [[]])[0] if 'distances' in results else []
+        metadatas = results.get('metadatas', [[]])[0] if 'metadatas' in results else []
         memory_data = []
-        
+
         # 提取查询关键词（正则一次性分割：匹配所有非单词字符）
         query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
-        
+
         # BM25 参数
         _bm25_k1 = 1.2
         _bm25_b = 0.75
         _avg_doc_len = 80  # 摘要的典型长度估计
-        
+
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
-            
+
             # 过滤低相关性结果
             if distance > similarity_threshold:
                 logger.debug(f"Skipping memory with distance {distance:.3f} (threshold: {similarity_threshold})")
                 continue
-            
+
             index_id = results['ids'][0][i]
             summary = results['documents'][0][i]
-            metadata = results['metadatas'][0][i]
-            
+            metadata = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+
             # BM25 风格关键词匹配：TF 饱和 + 文档长度归一化
             keyword_score = 0.0
             summary_lower = summary.lower()
             doc_len = max(1, len(summary_lower))
-            
+
             for keyword in query_keywords:
                 if keyword in summary_lower:
                     tf = summary_lower.count(keyword)
@@ -532,45 +547,103 @@ class MemoryManager:
                     # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
                     keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
                     keyword_score += norm_tf * keyword_weight
-            
+
             memory_data.append({
                 'index_id': index_id,
                 'summary': summary,
                 'metadata': metadata,
                 'distance': distance,
-                'keyword_score': keyword_score
+                'keyword_score': keyword_score,
+                'rank_score': 0.0,
+                'display_score': 0.0
             })
-        
-        # 3. RRF (Reciprocal Rank Fusion) 融合排序
-        #    RRF_score(d) = w_v / (k + rank_vector(d)) + w_k / (k + rank_keyword(d))
-        #    k=60 是标准值，keyword_boost_weight 控制两路信号的权重比例
+
+        if not memory_data:
+            return []
+
+        # 批量查询索引信息（active_score, created_at）
+        index_ids = [item['index_id'] for item in memory_data]
+        index_map = await loop.run_in_executor(self.executor, self.db.get_memory_indexes_by_ids, index_ids)
+
+        now_ts = time.time()
+        # 30天半衰期：越近的记忆 recency 越高
+        recency_half_life_days = float(self.config.get("rank_recency_half_life_days", 30))
+        recency_half_life_days = max(1.0, recency_half_life_days)
+        recency_lambda = 0.693 / (recency_half_life_days * 86400)
+
+        active_scores = []
+        keyword_scores = [item['keyword_score'] for item in memory_data]
+
+        for item in memory_data:
+            db_index = index_map.get(item['index_id'])
+            created_dt = db_index.created_at if db_index else None
+            active_score = float(db_index.active_score) if db_index else 100.0
+            item['created_at_dt'] = created_dt
+            item['active_score'] = active_score
+            active_scores.append(active_score)
+
+            # 向量分：由 distance 归一化
+            item['vector_score'] = max(0.0, min(1.0, 1 - item['distance'] / max(similarity_threshold, 1e-6)))
+
+            # 时间衰减分
+            if created_dt:
+                age_seconds = max(0.0, now_ts - created_dt.timestamp())
+                item['recency_score'] = max(0.0, min(1.0, pow(2.718281828, -recency_lambda * age_seconds)))
+            else:
+                item['recency_score'] = 0.5
+
+        # 归一化 keyword_score / active_score
+        max_keyword = max(keyword_scores) if keyword_scores else 0.0
+        min_active = min(active_scores) if active_scores else 0.0
+        max_active = max(active_scores) if active_scores else 1.0
+        active_range = max(max_active - min_active, 1e-6)
+
+        for item in memory_data:
+            item['keyword_score_norm'] = (item['keyword_score'] / max_keyword) if max_keyword > 0 else 0.0
+            item['activity_score'] = (item['active_score'] - min_active) / active_range
+
+        # 3. 排序策略：RRF（可回退）或 Hybrid（四路融合）
         rrf_k = 60
-        
-        if enable_keyword_boost and query_keywords and len(memory_data) > 1:
-            vector_w = 1.0 - keyword_boost_weight
-            keyword_w = keyword_boost_weight
-            
-            # 按向量距离排名（距离越小排名越靠前，rank 从 1 开始）
-            sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
-            vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
-            
-            # 按关键词得分排名（得分越高排名越靠前）
-            sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
-            keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
-            
-            # 计算 RRF 融合得分
-            for i, data in enumerate(memory_data):
-                rrf_vector = vector_w / (rrf_k + vector_rank[i])
-                rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
-                data['rrf_score'] = rrf_vector + rrf_keyword
-            
-            # 按 RRF 得分排序（得分越高越靠前）
-            memory_data.sort(key=lambda x: x['rrf_score'], reverse=True)
+        use_keyword = enable_keyword_boost and query_keywords and len(memory_data) > 1
+
+        if rank_strategy == "rrf":
+            if use_keyword:
+                vector_w = 1.0 - keyword_boost_weight
+                keyword_w = keyword_boost_weight
+
+                sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
+                vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
+
+                sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
+                keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
+
+                for i, data in enumerate(memory_data):
+                    rrf_vector = vector_w / (rrf_k + vector_rank[i])
+                    rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
+                    data['rank_score'] = rrf_vector + rrf_keyword
+                    data['display_score'] = data['rank_score']
+
+                memory_data.sort(key=lambda x: x['rank_score'], reverse=True)
+            else:
+                for data in memory_data:
+                    data['rank_score'] = data['vector_score']
+                    data['display_score'] = data['rank_score']
+                memory_data.sort(key=lambda x: x['distance'])
         else:
-            # 纯向量模式或无关键词：退化为按距离排序
+            total_w = weight_vector + weight_keyword + weight_recency + weight_activity
+            if total_w <= 0:
+                total_w = 1.0
+
             for data in memory_data:
-                data['rrf_score'] = max(0, 1 - data['distance'] / 2.0)
-            memory_data.sort(key=lambda x: x['distance'])
+                data['rank_score'] = (
+                    weight_vector * data['vector_score'] +
+                    weight_keyword * (data['keyword_score_norm'] if enable_keyword_boost else 0.0) +
+                    weight_recency * data['recency_score'] +
+                    weight_activity * data['activity_score']
+                ) / total_w
+                data['display_score'] = data['rank_score']
+
+            memory_data.sort(key=lambda x: x['rank_score'], reverse=True)
         
         # 4. 只保留前 limit 条
         memory_data = memory_data[:limit]
@@ -583,21 +656,15 @@ class MemoryManager:
             summary = data['summary']
             metadata = data['metadata']
             distance = data['distance']
-            keyword_score = data.get('keyword_score', 0)
             created_at = metadata.get("created_at", "未知时间")
-            
-            # 计算显示的相关性百分比
-            # 用向量距离做"绝对质量"惩罚：距离越大，分数打折越多
-            quality_factor = max(0.0, 1.5 - distance) / 1.5
-            
-            if enable_keyword_boost and query_keywords and memory_data:
-                # RRF 模式：相对于最佳结果归一化，再乘以质量因子
-                best_rrf = memory_data[0].get('rrf_score', 1e-9)
-                raw_percent = data.get('rrf_score', 0) / max(best_rrf, 1e-9) * 100
+
+            if rank_strategy == "rrf" and use_keyword and memory_data:
+                quality_factor = max(0.0, 1.5 - distance) / 1.5
+                best_score = memory_data[0].get('display_score', 1e-9)
+                raw_percent = data.get('display_score', 0) / max(best_score, 1e-9) * 100
                 relevance_percent = max(0, min(100, int(raw_percent * quality_factor)))
             else:
-                # 纯向量模式
-                relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
+                relevance_percent = max(0, min(100, int(data.get('display_score', 0) * 100)))
             
             # 尝试通过链表获取"前情提要"（可配置开关）
             context_hint = ""

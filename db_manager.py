@@ -101,6 +101,14 @@ class DatabaseManager:
         with self.db.connection_context():
             return MemoryIndex.get_or_none(MemoryIndex.index_id == index_id)
 
+    def get_memory_indexes_by_ids(self, index_ids):
+        """批量获取记忆索引，返回 {index_id: MemoryIndex} 映射"""
+        if not index_ids:
+            return {}
+        with self.db.connection_context():
+            query = MemoryIndex.select().where(MemoryIndex.index_id << index_ids)
+            return {item.index_id: item for item in query}
+
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
             return list(MemoryIndex.select().where(MemoryIndex.user_id == user_id).order_by(MemoryIndex.created_at.desc()).limit(limit))
