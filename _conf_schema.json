@@ -66,8 +66,20 @@
   "keyword_boost_weight": {
     "description": "RRF 融合权重（关键词 vs 向量）",
     "type": "string",
-    "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
-    "labels": ["纯向量模式", "向量优先", "均衡融合（推荐）", "关键词优先", "纯关键词模式"],
+    "options": [
+      "0.0",
+      "0.3",
+      "0.5",
+      "0.7",
+      "1.0"
+    ],
+    "labels": [
+      "纯向量模式",
+      "向量优先",
+      "均衡融合（推荐）",
+      "关键词优先",
+      "纯关键词模式"
+    ],
     "default": "0.5",
     "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
   },
@@ -86,8 +98,16 @@
   "memory_intent_mode": {
     "description": "记忆检索意图过滤模式",
     "type": "string",
-    "options": ["disabled", "keyword", "llm"],
-    "labels": ["禁用（每条消息都检索）", "关键词匹配（零成本）", "LLM 小模型判断（高精度）"],
+    "options": [
+      "disabled",
+      "keyword",
+      "llm"
+    ],
+    "labels": [
+      "禁用（每条消息都检索）",
+      "关键词匹配（零成本）",
+      "LLM 小模型判断（高精度）"
+    ],
     "default": "keyword",
     "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
   },
@@ -103,6 +123,28 @@
     "type": "int",
     "default": 4,
     "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
+  },
+  "intent_weak_triggers": {
+    "description": "意图弱触发词列表",
+    "type": "list",
+    "default": [
+      "我喜欢什么",
+      "我说过吗",
+      "你知道我"
+    ],
+    "hint": "仅在 keyword 模式下生效。弱触发词每命中一次计 1 分，通常用于补充语义较弱但可能需要回溯的问法。"
+  },
+  "intent_pattern_mode": {
+    "description": "启用意图句式匹配",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在 keyword 模式下生效。开启后会额外匹配“我...喜欢/讨厌/说过/提过”等自我信息回溯句式，每命中一次计 1 分。"
+  },
+  "intent_trigger_score_threshold": {
+    "description": "意图触发分数阈值",
+    "type": "int",
+    "default": 2,
+    "hint": "仅在 keyword 模式下生效。总分达到该阈值才触发记忆检索：强触发词 +2，弱触发词 +1，句式命中 +1。"
   },
   "enable_memory_decay": {
     "description": "启用记忆衰减",
@@ -202,7 +244,12 @@
   "command_prefixes": {
     "description": "指令前缀列表",
     "type": "list",
-    "default": ["/", "!", "#", "~"],
+    "default": [
+      "/",
+      "!",
+      "#",
+      "~"
+    ],
     "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
   },
   "enable_full_command_detection": {
@@ -214,7 +261,12 @@
   "full_command_list": {
     "description": "完整指令列表",
     "type": "list",
-    "default": ["new", "help", "reset", "clear"],
+    "default": [
+      "new",
+      "help",
+      "reset",
+      "clear"
+    ],
     "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
   },
   "embedding_provider": {
