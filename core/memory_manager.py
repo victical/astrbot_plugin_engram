@@ -27,11 +27,14 @@ import re
 import asyncio
 import time
 import datetime
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
+_ENGLISH_WORD_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
+_CHINESE_BLOCK_PATTERN = re.compile(r"[\u4e00-\u9fa5]+")
 
 
 class MemoryManager:
@@ -179,7 +182,129 @@ class MemoryManager:
             return False
         
         return True
+
+    def _generate_query_keywords(self, query: str):
+        """生成中英混合关键词：英文按词切分，中文按 2~4 gram 切分。"""
+        min_n = max(2, int(self.config.get("keyword_ngram_min", 2)))
+        max_n = max(min_n, int(self.config.get("keyword_ngram_max", 4)))
+        max_n = min(max_n, 6)  # 防御性上限，避免极端配置导致组合爆炸
+
+        common_stopwords = {
+            "a", "an", "the", "to", "of", "in", "on", "at", "is", "are", "i", "you", "he", "she", "it",
+            "我", "你", "他", "她", "它", "这", "那", "了", "啊", "呀", "吗", "呢", "吧", "和", "与", "及", "就", "也"
+        }
+        protected_tokens = {"ai", "ml", "db", "go", "c", "r"}
+
+        english_tokens = _ENGLISH_WORD_PATTERN.findall(query.lower())
+        query_keywords = set()
+
+        for token in english_tokens:
+            if not token:
+                continue
+            if len(token) <= 1 and token not in protected_tokens:
+                continue
+            if token in common_stopwords:
+                continue
+            query_keywords.add(token)
+
+        chinese_blocks = _CHINESE_BLOCK_PATTERN.findall(query)
+        for block in chinese_blocks:
+            block_len = len(block)
+            if block_len == 0:
+                continue
+            for n in range(min_n, max_n + 1):
+                if block_len < n:
+                    continue
+                for i in range(0, block_len - n + 1):
+                    gram = block[i:i + n]
+                    if gram in common_stopwords:
+                        continue
+                    query_keywords.add(gram)
+
+        return query_keywords
+
+    def _count_keyword_matches(self, keyword: str, summary_tokens_en, summary_ngrams_zh):
+        """边界感知匹配：英文按词边界，中文按 n-gram 精确计数。"""
+        if not keyword:
+            return 0
+
+        if _CHINESE_PATTERN.search(keyword):
+            return summary_ngrams_zh.get(keyword, 0)
+
+        return summary_tokens_en.get(keyword.lower(), 0)
+
+    def _calc_keyword_score(self, query: str, summary: str, corpus_stats: dict):
+        """计算关键词得分（边界感知匹配 + 近似 IDF）。"""
+        query_keywords = self._generate_query_keywords(query)
+        if not query_keywords or not summary:
+            return 0.0, query_keywords
+
+        summary_lower = summary.lower()
+        summary_tokens_en = Counter(_ENGLISH_WORD_PATTERN.findall(summary_lower))
+
+        min_n = max(2, int(self.config.get("keyword_ngram_min", 2)))
+        max_n = max(min_n, int(self.config.get("keyword_ngram_max", 4)))
+        max_n = min(max_n, 6)
+
+        summary_ngrams_zh = Counter()
+        chinese_blocks = _CHINESE_BLOCK_PATTERN.findall(summary)
+        for block in chinese_blocks:
+            block_len = len(block)
+            for n in range(min_n, max_n + 1):
+                if block_len < n:
+                    continue
+                for i in range(0, block_len - n + 1):
+                    summary_ngrams_zh[block[i:i + n]] += 1
+
+        matched_tf_sum = 0
+        doc_len = max(1, len(summary_tokens_en) + sum(summary_ngrams_zh.values()))
+
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80
+
+        keyword_score = 0.0
+        total_docs = max(1, int(corpus_stats.get("total_docs", 1)))
+        keyword_df = corpus_stats.get("keyword_doc_freq", {})
+
+        for keyword in query_keywords:
+            tf = self._count_keyword_matches(keyword, summary_tokens_en, summary_ngrams_zh)
+            if tf <= 0:
+                continue
+
+            matched_tf_sum += tf
+            norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+
+            # 稀有词提升（近似 IDF）：出现越少，权重越高
+            df = keyword_df.get(keyword, 0)
+            idf = 1.0 + ((total_docs + 1.0) / (df + 1.0))
+            keyword_score += norm_tf * min(4.0, idf)
+
+        coverage_bonus = min(1.5, matched_tf_sum / max(1, len(query_keywords)))
+        return keyword_score * (1.0 + 0.15 * coverage_bonus), query_keywords
     
+    def _calc_keyword_score_legacy(self, query_keywords, summary: str):
+        """旧版关键词打分：子串匹配 + BM25 风格 TF 饱和。"""
+        if not query_keywords or not summary:
+            return 0.0
+
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80
+
+        score = 0.0
+        summary_lower = summary.lower()
+        doc_len = max(1, len(summary_lower))
+
+        for keyword in query_keywords:
+            if keyword in summary_lower:
+                tf = summary_lower.count(keyword)
+                norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+                keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
+                score += norm_tf * keyword_weight
+
+        return score
+
     # ========== 消息记录 ==========
     
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
@@ -648,12 +773,10 @@ class MemoryManager:
             quality_factor = max(0.0, 1.5 - distance) / 1.5
 
             if enable_keyword_boost and query_keywords and memory_data:
-                # RRF 模式：相对于最佳结果归一化，再乘以质量因子
                 best_rrf = memory_data[0].get('rrf_score', 1e-9)
                 raw_percent = data.get('rrf_score', 0) / max(best_rrf, 1e-9) * 100
                 relevance_percent = max(0, min(100, int(raw_percent * quality_factor)))
             else:
-                # 纯向量模式
                 relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
 
             # 可配置上下文窗口：优先当前命中摘要，再附简短时间线片段，避免提示膨胀
