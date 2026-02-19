@@ -101,41 +101,39 @@ class DatabaseManager:
         with self.db.connection_context():
             return MemoryIndex.get_or_none(MemoryIndex.index_id == index_id)
 
-    def get_memory_indices_by_ids(self, index_ids):
+    def get_memory_indices_by_ids(self, ids):
         """批量获取记忆索引，返回 {index_id: MemoryIndex} 映射"""
-        if not index_ids:
+        if not ids:
             return {}
         with self.db.connection_context():
-            query = MemoryIndex.select().where(MemoryIndex.index_id << list(index_ids))
-            return {item.index_id: item for item in query}
+            indices = MemoryIndex.select().where(MemoryIndex.index_id << ids)
+            return {item.index_id: item for item in indices}
 
-    def get_memories_by_uuids_map(self, uuid_lists):
-        """批量获取原始消息，返回 {tuple(sorted_uuids): [RawMemory, ...]} 映射"""
-        if not uuid_lists:
+    def get_prev_indices_by_ids(self, prev_ids):
+        """批量获取前序记忆索引，返回 {index_id: MemoryIndex} 映射"""
+        if not prev_ids:
+            return {}
+        with self.db.connection_context():
+            prev_indices = MemoryIndex.select().where(MemoryIndex.index_id << prev_ids)
+            return {item.index_id: item for item in prev_indices}
+
+    def get_raw_memories_map_by_uuid_lists(self, index_uuid_map):
+        """按 index_id 批量获取原始消息，返回 {index_id: [RawMemory, ...]}"""
+        if not index_uuid_map:
             return {}
 
-        normalized = []
-        all_uuids = set()
-        for uuids in uuid_lists:
-            if not uuids:
-                continue
-            key = tuple(sorted(str(u) for u in uuids if u))
-            if not key:
-                continue
-            normalized.append(key)
-            all_uuids.update(key)
-
+        all_uuids = list({u for uuid_list in index_uuid_map.values() for u in uuid_list})
         if not all_uuids:
-            return {}
+            return {index_id: [] for index_id in index_uuid_map.keys()}
 
         with self.db.connection_context():
-            rows = RawMemory.select().where(RawMemory.uuid << list(all_uuids)).order_by(RawMemory.timestamp.asc())
-            by_uuid = {row.uuid: row for row in rows}
+            raw_msgs = list(RawMemory.select().where(RawMemory.uuid << all_uuids))
 
-        result = {}
-        for key in normalized:
-            result[key] = [by_uuid[u] for u in key if u in by_uuid]
-        return result
+        uuid_to_msg = {msg.uuid: msg for msg in raw_msgs}
+        grouped = {}
+        for index_id, uuid_list in index_uuid_map.items():
+            grouped[index_id] = [uuid_to_msg[u] for u in uuid_list if u in uuid_to_msg]
+        return grouped
 
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
