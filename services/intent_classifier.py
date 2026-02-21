@@ -8,7 +8,7 @@
   - llm      : 调用小模型判断是否需要检索（高精度，有少量 Token 成本）
 """
 import re
-from typing import Any, Optional, Set
+from typing import Any, Optional, Pattern, Set
 
 from astrbot.api import logger
 
@@ -28,6 +28,16 @@ _DEFAULT_STRONG_TRIGGERS: Set[str] = {
     "回忆", "提醒", "你说", "告诉过",
     "承诺", "答应", "说过", "聊过",
 }
+
+# 默认弱触发词——可能涉及回溯，但语义强度低于强触发词
+_DEFAULT_WEAK_TRIGGERS: Set[str] = {
+    "我喜欢什么", "我说过吗", "你知道我",
+}
+
+# 句式模式——用于识别“自我信息回溯问法”
+_SELF_RECALL_PATTERNS: tuple[str, ...] = (
+    r"我.*(喜欢|讨厌|说过|提过)",
+)
 
 
 class IntentClassifier:
@@ -57,6 +67,12 @@ class IntentClassifier:
             val = 4
         self._min_length: int = max(1, val)
         self._strong_triggers: Set[str] = set(_DEFAULT_STRONG_TRIGGERS)
+        self._weak_triggers: Set[str] = self._parse_weak_triggers()
+        self._pattern_mode: bool = bool(self._config.get("intent_pattern_mode", True))
+        self._trigger_score_threshold: int = self._parse_trigger_threshold()
+        self._self_recall_patterns: tuple[Pattern[str], ...] = tuple(
+            re.compile(pattern) for pattern in _SELF_RECALL_PATTERNS
+        )
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -90,11 +106,43 @@ class IntentClassifier:
     # ------------------------------------------------------------------
 
     def _keyword_check(self, text: str) -> bool:
-        """通过强触发词判断"""
+        """通过多信号评分判断是否触发记忆检索"""
+        score = 0
+
         for trigger in self._strong_triggers:
             if trigger in text:
-                return True
-        return False
+                score += 2
+
+        for trigger in self._weak_triggers:
+            if trigger in text:
+                score += 1
+
+        if self._pattern_mode and self._match_self_recall_pattern(text):
+            score += 1
+
+        return score >= self._trigger_score_threshold
+
+    def _match_self_recall_pattern(self, text: str) -> bool:
+        """匹配自我信息回溯句式"""
+        return any(pattern.search(text) for pattern in self._self_recall_patterns)
+
+    def _parse_weak_triggers(self) -> Set[str]:
+        """从配置解析弱触发词列表"""
+        raw_value = self._config.get("intent_weak_triggers", _DEFAULT_WEAK_TRIGGERS)
+        if not isinstance(raw_value, list):
+            return set(_DEFAULT_WEAK_TRIGGERS)
+
+        normalized = {str(item).strip() for item in raw_value if str(item).strip()}
+        return normalized or set(_DEFAULT_WEAK_TRIGGERS)
+
+    def _parse_trigger_threshold(self) -> int:
+        """解析触发分数阈值"""
+        raw_threshold = self._config.get("intent_trigger_score_threshold", 2)
+        try:
+            value = int(raw_threshold) if str(raw_threshold).strip() else 2
+        except (ValueError, TypeError):
+            value = 2
+        return max(1, value)
 
     # ------------------------------------------------------------------
     # LLM 判断（高精度路径）

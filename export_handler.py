@@ -93,31 +93,33 @@ class ExportHandler:
         )
         
         result = f"""
-📊 消息统计
-
-【当前用户】
-💬 原始消息：
-- 总计：{user_stats.get('total', 0)} 条
-- 已归档：{user_stats.get('archived', 0)} 条
-- 未归档：{user_stats.get('unarchived', 0)} 条
-
-👥 角色分布：
-- 用户消息：{user_stats.get('user_messages', 0)} 条
-- 助手消息：{user_stats.get('assistant_messages', 0)} 条
-
-【全局统计】
-👤 用户数：{global_stats.get('user_count', 0)} 人
-💬 原始消息：
-- 总计：{global_stats.get('total', 0)} 条
-- 已归档：{global_stats.get('archived', 0)} 条
-- 未归档：{global_stats.get('unarchived', 0)} 条
-
-👥 角色分布：
-- 用户消息：{global_stats.get('user_messages', 0)} 条
-- 助手消息：{global_stats.get('assistant_messages', 0)} 条
-
-💡 使用 /mem_export 可导出数据用于模型微调
-"""
+ 📊 消息统计
+ 
+ 【当前用户】
+ 💬 原始消息：
+ - 总计：{user_stats.get('total', 0)} 条
+ - 已归档：{user_stats.get('archived', 0)} 条
+ - 未归档：{user_stats.get('unarchived', 0)} 条
+ - 长期记忆索引：{user_stats.get('memory_index_count', 0)} 条
+ 
+ 👥 角色分布：
+ - 用户消息：{user_stats.get('user_messages', 0)} 条
+ - 助手消息：{user_stats.get('assistant_messages', 0)} 条
+ 
+ 【全局统计】
+ 👤 用户数：{global_stats.get('user_count', 0)} 人
+ 💬 原始消息：
+ - 总计：{global_stats.get('total', 0)} 条
+ - 已归档：{global_stats.get('archived', 0)} 条
+ - 未归档：{global_stats.get('unarchived', 0)} 条
+ - 长期记忆索引：{global_stats.get('memory_index_count', 0)} 条
+ 
+ 👥 角色分布：
+ - 用户消息：{global_stats.get('user_messages', 0)} 条
+ - 助手消息：{global_stats.get('assistant_messages', 0)} 条
+ 
+ 💡 使用 /mem_export 可导出数据用于模型微调
+ """
         yield event.plain_result(result.strip())
     
     async def handle_export_all_command(self, event, format: str = "jsonl", days: str = ""):

@@ -55,9 +55,6 @@ class EngramPlugin(Star):
         # 初始化调度器
         self._scheduler = MemoryScheduler(self.logic, config)
         asyncio.create_task(self._scheduler.start())
-
-        # [v1.4.4] 历史数据清理一次性任务
-        asyncio.create_task(self._run_once_history_cleanup())
         
         # OneBot 同步时间缓存
         self._last_onebot_sync = {}
@@ -87,26 +84,6 @@ class EngramPlugin(Star):
                     return True
         
         return False
-
-    async def _run_once_history_cleanup(self):
-        """[v1.4.4] 启动时执行一次历史指令消息清理"""
-        # 简单标志位，防止重载时反复执行（虽然逻辑幂等）
-        cleanup_flag = os.path.join(self.plugin_data_dir, ".v144_cleanup_done")
-        if os.path.exists(cleanup_flag):
-            return
-
-        logger.info("Engram: Starting one-time history cleanup for v1.4.4...")
-        try:
-            from .maintenance_clean_history import run_migration
-            # 在单独的线程中执行，避免阻塞启动
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(self.logic.executor, run_migration)
-            
-            with open(cleanup_flag, "w") as f:
-                f.write(str(datetime.datetime.now()))
-            logger.info("Engram: History cleanup completed successfully.")
-        except Exception as e:
-            logger.error(f"Engram: History cleanup failed: {e}")
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
@@ -158,7 +135,14 @@ class EngramPlugin(Star):
         
         memory_block = ""
         if await self._intent_classifier.should_retrieve_memory(query):
-            memories = await self.logic.retrieve_memories(user_id, query)
+            limit = self.config.get("max_recent_memories", 3)
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                limit = 3
+            if limit <= 0:
+                limit = 3
+            memories = await self.logic.retrieve_memories(user_id, query, limit=limit)
             if memories:
                 memory_prompt = "\n".join(memories)
                 memory_block = f"【长期记忆回溯】：\n{memory_prompt}\n"
@@ -180,7 +164,7 @@ class EngramPlugin(Star):
                 logger.info(f"=== Engram 调试结束 ===")
 
     @filter.after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent, *args, **kwargs):
+    async def after_message_sent(self, event: AstrMessageEvent):
         """在消息发送后记录 AI 的回复到原始记忆，并更新互动统计"""
         # 只处理私聊
         if event.get_group_id(): return
@@ -697,6 +681,30 @@ class EngramPlugin(Star):
         """查看消息统计信息"""
         async for result in self.export_handler.handle_stats_command(event):
             yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("mem_rebuild_vector")
+    async def mem_rebuild_vector(self, event: AstrMessageEvent, mode: str = ""):
+        """[管理员] 备份并重建向量库（full 表示重建并回灌）"""
+        full_rebuild = str(mode).lower() == "full"
+        if full_rebuild:
+            yield event.plain_result("⏳ 正在备份、重建并回灌向量库，请稍候...")
+        else:
+            yield event.plain_result("⏳ 正在备份并重建向量库，请稍候...")
+        try:
+            backup_path, total = await self.logic.rebuild_vector_collection(full_rebuild=full_rebuild)
+            if full_rebuild:
+                yield event.plain_result(
+                    f"✅ 向量库已重建并回灌 {total} 条记忆。备份目录：{backup_path or '无'}"
+                )
+            else:
+                if backup_path:
+                    yield event.plain_result(f"✅ 向量库已重建，备份目录：{backup_path}")
+                else:
+                    yield event.plain_result("✅ 向量库已重建（未发现可备份目录）")
+        except Exception as e:
+            logger.error(f"Rebuild vector collection failed: {e}")
+            yield event.plain_result(f"❌ 重建失败：{e}")
     
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mem_export_all")

@@ -70,33 +70,6 @@ class DatabaseManager:
         self.db.create_tables([RawMemory, MemoryIndex])
         self.db.close()
 
-    def get_summaries_by_type(self, user_id, source_type, days=7):
-        """按时间倒序拉取指定类型的记忆索引"""
-        since_time = datetime.datetime.now() - datetime.timedelta(days=days)
-        with self.db.connection_context():
-            query = MemoryIndex.select().where(
-                (MemoryIndex.user_id == user_id)
-                & (MemoryIndex.created_at >= since_time)
-            )
-            if isinstance(source_type, (list, tuple, set)):
-                query = query.where(MemoryIndex.source_type.in_(list(source_type)))
-            else:
-                query = query.where(MemoryIndex.source_type == source_type)
-            return list(query.order_by(MemoryIndex.created_at.desc()))
-
-    def decay_scores_by_ids(self, index_ids, decay_amount=50):
-        """指定记忆列表原子减分（active_score 不低于 0）"""
-        if not index_ids:
-            return 0
-        with self.db.connection_context():
-            return (
-                MemoryIndex.update(
-                    active_score=fn.MAX(0, MemoryIndex.active_score - decay_amount)
-                )
-                .where(MemoryIndex.index_id << index_ids)
-                .execute()
-            )
-
     def save_raw_memory(self, **kwargs):
         with self.db.connection_context():
             return RawMemory.create(**kwargs)
@@ -128,9 +101,56 @@ class DatabaseManager:
         with self.db.connection_context():
             return MemoryIndex.get_or_none(MemoryIndex.index_id == index_id)
 
+    def get_memory_indexes_by_ids(self, index_ids):
+        """批量获取记忆索引，返回 {index_id: MemoryIndex} 映射"""
+        if not index_ids:
+            return {}
+        with self.db.connection_context():
+            query = MemoryIndex.select().where(MemoryIndex.index_id << index_ids)
+            return {item.index_id: item for item in query}
+
+    def get_prev_indices_by_ids(self, index_ids):
+        """批量获取前序索引，返回 {index_id: MemoryIndex} 映射"""
+        if not index_ids:
+            return {}
+        with self.db.connection_context():
+            query = MemoryIndex.select().where(MemoryIndex.index_id << index_ids)
+            return {item.index_id: item for item in query}
+
+    def get_raw_memories_map_by_uuid_lists(self, index_uuid_map):
+        """批量获取原始消息，返回 {index_id: [RawMemory,...]} 映射"""
+        if not index_uuid_map:
+            return {}
+        all_uuids = []
+        for uuids in index_uuid_map.values():
+            if uuids:
+                all_uuids.extend(uuids)
+        if not all_uuids:
+            return {}
+        with self.db.connection_context():
+            raw_list = list(RawMemory.select().where(RawMemory.uuid << list(set(all_uuids))))
+            raw_map = {m.uuid: m for m in raw_list}
+            result = {}
+            for index_id, uuids in index_uuid_map.items():
+                ordered = [raw_map[u] for u in uuids if u in raw_map]
+                # 按时间升序稳定排序（避免跨索引混乱）
+                ordered.sort(key=lambda m: m.timestamp)
+                result[index_id] = ordered
+            return result
+
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
             return list(MemoryIndex.select().where(MemoryIndex.user_id == user_id).order_by(MemoryIndex.created_at.desc()).limit(limit))
+
+    def get_all_memory_indexes(self, limit=None, offset=None):
+        """获取所有记忆索引（可分页）"""
+        with self.db.connection_context():
+            query = MemoryIndex.select().order_by(MemoryIndex.created_at.asc())
+            if offset is not None:
+                query = query.offset(offset)
+            if limit is not None:
+                query = query.limit(limit)
+            return list(query)
 
     def get_memories_since(self, user_id, since_time):
         with self.db.connection_context():
@@ -146,9 +166,9 @@ class DatabaseManager:
             ))
 
     def decay_active_scores(self, decay_rate=1):
-        """全局衰减所有记忆的 active_score（不低于 0）"""
+        """全局衰减所有记忆的 active_score"""
         with self.db.connection_context():
-            MemoryIndex.update(active_score=fn.MAX(0, MemoryIndex.active_score - decay_rate)).execute()
+            MemoryIndex.update(active_score=MemoryIndex.active_score - decay_rate).execute()
 
     def update_active_score(self, index_id, bonus=10):
         """给指定记忆加分（被召回时增强）"""
@@ -204,13 +224,15 @@ class DatabaseManager:
             archived = RawMemory.select().where((RawMemory.user_id == user_id) & (RawMemory.is_archived == True)).count()
             user_msgs = RawMemory.select().where((RawMemory.user_id == user_id) & (RawMemory.role == "user")).count()
             assistant_msgs = RawMemory.select().where((RawMemory.user_id == user_id) & (RawMemory.role == "assistant")).count()
+            memory_index_count = MemoryIndex.select().where(MemoryIndex.user_id == user_id).count()
             
             return {
                 "total": total,
                 "archived": archived,
                 "unarchived": total - archived,
                 "user_messages": user_msgs,
-                "assistant_messages": assistant_msgs
+                "assistant_messages": assistant_msgs,
+                "memory_index_count": memory_index_count
             }
     
     def get_all_users_messages(self, start_date=None, end_date=None, limit=None):
@@ -243,6 +265,7 @@ class DatabaseManager:
             user_count = RawMemory.select(RawMemory.user_id).distinct().count()
             user_msgs = RawMemory.select().where(RawMemory.role == "user").count()
             assistant_msgs = RawMemory.select().where(RawMemory.role == "assistant").count()
+            memory_index_count = MemoryIndex.select().count()
             
             return {
                 "user_count": user_count,
@@ -250,5 +273,6 @@ class DatabaseManager:
                 "archived": archived,
                 "unarchived": total - archived,
                 "user_messages": user_msgs,
-                "assistant_messages": assistant_msgs
+                "assistant_messages": assistant_msgs,
+                "memory_index_count": memory_index_count
             }

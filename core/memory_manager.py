@@ -27,11 +27,15 @@ import re
 import asyncio
 import time
 import datetime
+import shutil
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
+_ENGLISH_WORD_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
+_CHINESE_BLOCK_PATTERN = re.compile(r"[\u4e00-\u9fa5]+")
 
 
 class MemoryManager:
@@ -78,6 +82,73 @@ class MemoryManager:
     def shutdown(self):
         """关闭记忆管理器"""
         self._is_shutdown = True
+
+    async def rebuild_vector_collection(self, full_rebuild: bool = False, batch_size: int = 200):
+        """手动重建向量库（备份后重建集合）。full_rebuild=True 时会回灌全部记忆。"""
+        await self._ensure_chroma_initialized()
+        loop = asyncio.get_event_loop()
+
+        def _backup_chroma_dir():
+            if not os.path.exists(self.chroma_path):
+                return None
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"{self.chroma_path}_backup_{ts}"
+            shutil.copytree(self.chroma_path, backup_path)
+            return backup_path
+
+        def _rebuild():
+            backup_path = _backup_chroma_dir()
+            try:
+                self.chroma_client.delete_collection(name="long_term_memories")
+            except Exception:
+                pass
+            if self.collection and getattr(self.collection, "_embedding_function", None):
+                new_collection = self.chroma_client.get_or_create_collection(
+                    name="long_term_memories",
+                    embedding_function=self.collection._embedding_function
+                )
+            else:
+                new_collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
+            return new_collection, backup_path
+
+        self.collection, backup_path = await loop.run_in_executor(self.executor, _rebuild)
+
+        if not full_rebuild:
+            return backup_path, 0
+
+        total_rebuilt = 0
+        offset = 0
+        batch_size = max(50, int(batch_size))
+        while True:
+            batch = await loop.run_in_executor(
+                self.executor,
+                self.db.get_all_memory_indexes,
+                batch_size,
+                offset
+            )
+            if not batch:
+                break
+
+            add_params = {
+                "ids": [],
+                "documents": [],
+                "metadatas": []
+            }
+            for item in batch:
+                add_params["ids"].append(item.index_id)
+                add_params["documents"].append(item.summary)
+                add_params["metadatas"].append({
+                    "user_id": item.user_id,
+                    "source_type": item.source_type,
+                    "created_at": self._ensure_datetime(item.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+                    "ai_name": self.config.get("ai_name", "助手")
+                })
+
+            await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+            total_rebuilt += len(add_params["ids"])
+            offset += batch_size
+
+        return backup_path, total_rebuilt
     
     # ========== ChromaDB 管理 ==========
     
@@ -85,24 +156,93 @@ class MemoryManager:
         """确保 ChromaDB 已初始化（延迟初始化，避免构造函数阻塞）"""
         if self._chroma_initialized:
             return
-        
+
         async with self._chroma_init_lock:
             # 双重检查
             if self._chroma_initialized:
                 return
-            
+
             # 在线程池中初始化 ChromaDB（避免阻塞事件循环）
             loop = asyncio.get_event_loop()
-            
+
+            def _resolve_embedding_function():
+                embedding_provider = self.config.get("embedding_provider", "")
+                embedding_function = None
+                if embedding_provider:
+                    for attr in ("get_embedding_provider", "get_embedding_model", "get_embedding"):
+                        if hasattr(self.context, attr):
+                            getter = getattr(self.context, attr)
+                            if callable(getter):
+                                embedding_function = getter(embedding_provider)
+                                break
+                return embedding_provider, embedding_function
+
+            def _create_collection(client, embedding_function):
+                if embedding_function:
+                    return client.get_or_create_collection(
+                        name="long_term_memories",
+                        embedding_function=embedding_function
+                    )
+                return client.get_or_create_collection(name="long_term_memories")
+
+            def _backup_chroma_dir():
+                if not os.path.exists(self.chroma_path):
+                    return None
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = f"{self.chroma_path}_backup_{ts}"
+                shutil.copytree(self.chroma_path, backup_path)
+                return backup_path
+
             def _init_chroma():
                 client = chromadb.PersistentClient(path=self.chroma_path)
-                collection = client.get_or_create_collection(name="long_term_memories")
-                return client, collection
-            
+                embedding_provider, embedding_function = _resolve_embedding_function()
+                collection = _create_collection(client, embedding_function)
+                return client, collection, embedding_provider
+
+            def _detect_dimension_mismatch(collection):
+                try:
+                    existing = collection.get(limit=1, include=["embeddings"])
+                    if not existing or not existing.get("embeddings"):
+                        return False
+                    existing_dim = len(existing["embeddings"][0])
+
+                    # 通过临时 embedding 估算新维度
+                    probe = collection._embedding_function(["_dimension_probe_"])
+                    new_dim = len(probe[0]) if probe else None
+                    if new_dim and existing_dim != new_dim:
+                        return True
+                except Exception:
+                    return False
+                return False
+
+            def _rebuild_collection(client, embedding_function):
+                backup_path = _backup_chroma_dir()
+                try:
+                    client.delete_collection(name="long_term_memories")
+                except Exception:
+                    pass
+                collection = _create_collection(client, embedding_function)
+                return collection, backup_path
+
             try:
-                self.chroma_client, self.collection = await loop.run_in_executor(
+                self.chroma_client, self.collection, provider_id = await loop.run_in_executor(
                     self.executor, _init_chroma
                 )
+
+                # 自动检测维度不一致并重建（含备份）
+                if self.collection and getattr(self.collection, "_embedding_function", None):
+                    mismatch = await loop.run_in_executor(
+                        self.executor, _detect_dimension_mismatch, self.collection
+                    )
+                    if mismatch:
+                        self.collection, backup_path = await loop.run_in_executor(
+                            self.executor, _rebuild_collection, self.chroma_client, self.collection._embedding_function
+                        )
+                        logger.warning(
+                            "Engram: Detected embedding dimension mismatch, rebuilt collection. Backup: %s",
+                            backup_path
+                        )
+
                 self._chroma_initialized = True
                 logger.info("Engram: ChromaDB initialized successfully")
             except Exception as e:
@@ -153,9 +293,8 @@ class MemoryManager:
         
         过滤规则：
         1. 以配置的指令前缀开头的消息
-        2. 去掉前缀后的指令文本（命令词命中）
-        3. 带下划线且无空格的内部指令
-        4. 中文字符不足2个且总长度不足10的短消息
+        2. 带下划线且无空格的内部指令
+        3. 中文字符不足2个且总长度不足10的短消息
         
         返回 True 表示消息有效，False 表示应被过滤。
         """
@@ -167,89 +306,146 @@ class MemoryManager:
             if isinstance(command_prefixes, str):
                 command_prefixes = [command_prefixes]
             command_prefixes = [str(p) for p in command_prefixes if str(p)]
-            prefix_tuple = tuple(command_prefixes)
-
-            # 激进过滤：遍历每一行，只要有任何一行以指令前缀开头，就视为整句是指令
-            lines = content.splitlines()
-            for raw_line in lines:
-                line = raw_line.lstrip()
-                if not line: continue
-                
-                # 直接以前缀开头
-                if prefix_tuple and line.startswith(prefix_tuple):
-                    return False
-                
-                # 兼容“昵称: /指令”格式
-                for sep in (":", "："):
-                    if sep in line:
-                        after_sep = line.split(sep, 1)[1].lstrip()
-                        if prefix_tuple and after_sep.startswith(prefix_tuple):
-                            return False
-
-            # 2. 过滤可能被框架去掉前缀的指令文本
-            normalized = " ".join(content.split()).lower()
-            tokens = normalized.split(" ") if normalized else []
-            cmd = tokens[0] if tokens else ""
-            sub = tokens[1] if len(tokens) > 1 else ""
-            known_commands = {
-                "mem_list",
-                "mem_view",
-                "mem_search",
-                "mem_delete",
-                "mem_delete_all",
-                "mem_undo",
-                "mem_clear_raw",
-                "mem_clear_archive",
-                "mem_clear_all",
-                "mem_export",
-                "mem_stats",
-                "mem_export_all",
-                "engram_force_summarize",
-                "engram_force_summarize_all",
-                "engram_force_persona",
-            }
-            if cmd in known_commands:
+            if command_prefixes and content.startswith(tuple(command_prefixes)):
                 return False
-            if cmd == "profile" and sub in {"show", "set", "clear"}:
-                return False
-
-            if self.config.get("enable_full_command_detection", False):
-                full_cmds = self.config.get("full_command_list", [])
-                if isinstance(full_cmds, str):
-                    full_cmds = [full_cmds]
-                cleaned = content.strip().lower()
-                if cleaned in [str(c).lower() for c in full_cmds if c]:
-                    return False
         
-        # 3. 【新增】正则表达式高级过滤（处理 "provider 3" 这种动态参数指令）
-        if self.config.get("enable_regex_filter", True):
-            regex_list = self.config.get("regex_filter_list", ["^provider\\s+\\d+$"])
-            for pattern in regex_list:
-                try:
-                    if re.search(pattern, content.strip(), re.IGNORECASE):
-                        return False
-                except re.error:
-                    continue  # 忽略错误的正则表达式
-        
-        # 4. 专门清洗带下划线的内部指令
+        # 2. 专门清洗带下划线的内部指令
         if "_" in content and " " not in content:
             return False
         
-        # 5. 统计中文数量或检查总长度
+        # 3. 统计中文数量或检查总长度
         chinese_chars = _CHINESE_PATTERN.findall(content)
         if len(chinese_chars) < 2 and len(content) < 10:
             return False
         
         return True
+
+    def _generate_query_keywords(self, query: str):
+        """生成中英混合关键词：英文按词切分，中文按 2~4 gram 切分。"""
+        min_n = max(2, int(self.config.get("keyword_ngram_min", 2)))
+        max_n = max(min_n, int(self.config.get("keyword_ngram_max", 4)))
+        max_n = min(max_n, 6)  # 防御性上限，避免极端配置导致组合爆炸
+
+        common_stopwords = {
+            "a", "an", "the", "to", "of", "in", "on", "at", "is", "are", "i", "you", "he", "she", "it",
+            "我", "你", "他", "她", "它", "这", "那", "了", "啊", "呀", "吗", "呢", "吧", "和", "与", "及", "就", "也"
+        }
+        protected_tokens = {"ai", "ml", "db", "go", "c", "r"}
+
+        english_tokens = _ENGLISH_WORD_PATTERN.findall(query.lower())
+        query_keywords = set()
+
+        for token in english_tokens:
+            if not token:
+                continue
+            if len(token) <= 1 and token not in protected_tokens:
+                continue
+            if token in common_stopwords:
+                continue
+            query_keywords.add(token)
+
+        chinese_blocks = _CHINESE_BLOCK_PATTERN.findall(query)
+        for block in chinese_blocks:
+            block_len = len(block)
+            if block_len == 0:
+                continue
+            for n in range(min_n, max_n + 1):
+                if block_len < n:
+                    continue
+                for i in range(0, block_len - n + 1):
+                    gram = block[i:i + n]
+                    if gram in common_stopwords:
+                        continue
+                    query_keywords.add(gram)
+
+        return query_keywords
+
+    def _count_keyword_matches(self, keyword: str, summary_tokens_en, summary_ngrams_zh):
+        """边界感知匹配：英文按词边界，中文按 n-gram 精确计数。"""
+        if not keyword:
+            return 0
+
+        if _CHINESE_PATTERN.search(keyword):
+            return summary_ngrams_zh.get(keyword, 0)
+
+        return summary_tokens_en.get(keyword.lower(), 0)
+
+    def _calc_keyword_score(self, query: str, summary: str, corpus_stats: dict):
+        """计算关键词得分（边界感知匹配 + 近似 IDF）。"""
+        query_keywords = self._generate_query_keywords(query)
+        if not query_keywords or not summary:
+            return 0.0, query_keywords
+
+        summary_lower = summary.lower()
+        summary_tokens_en = Counter(_ENGLISH_WORD_PATTERN.findall(summary_lower))
+
+        min_n = max(2, int(self.config.get("keyword_ngram_min", 2)))
+        max_n = max(min_n, int(self.config.get("keyword_ngram_max", 4)))
+        max_n = min(max_n, 6)
+
+        summary_ngrams_zh = Counter()
+        chinese_blocks = _CHINESE_BLOCK_PATTERN.findall(summary)
+        for block in chinese_blocks:
+            block_len = len(block)
+            for n in range(min_n, max_n + 1):
+                if block_len < n:
+                    continue
+                for i in range(0, block_len - n + 1):
+                    summary_ngrams_zh[block[i:i + n]] += 1
+
+        matched_tf_sum = 0
+        doc_len = max(1, len(summary_tokens_en) + sum(summary_ngrams_zh.values()))
+
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80
+
+        keyword_score = 0.0
+        total_docs = max(1, int(corpus_stats.get("total_docs", 1)))
+        keyword_df = corpus_stats.get("keyword_doc_freq", {})
+
+        for keyword in query_keywords:
+            tf = self._count_keyword_matches(keyword, summary_tokens_en, summary_ngrams_zh)
+            if tf <= 0:
+                continue
+
+            matched_tf_sum += tf
+            norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+
+            # 稀有词提升（近似 IDF）：出现越少，权重越高
+            df = keyword_df.get(keyword, 0)
+            idf = 1.0 + ((total_docs + 1.0) / (df + 1.0))
+            keyword_score += norm_tf * min(4.0, idf)
+
+        coverage_bonus = min(1.5, matched_tf_sum / max(1, len(query_keywords)))
+        return keyword_score * (1.0 + 0.15 * coverage_bonus), query_keywords
     
+    def _calc_keyword_score_legacy(self, query_keywords, summary: str):
+        """旧版关键词打分：子串匹配 + BM25 风格 TF 饱和。"""
+        if not query_keywords or not summary:
+            return 0.0
+
+        _bm25_k1 = 1.2
+        _bm25_b = 0.75
+        _avg_doc_len = 80
+
+        score = 0.0
+        summary_lower = summary.lower()
+        doc_len = max(1, len(summary_lower))
+
+        for keyword in query_keywords:
+            if keyword in summary_lower:
+                tf = summary_lower.count(keyword)
+                norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+                keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
+                score += norm_tf * keyword_weight
+
+        return score
+
     # ========== 消息记录 ==========
     
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
         """记录原始消息"""
-        # 【强制前置过滤】：如果是用户消息且不合法（比如指令），直接丢弃，绝对不进数据库！
-        if role == "user" and not self._is_valid_message_content(content):
-            return
-        
         msg_uuid = str(uuid.uuid4())
         
         # 异步保存到 SQLite
@@ -277,7 +473,7 @@ class MemoryManager:
         """检查是否需要进行私聊归档（画像更新由独立调度器处理）"""
         now_ts = datetime.datetime.now().timestamp()
         timeout = self.config.get("private_memory_timeout", 1800)
-        min_count = self.config.get("min_msg_count", 3)
+        min_count = self.config.get("min_msg_count", 4)
         
         for user_id, last_time in list(self.last_chat_time.items()):
             if now_ts - last_time > timeout and self.unsaved_msg_count.get(user_id, 0) >= min_count:
@@ -359,7 +555,7 @@ class MemoryManager:
             batch_add["documents"].append(summary)
             batch_add["metadatas"].append({
                 "user_id": user_id,
-                "source_type": "daily_summary",
+                "source_type": "private",
                 "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "ai_name": ai_name
             })
@@ -369,7 +565,7 @@ class MemoryManager:
                 "summary": summary,
                 "ref_uuids": json.dumps(ref_uuids),
                 "prev_index_id": prev_index_id,
-                "source_type": "daily_summary",
+                "source_type": "private",
                 "user_id": user_id,
                 "created_at": created_at
             })
@@ -526,257 +722,41 @@ class MemoryManager:
             except Exception as e:
                 logger.error(f"Engram: Force summarize failed for {uid}: {e}")
         return summarized
-
-    async def fold_weekly_summaries(self, user_id, days=7):
-        """每周折叠：daily_summary -> weekly_summary"""
-        loop = asyncio.get_event_loop()
-        min_samples = self.config.get("folding_min_samples", 3)
-
-        # 取最近 N 天的 daily_summary
-        summaries = await loop.run_in_executor(
-            self.executor,
-            self.db.get_summaries_by_type,
-            user_id,
-            "daily_summary",
-            days
-        )
-
-        if not summaries or len(summaries) < min_samples:
-            logger.debug(
-                f"Engram: Weekly fold skipped for {user_id} (samples={len(summaries) if summaries else 0}, min={min_samples})"
-            )
-            return None
-
-        # 关键修复：按时间正序让 LLM 顺序阅读因果关系
-        summaries_chronological = list(summaries)
-        summaries_chronological.reverse()
-
-        capsule_lines = [f"- {m.summary}" for m in summaries_chronological]
-        capsule_text = "\n".join(capsule_lines)
-
-        prompt_tpl = self.config.get("weekly_folding_prompt")
-        if not prompt_tpl:
-            return None
-        prompt = prompt_tpl.replace("{{memory_texts}}", capsule_text)
-
-        summarize_model = self.config.get("summarize_model", "").strip()
-        provider = self.context.get_provider_by_id(summarize_model) if summarize_model else None
-        if not provider:
-            provider = self.context.get_using_provider()
-        if not provider:
-            return None
-
-        max_retries = 3
-        retry_delay = 2
-        summary_text = ""
-
-        for attempt in range(max_retries):
-            try:
-                resp = await provider.text_chat(prompt=prompt)
-                raw_text = resp.completion_text if resp and resp.completion_text else ""
-                summary_text = raw_text.strip()
-
-                if summary_text and len(summary_text) > 10:
-                    break
-
-                logger.warning(
-                    f"Engram: Weekly folding attempt {attempt + 1} produced empty/short result for {user_id}"
-                )
-            except Exception as e:
-                logger.error(f"Engram: Weekly folding attempt {attempt + 1} error for {user_id}: {e}")
-
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-
-        if not summary_text or len(summary_text) < 10:
-            logger.error(
-                f"Engram: Failed to generate weekly fold for {user_id} after {max_retries} attempts."
-            )
-            return None
-
-        created_at = self._ensure_datetime(summaries[0].created_at)
-        ref_ids = [m.index_id for m in summaries]
-        index_id = str(uuid.uuid4())
-
-        await self._ensure_chroma_initialized()
-        ai_name = self.config.get("ai_name", "助手")
-        metadata = {
-            "user_id": user_id,
-            "source_type": "weekly_summary",
-            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "ai_name": ai_name
-        }
-
-        await loop.run_in_executor(
-            self.executor,
-            lambda: self.collection.add(
-                ids=[index_id],
-                documents=[summary_text],
-                metadatas=[metadata]
-            )
-        )
-
-        await loop.run_in_executor(
-            self.executor,
-            lambda: self.db.save_memory_index(
-                index_id=index_id,
-                summary=summary_text,
-                ref_uuids=json.dumps(ref_ids),
-                prev_index_id=None,
-                source_type="weekly_summary",
-                user_id=user_id,
-                created_at=created_at
-            )
-        )
-
-        # 原子衰减 daily_summary 活跃度
-        await loop.run_in_executor(
-            self.executor,
-            self.db.decay_scores_by_ids,
-            ref_ids,
-            self.config.get("weekly_decay_amount", 50)
-        )
-
-        return index_id
-
-    async def fold_monthly_summaries(self, user_id, days=30):
-        """每月折叠：weekly_summary -> monthly_summary"""
-        loop = asyncio.get_event_loop()
-        min_samples = self.config.get("folding_min_samples", 3)
-
-        summaries = await loop.run_in_executor(
-            self.executor,
-            self.db.get_summaries_by_type,
-            user_id,
-            "weekly_summary",
-            days
-        )
-
-        if not summaries or len(summaries) < min_samples:
-            logger.debug(
-                f"Engram: Monthly fold skipped for {user_id} (samples={len(summaries) if summaries else 0}, min={min_samples})"
-            )
-            return None
-
-        # 关键修复：按时间正序让 LLM 顺序阅读因果关系
-        summaries_chronological = list(summaries)
-        summaries_chronological.reverse()
-
-        capsule_lines = [f"- {m.summary}" for m in summaries_chronological]
-        capsule_text = "\n".join(capsule_lines)
-
-        prompt_tpl = self.config.get("monthly_folding_prompt")
-        if not prompt_tpl:
-            return None
-        prompt = prompt_tpl.replace("{{memory_texts}}", capsule_text)
-
-        summarize_model = self.config.get("summarize_model", "").strip()
-        provider = self.context.get_provider_by_id(summarize_model) if summarize_model else None
-        if not provider:
-            provider = self.context.get_using_provider()
-        if not provider:
-            return None
-
-        max_retries = 3
-        retry_delay = 2
-        summary_text = ""
-
-        for attempt in range(max_retries):
-            try:
-                resp = await provider.text_chat(prompt=prompt)
-                raw_text = resp.completion_text if resp and resp.completion_text else ""
-                summary_text = raw_text.strip()
-
-                if summary_text and len(summary_text) > 10:
-                    break
-
-                logger.warning(
-                    f"Engram: Monthly folding attempt {attempt + 1} produced empty/short result for {user_id}"
-                )
-            except Exception as e:
-                logger.error(f"Engram: Monthly folding attempt {attempt + 1} error for {user_id}: {e}")
-
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
-
-        if not summary_text or len(summary_text) < 10:
-            logger.error(
-                f"Engram: Failed to generate monthly fold for {user_id} after {max_retries} attempts."
-            )
-            return None
-
-        created_at = self._ensure_datetime(summaries[0].created_at)
-        ref_ids = [m.index_id for m in summaries]
-        index_id = str(uuid.uuid4())
-
-        await self._ensure_chroma_initialized()
-        ai_name = self.config.get("ai_name", "助手")
-        metadata = {
-            "user_id": user_id,
-            "source_type": "monthly_summary",
-            "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "ai_name": ai_name
-        }
-
-        await loop.run_in_executor(
-            self.executor,
-            lambda: self.collection.add(
-                ids=[index_id],
-                documents=[summary_text],
-                metadatas=[metadata]
-            )
-        )
-
-        await loop.run_in_executor(
-            self.executor,
-            lambda: self.db.save_memory_index(
-                index_id=index_id,
-                summary=summary_text,
-                ref_uuids=json.dumps(ref_ids),
-                prev_index_id=None,
-                source_type="monthly_summary",
-                user_id=user_id,
-                created_at=created_at
-            )
-        )
-
-        # 原子衰减 weekly_summary 活跃度
-        await loop.run_in_executor(
-            self.executor,
-            self.db.decay_scores_by_ids,
-            ref_ids,
-            self.config.get("monthly_decay_amount", 50)
-        )
-
-        return index_id
     
     # ========== 记忆检索 ==========
     
     async def retrieve_memories(self, user_id, query, limit=3):
-        """检索相关记忆并返回原文摘要及背景（基于时间链），使用关键词重排序提升精确匹配"""
+        """检索相关记忆并返回原文摘要及背景（基于时间链），支持 RRF/混合策略排序"""
         # 确保 ChromaDB 已初始化
         await self._ensure_chroma_initialized()
-        
+
         loop = asyncio.get_event_loop()
-        
+
         # 1. ChromaDB 检索（多取一些结果以便过滤和重排序后仍有足够数据）
+        max_query_results = int(self.config.get("memory_query_max_results", 15))
+        if max_query_results <= 0:
+            max_query_results = 15
         query_params = {
             "query_texts": [query],
-            "n_results": min(limit * 3, 15),  # 多取结果以便重排序
+            "n_results": min(limit * 3, max_query_results),  # 多取结果以便重排序
             "where": {"user_id": user_id}
         }
         results = await loop.run_in_executor(self.executor, lambda: self.collection.query(**query_params))
-        
+
         if not results or not results['ids'] or not results['ids'][0]:
             return []
-        
+
         # 获取配置
         similarity_threshold = self.config.get("memory_similarity_threshold", 1.5)
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
-        
+        enable_memory_decay = self.config.get("enable_memory_decay", True)
+        enable_context_hint = self.config.get("enable_memory_context_hint", True)
+        memory_context_window = int(self.config.get("memory_context_window", 2))
+        rank_strategy = str(self.config.get("rank_strategy", "rrf")).lower()
+        if rank_strategy not in {"rrf", "hybrid"}:
+            rank_strategy = "rrf"
+
         # 解析关键词权重（新格式直接是数值字符串 "0.5"）
         weight_config = self.config.get("keyword_boost_weight", "0.5")
         try:
@@ -785,171 +765,274 @@ class MemoryManager:
             # 向后兼容旧格式 "均衡模式 (0.5)"
             match = re.search(r'\(([\d.]+)\)', str(weight_config))
             keyword_boost_weight = float(match.group(1)) if match else 0.5
-        
+
+        # 混合排序权重（默认近似现有行为：向量+关键词主导）
+        weight_vector = float(self.config.get("rank_weight_vector", max(0.0, 1.0 - keyword_boost_weight)))
+        weight_keyword = float(self.config.get("rank_weight_keyword", keyword_boost_weight))
+        weight_recency = float(self.config.get("rank_weight_recency", 0.08))
+        weight_activity = float(self.config.get("rank_weight_activity", 0.06))
+
+        # 仅在启用记忆衰减时保留 activity 强影响，否则降权，避免语义冲突
+        if not enable_memory_decay:
+            weight_activity *= 0.2
+
         # 2. 预处理结果并计算关键词匹配度（BM25 风格）
         distances = results.get('distances', [[]])[0] if 'distances' in results else []
+        metadatas = results.get('metadatas', [[]])[0] if 'metadatas' in results else []
         memory_data = []
-        
-        # ---------------- 智能提取中英文本 (Zero-dependency Bi-gram) ----------------
-        query_keywords = set()
-        
-        # 提取英文和数字 (如 Python, 1980)
-        for word in re.findall(r'[a-zA-Z0-9]+', query):
-            query_keywords.add(word.lower())
-            
-        # 提取中文单字和双字词 (Bi-gram 覆盖率极高且无需分词库)
-        chinese_chars = re.findall(r'[\u4e00-\u9fa5]', query)
-        for i, char in enumerate(chinese_chars):
-            query_keywords.add(char)
-            if i < len(chinese_chars) - 1:
-                query_keywords.add(char + chinese_chars[i+1])
-                
-        # 🚨 致命关键：过滤停用词和机器人的名字！
-        ai_name = self.config.get("ai_name", "助手")
-        stop_words = {
-            ai_name, "我", "你", "他", "她", "它",
-            "的", "了", "吗", "呢", "啊", "呀", "是", "在", "还", "有", "什么", "怎么"
-        }
-        # 如果名字是多个字，把单字也加进去防止 Bi-gram 产生的单字颗粒度干扰
-        if ai_name and len(ai_name) > 1:
-            for char in ai_name:
-                stop_words.add(char)
-        query_keywords = {k for k in query_keywords if k not in stop_words and len(k.strip()) > 0}
-        
+
+        # 提取查询关键词（支持中英混合 n-gram，可配置开关）
+        enable_ngram_keyword_rank = self.config.get("enable_ngram_keyword_rank", True)
+        if enable_ngram_keyword_rank:
+            query_keywords = self._generate_query_keywords(query)
+        else:
+            query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
+
         # BM25 参数
         _bm25_k1 = 1.2
         _bm25_b = 0.75
         _avg_doc_len = 80  # 摘要的典型长度估计
-        
+
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
-            
+
             # 过滤低相关性结果
             if distance > similarity_threshold:
                 logger.debug(f"Skipping memory with distance {distance:.3f} (threshold: {similarity_threshold})")
                 continue
-            
+
             index_id = results['ids'][0][i]
             summary = results['documents'][0][i]
-            metadata = results['metadatas'][0][i]
-            
+            metadata = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+
             # BM25 风格关键词匹配：TF 饱和 + 文档长度归一化
             keyword_score = 0.0
             summary_lower = summary.lower()
             doc_len = max(1, len(summary_lower))
-            
+
             for keyword in query_keywords:
                 if keyword in summary_lower:
                     tf = summary_lower.count(keyword)
                     # BM25 TF 饱和公式：高频词收益递减
                     norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
-                    # 英文长词或中文双字词权重大
+                    # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
                     keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
                     keyword_score += norm_tf * keyword_weight
-            
+
             memory_data.append({
                 'index_id': index_id,
                 'summary': summary,
                 'metadata': metadata,
                 'distance': distance,
-                'keyword_score': keyword_score
+                'keyword_score': keyword_score,
+                'rank_score': 0.0,
+                'display_score': 0.0
             })
-        
-        # 3. RRF (Reciprocal Rank Fusion) 融合排序
+
+        if not memory_data:
+            return []
+
+        # 批量查询索引信息（active_score, created_at）
+        index_ids = [item['index_id'] for item in memory_data]
+        index_map = await loop.run_in_executor(self.executor, self.db.get_memory_indexes_by_ids, index_ids)
+
+        now_ts = time.time()
+        # 30天半衰期：越近的记忆 recency 越高
+        recency_half_life_days = float(self.config.get("rank_recency_half_life_days", 30))
+        recency_half_life_days = max(1.0, recency_half_life_days)
+        recency_lambda = 0.693 / (recency_half_life_days * 86400)
+
+        active_scores = []
+        keyword_scores = [item['keyword_score'] for item in memory_data]
+
+        for item in memory_data:
+            db_index = index_map.get(item['index_id'])
+            created_dt = self._ensure_datetime(db_index.created_at) if db_index else None
+            active_score = float(db_index.active_score) if db_index else 100.0
+            item['created_at_dt'] = created_dt
+            item['active_score'] = active_score
+            active_scores.append(active_score)
+
+            # 向量分：由 distance 归一化
+            item['vector_score'] = max(0.0, min(1.0, 1 - item['distance'] / max(similarity_threshold, 1e-6)))
+
+            # 时间衰减分
+            if created_dt:
+                age_seconds = max(0.0, now_ts - created_dt.timestamp())
+                item['recency_score'] = max(0.0, min(1.0, pow(2.718281828, -recency_lambda * age_seconds)))
+            else:
+                item['recency_score'] = 0.5
+
+        # 归一化 keyword_score / active_score
+        max_keyword = max(keyword_scores) if keyword_scores else 0.0
+        min_active = min(active_scores) if active_scores else 0.0
+        max_active = max(active_scores) if active_scores else 1.0
+        active_range = max(max_active - min_active, 1e-6)
+
+        for item in memory_data:
+            item['keyword_score_norm'] = (item['keyword_score'] / max_keyword) if max_keyword > 0 else 0.0
+            item['activity_score'] = (item['active_score'] - min_active) / active_range
+
+        # 3. 排序策略：RRF（可回退）或 Hybrid（四路融合）
         rrf_k = 60
-        # 🚨 安全锁：必须至少有一条记忆的 keyword_score > 0，否则 RRF 只会产生噪音干扰向量排序！
-        has_valid_keyword_match = any(d.get('keyword_score', 0) > 0 for d in memory_data)
-        
-        if enable_keyword_boost and query_keywords and len(memory_data) > 1 and has_valid_keyword_match:
-            vector_w = 1.0 - keyword_boost_weight
-            keyword_w = keyword_boost_weight
-            
-            # 按向量距离排名
-            sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
-            vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
-            
-            # 按关键词得分排名
-            sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
-            keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
-            
-            # 计算 RRF 融合得分
-            for i, data in enumerate(memory_data):
-                rrf_vector = vector_w / (rrf_k + vector_rank[i])
-                rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
-                data['rrf_score'] = rrf_vector + rrf_keyword
-            
-            memory_data.sort(key=lambda x: x['rrf_score'], reverse=True)
+        use_keyword = enable_keyword_boost and query_keywords and len(memory_data) > 1
+
+        if rank_strategy == "rrf":
+            if use_keyword:
+                vector_w = 1.0 - keyword_boost_weight
+                keyword_w = keyword_boost_weight
+
+                sorted_by_vector = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['distance'])
+                vector_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_vector)}
+
+                sorted_by_keyword = sorted(range(len(memory_data)), key=lambda idx: memory_data[idx]['keyword_score'], reverse=True)
+                keyword_rank = {idx: rank + 1 for rank, idx in enumerate(sorted_by_keyword)}
+
+                for i, data in enumerate(memory_data):
+                    rrf_vector = vector_w / (rrf_k + vector_rank[i])
+                    rrf_keyword = keyword_w / (rrf_k + keyword_rank[i])
+                    data['rank_score'] = rrf_vector + rrf_keyword
+                    data['display_score'] = data['rank_score']
+
+                memory_data.sort(key=lambda x: x['rank_score'], reverse=True)
+            else:
+                for data in memory_data:
+                    data['rank_score'] = data['vector_score']
+                    data['display_score'] = data['rank_score']
+                memory_data.sort(key=lambda x: x['distance'])
         else:
-            # 纯向量模式或无有效关键词匹配：退化为按距离排序
+            total_w = weight_vector + weight_keyword + weight_recency + weight_activity
+            if total_w <= 0:
+                total_w = 1.0
+
             for data in memory_data:
-                data['rrf_score'] = max(0, 1 - data['distance'] / similarity_threshold)
-            memory_data.sort(key=lambda x: x['distance'])
+                data['rank_score'] = (
+                    weight_vector * data['vector_score'] +
+                    weight_keyword * (data['keyword_score_norm'] if enable_keyword_boost else 0.0) +
+                    weight_recency * data['recency_score'] +
+                    weight_activity * data['activity_score']
+                ) / total_w
+                data['display_score'] = data['rank_score']
+
+            memory_data.sort(key=lambda x: x['rank_score'], reverse=True)
         
         # 4. 只保留前 limit 条
         memory_data = memory_data[:limit]
-        
-        # 5. 构造带时间线背景和评分的记忆文本
+
+        # 5. 批量拉取索引、前序链路、原文，避免循环内多次 run_in_executor
+        index_ids = [item['index_id'] for item in memory_data]
+        db_indices = {}
+        prev_index_map = {}
+        raw_map = {}
+
+        if index_ids:
+            db_indices = await loop.run_in_executor(self.executor, self.db.get_memory_indexes_by_ids, index_ids)
+
+            # 按窗口宽度批量向前追溯上下文链路
+            if enable_context_hint and memory_context_window > 0:
+                pending_prev_ids = {
+                    db_indices[idx].prev_index_id
+                    for idx in index_ids
+                    if idx in db_indices and db_indices[idx].prev_index_id
+                }
+                for _ in range(memory_context_window):
+                    if not pending_prev_ids:
+                        break
+                    fetched_prev = await loop.run_in_executor(
+                        self.executor,
+                        self.db.get_prev_indices_by_ids,
+                        list(pending_prev_ids)
+                    )
+                    if not fetched_prev:
+                        break
+                    prev_index_map.update(fetched_prev)
+                    pending_prev_ids = {
+                        item.prev_index_id
+                        for item in fetched_prev.values()
+                        if item.prev_index_id and item.prev_index_id not in prev_index_map
+                    }
+
+            # 批量解析 ref_uuids 后，一次性获取所有原文
+            index_uuid_map = {}
+            for idx, db_index in db_indices.items():
+                if not db_index.ref_uuids:
+                    continue
+                try:
+                    uuids = json.loads(db_index.ref_uuids)
+                except (TypeError, ValueError):
+                    uuids = []
+                if uuids:
+                    index_uuid_map[idx] = uuids
+
+            if index_uuid_map:
+                raw_map = await loop.run_in_executor(
+                    self.executor,
+                    self.db.get_raw_memories_map_by_uuid_lists,
+                    index_uuid_map
+                )
+
+        # 6. 构造带时间线背景和评分的记忆文本
         all_memories = []
-        
+
         for data in memory_data:
             index_id = data['index_id']
             summary = data['summary']
             metadata = data['metadata']
             distance = data['distance']
-            keyword_score = data.get('keyword_score', 0)
             created_at = metadata.get("created_at", "未知时间")
-            
-            # 计算显示的相关性百分比
-            # 用向量距离做"绝对质量"惩罚：距离越大，分数打折越多
-            quality_factor = max(0.0, 1.5 - distance) / 1.5
-            
-            if enable_keyword_boost and query_keywords and memory_data:
-                # RRF 模式：相对于最佳结果归一化，再乘以质量因子
-                best_rrf = memory_data[0].get('rrf_score', 1e-9)
-                raw_percent = data.get('rrf_score', 0) / max(best_rrf, 1e-9) * 100
+
+            if rank_strategy == "rrf" and use_keyword and memory_data:
+                threshold = max(float(similarity_threshold), 1e-6)
+                quality_factor = max(0.0, threshold - distance) / threshold
+                best_score = memory_data[0].get('display_score', 1e-9)
+                raw_percent = data.get('display_score', 0) / max(best_score, 1e-9) * 100
                 relevance_percent = max(0, min(100, int(raw_percent * quality_factor)))
             else:
-                # 纯向量模式
-                relevance_percent = max(0, min(100, int((1 - distance / 2.0) * 100)))
+                relevance_percent = max(0, min(100, int(data.get('display_score', 0) * 100)))
             
             # 尝试通过链表获取"前情提要"（可配置开关）
             context_hint = ""
-            db_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, index_id)
-            if self.config.get("enable_memory_context_hint", True) and db_index and db_index.prev_index_id:
-                prev_index = await loop.run_in_executor(self.executor, self.db.get_memory_index_by_id, db_index.prev_index_id)
-                if prev_index:
-                    context_hint = f"（前情提要：{prev_index.summary[:50]}...）"
-            
-            # 获取原文 UUID 列表
+            db_index = db_indices.get(index_id)
+            if enable_context_hint and memory_context_window > 0 and db_index and db_index.prev_index_id:
+                timeline_snippets = []
+                prev_id = db_index.prev_index_id
+                step = 0
+                while prev_id and step < memory_context_window:
+                    prev_item = prev_index_map.get(prev_id)
+                    if not prev_item:
+                        break
+                    timeline_snippets.append(prev_item.summary[:24].replace("\n", " "))
+                    prev_id = prev_item.prev_index_id
+                    step += 1
+
+                if timeline_snippets:
+                    timeline_text = " ⟶ ".join(timeline_snippets)
+                    if len(timeline_text) > 80:
+                        timeline_text = timeline_text[:77] + "..."
+                    context_hint = f"\n   └ ⏪ 前情时间线：{timeline_text}"
+
+            # 获取原文预览（控制长度，避免提示词膨胀）
             raw_preview = ""
-            if db_index and db_index.ref_uuids:
-                uuids = json.loads(db_index.ref_uuids)
-                # 获取该总结对应的所有原文
-                raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
-                
-                # 使用公共过滤方法，取前 2 条有效原文作为证据参考
-                filtered_raw = [
-                    m.content[:60] for m in raw_msgs
-                    if self._is_valid_message_content(m.content)
-                ][:2]
-                
-                if filtered_raw:
-                    raw_preview = "\n   └ 📄 相关原文：\n" + "\n".join(
-                        [f"      {i+1}) {text}" for i, text in enumerate(filtered_raw)]
-                    )
-            
+            raw_msgs = raw_map.get(index_id, [])
+            filtered_raw = [
+                m.content[:50] for m in raw_msgs
+                if self._is_valid_message_content(m.content)
+            ][:1]
+            if filtered_raw:
+                raw_preview = f"\n   └ 📄 相关原文：{filtered_raw[0]}"
+
             # 添加 ID 信息（UUID 前 8 位）和相关性评分
             short_id = index_id[:8]
-            
+
             # 根据配置决定是否显示相关性评分
             if show_relevance_score:
                 relevance_badge = f"🎯 {relevance_percent}% | "
             else:
                 relevance_badge = ""
-            
+
             all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
-        
-        # 6. Reinforce：被成功召回的记忆增强 active_score
+
+        # 7. Reinforce：被成功召回的记忆增强 active_score
         reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
         if all_memories and reinforce_bonus > 0:
             for data in memory_data:
@@ -962,9 +1045,9 @@ class MemoryManager:
                     )
                 except Exception as e:
                     logger.debug(f"Engram: Failed to reinforce memory {data['index_id'][:8]}: {e}")
-            
+
         return all_memories
-    
+
     async def get_memory_detail(self, user_id, sequence_num):
         """获取指定序号记忆的完整原文详情"""
         loop = asyncio.get_event_loop()

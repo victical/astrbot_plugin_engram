@@ -51,6 +51,12 @@
     "type": "int",
     "default": 3
   },
+  "memory_query_max_results": {
+    "description": "检索时向量库最大候选数",
+    "type": "int",
+    "default": 15,
+    "hint": "用于控制向量检索的候选集合大小（n_results）。值过小可能导致重排序后不足，过大增加开销。"
+  },
   "memory_similarity_threshold": {
     "description": "记忆检索相关性阈值",
     "type": "float",
@@ -63,13 +69,87 @@
     "default": true,
     "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
   },
+  "enable_ngram_keyword_rank": {
+    "description": "启用中英混合 n-gram 关键词排序",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，关键词打分采用英文词边界+中文 n-gram 精确匹配，并结合候选集词频进行稀有词提升（近似 IDF）。关闭后退化为原有关键词增强流程。"
+  },
+  "keyword_ngram_min": {
+    "description": "中文关键词 n-gram 最小长度",
+    "type": "int",
+    "default": 2,
+    "hint": "用于中文关键词切分的最小 n 值。建议 2，过小容易误命中。"
+  },
+  "keyword_ngram_max": {
+    "description": "中文关键词 n-gram 最大长度",
+    "type": "int",
+    "default": 4,
+    "hint": "用于中文关键词切分的最大 n 值。建议 4，过大可能降低召回。"
+  },
   "keyword_boost_weight": {
     "description": "RRF 融合权重（关键词 vs 向量）",
     "type": "string",
-    "options": ["0.0", "0.3", "0.5", "0.7", "1.0"],
-    "labels": ["纯向量模式", "向量优先", "均衡融合（推荐）", "关键词优先", "纯关键词模式"],
+    "options": [
+      "0.0",
+      "0.3",
+      "0.5",
+      "0.7",
+      "1.0"
+    ],
+    "labels": [
+      "纯向量模式",
+      "向量优先",
+      "均衡融合（推荐）",
+      "关键词优先",
+      "纯关键词模式"
+    ],
     "default": "0.5",
     "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
+  },
+  "rank_strategy": {
+    "description": "记忆排序策略",
+    "type": "string",
+    "options": [
+      "rrf",
+      "hybrid"
+    ],
+    "labels": [
+      "RRF（可回退，兼容旧行为）",
+      "Hybrid（向量+关键词+时效+活跃度）"
+    ],
+    "default": "rrf",
+    "hint": "rrf 使用倒数排序融合（旧逻辑）；hybrid 使用统一混合分。建议先从 rrf 平滑迁移。"
+  },
+  "rank_weight_vector": {
+    "description": "Hybrid 向量分权重",
+    "type": "float",
+    "default": 0.5,
+    "hint": "仅在 rank_strategy=hybrid 时生效。由向量 distance 归一化得到 vector_score。"
+  },
+  "rank_weight_keyword": {
+    "description": "Hybrid 关键词分权重",
+    "type": "float",
+    "default": 0.5,
+    "hint": "仅在 rank_strategy=hybrid 时生效。由 BM25 风格关键词匹配归一化得到 keyword_score。"
+  },
+  "rank_weight_recency": {
+    "description": "Hybrid 时效分权重",
+    "type": "float",
+    "default": 0.08,
+    "hint": "仅在 rank_strategy=hybrid 时生效。基于 created_at 时间衰减计算 recency_score。"
+  },
+  "rank_weight_activity": {
+    "description": "Hybrid 活跃分权重",
+    "type": "float",
+    "default": 0.06,
+    "hint": "仅在 rank_strategy=hybrid 时生效。基于 active_score 归一化计算 activity_score；当 enable_memory_decay=false 时会自动降权。"
+  },
+  "rank_recency_half_life_days": {
+    "description": "Hybrid 时效半衰期（天）",
+    "type": "float",
+    "default": 30,
+    "hint": "仅在 rank_strategy=hybrid 时生效。值越小越偏向近期记忆。"
   },
   "show_relevance_score": {
     "description": "显示记忆相关性评分",
@@ -83,11 +163,25 @@
     "default": true,
     "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
   },
+  "memory_context_window": {
+    "description": "前情提要上下文窗口",
+    "type": "int",
+    "default": 2,
+    "hint": "控制每条命中记忆向前追溯多少条链路用于展示前情提要。建议 2-3；设置为 0 则仅展示当前命中摘要。"
+  },
   "memory_intent_mode": {
     "description": "记忆检索意图过滤模式",
     "type": "string",
-    "options": ["disabled", "keyword", "llm"],
-    "labels": ["禁用（每条消息都检索）", "关键词匹配（零成本）", "LLM 小模型判断（高精度）"],
+    "options": [
+      "disabled",
+      "keyword",
+      "llm"
+    ],
+    "labels": [
+      "禁用（每条消息都检索）",
+      "关键词匹配（零成本）",
+      "LLM 小模型判断（高精度）"
+    ],
     "default": "keyword",
     "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
   },
@@ -103,6 +197,28 @@
     "type": "int",
     "default": 4,
     "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
+  },
+  "intent_weak_triggers": {
+    "description": "意图弱触发词列表",
+    "type": "list",
+    "default": [
+      "我喜欢什么",
+      "我说过吗",
+      "你知道我"
+    ],
+    "hint": "仅在 keyword 模式下生效。弱触发词每命中一次计 1 分，通常用于补充语义较弱但可能需要回溯的问法。"
+  },
+  "intent_pattern_mode": {
+    "description": "启用意图句式匹配",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在 keyword 模式下生效。开启后会额外匹配“我...喜欢/讨厌/说过/提过”等自我信息回溯句式，每命中一次计 1 分。"
+  },
+  "intent_trigger_score_threshold": {
+    "description": "意图触发分数阈值",
+    "type": "int",
+    "default": 2,
+    "hint": "仅在 keyword 模式下生效。总分达到该阈值才触发记忆检索：强触发词 +2，弱触发词 +1，句式命中 +1。"
   },
   "enable_memory_decay": {
     "description": "启用记忆衰减",
@@ -157,50 +273,6 @@
     "default": 3,
     "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
   },
-  "enable_memory_folding": {
-    "description": "启用全自动记忆折叠",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，将在周日凌晨和月初凌晨自动对零散的记忆进行层级总结（周结/月结）。关闭则只保留基础的每日归档。"
-  },
-  "folding_min_samples": {
-    "description": "总结最小样本数",
-    "type": "int",
-    "default": 3,
-    "hint": "周/月总结前要求的最少摘要数量（不足则跳过），避免生成垃圾总结。"
-  },
-  "weekly_folding_prompt": {
-    "description": "周总结提示词",
-    "type": "string",
-    "obvious_hint": true,
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "editor_theme": "vs-dark",
-    "default": "请从以下【daily_summary 列表】提炼内容。\n需要提炼三类信息：\n核心事件：影响未来的重要节点，用简短句子描述。\n关系演进：围绕关键关系节点，描述互动深度的变化。\n记忆胶囊：一句话概括本周期最重要的信息，作为下一级总结的唯一输入。\n\n输出要求：\n只输出纯文本，不要任何 Markdown 标题、列表、编号或符号。\n不要使用项目符号或分隔线。\n使用自然语言分段即可（建议三段，分别以“核心事件：”“关系演进：”“记忆胶囊：”开头）。\n\n【daily_summary 列表】\n{{memory_texts}}",
-    "hint": "{{memory_texts}}：daily_summary 列表"
-  },
-  "monthly_folding_prompt": {
-    "description": "月总结提示词",
-    "type": "string",
-    "obvious_hint": true,
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "editor_theme": "vs-dark",
-    "default": "请从以下【weekly_summary 列表】提炼内容。\n需要提炼三类信息：\n核心事件：影响未来的重要节点，用简短句子描述。\n关系演进：围绕关键关系节点，描述互动深度的变化。\n记忆胶囊：一句话概括本周期最重要的信息，作为下一级总结的唯一输入。\n\n输出要求：\n只输出纯文本，不要任何 Markdown 标题、列表、编号或符号。\n不要使用项目符号或分隔线。\n使用自然语言分段即可（建议三段，分别以“核心事件：”“关系演进：”“记忆胶囊：”开头）。\n\n【weekly_summary 列表】\n{{memory_texts}}",
-    "hint": "{{memory_texts}}：weekly_summary 列表"
-  },
-  "weekly_decay_amount": {
-    "description": "周总结衰减分",
-    "type": "int",
-    "default": 50,
-    "hint": "周总结完成后，对被总结的 daily_summary 进行原子衰减的分值。"
-  },
-  "monthly_decay_amount": {
-    "description": "月总结衰减分",
-    "type": "int",
-    "default": 50,
-    "hint": "月总结完成后，对被总结的 weekly_summary 进行原子衰减的分值。"
-  },
   "persona_update_max_concurrent": {
     "description": "每日画像更新最大并发数",
     "type": "int",
@@ -246,7 +318,12 @@
   "command_prefixes": {
     "description": "指令前缀列表",
     "type": "list",
-    "default": ["/", "!", "#", "~"],
+    "default": [
+      "/",
+      "!",
+      "#",
+      "~"
+    ],
     "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
   },
   "enable_full_command_detection": {
@@ -258,20 +335,13 @@
   "full_command_list": {
     "description": "完整指令列表",
     "type": "list",
-    "default": ["new", "help", "reset", "clear"],
+    "default": [
+      "new",
+      "help",
+      "reset",
+      "clear"
+    ],
     "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
-  },
-  "enable_regex_filter": {
-    "description": "启用正则表达式过滤",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，匹配正则表达式的消息将被丢弃（如特定格式的内部指令）。"
-  },
-  "regex_filter_list": {
-    "description": "正则过滤规则列表",
-    "type": "list",
-    "default": ["^provider\\s+\\d+$", "^画图.*"],
-    "hint": "例如 ^provider\\s+\\d+$ 会拦截 'provider 3' 这种消息。"
   },
   "embedding_provider": {
     "description": "嵌入模型提供商 ID",

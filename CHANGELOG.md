@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+**之前配置的向量未生效，默认用的内置的向量，需使用以下指令重建向量库**
+
+- **向量库维护指令**：新增管理员指令 `/mem_rebuild_vector`，支持备份后重建向量库，并提供 `full` 模式回灌所有记忆。
+- **重建说明**：当 `embedding_provider` 变更或提示向量维度不一致时，需要执行 `/mem_rebuild_vector full` 重新嵌入全部记忆，否则旧记忆将无法检索。
+- **检索候选上限配置**：新增 `memory_query_max_results`，控制向量检索候选集大小。
+
+### Changed
+- **向量库嵌入兼容**：接入 `embedding_provider` 并在维度不一致时自动备份并重建向量库。
+- **检索关键词增强**：`enable_ngram_keyword_rank` 生效，支持中英混合 n-gram 关键词检索。
+- **检索数量配置**：记忆注入使用 `max_recent_memories` 作为上限。
+- **归档触发阈值一致性**：`min_msg_count` 默认回退值与配置一致（4）。
+
+### Fixed
+- **相关性百分比**：修复相关性评分阈值硬编码问题，改为使用 `memory_similarity_threshold`。
+- **数据库接口缺失**：补齐 `get_prev_indices_by_ids`、`get_raw_memories_map_by_uuid_lists` 等缺失方法。
+
 ## [1.4.3] - 2026-02-17
 
 ### Added
