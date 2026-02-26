@@ -4,6 +4,7 @@
 """
 import asyncio
 import datetime
+import random
 import time
 from typing import Dict, Callable, Awaitable
 from astrbot.api import logger
@@ -32,6 +33,10 @@ class MemoryScheduler:
         task2 = asyncio.create_task(self.daily_persona_scheduler())
         task3 = asyncio.create_task(self.daily_memory_maintenance())
         self._tasks.extend([task1, task2, task3])
+
+        if self.config.get("enable_memory_folding", True):
+            task4 = asyncio.create_task(self.weekly_folding_scheduler())
+            self._tasks.append(task4)
     
     def shutdown(self):
         """停止调度器（设置关闭标志）"""
@@ -207,6 +212,76 @@ class MemoryScheduler:
             await asyncio.gather(*tasks, return_exceptions=True)
             
             logger.info(f"Engram: Daily persona update completed for {len(user_ids)} users")
+
+    async def weekly_folding_scheduler(self):
+        """每周调度周总结折叠任务（默认周日 02:00）"""
+        run_weekday = int(self.config.get("weekly_folding_weekday", 6))  # 0=周一, 6=周日
+        run_hour = int(self.config.get("weekly_folding_hour", 2))
+
+        while not self._is_shutdown:
+            try:
+                now = datetime.datetime.now()
+                next_run = now.replace(hour=run_hour, minute=0, second=0, microsecond=0)
+
+                days_ahead = (run_weekday - now.weekday()) % 7
+                if days_ahead == 0 and now >= next_run:
+                    days_ahead = 7
+                next_run = (now + datetime.timedelta(days=days_ahead)).replace(
+                    hour=run_hour,
+                    minute=0,
+                    second=0,
+                    microsecond=0
+                )
+
+                sleep_seconds = max(1, int((next_run - now).total_seconds()))
+                logger.info(
+                    "Engram: Weekly folding scheduled in %.1f hours",
+                    sleep_seconds / 3600
+                )
+                await asyncio.sleep(sleep_seconds)
+
+                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                    break
+                if getattr(self.logic.executor, "_shutdown", False):
+                    self._is_shutdown = True
+                    break
+
+                await self._execute_weekly_folding()
+            except asyncio.CancelledError:
+                logger.debug("Engram: Weekly folding scheduler task cancelled")
+                break
+            except Exception as e:
+                if "cannot schedule new futures after shutdown" in str(e):
+                    self._is_shutdown = True
+                    break
+                if not self._is_shutdown:
+                    logger.error(f"Engram weekly folding scheduler error: {e}")
+                await asyncio.sleep(60)
+
+    async def _execute_weekly_folding(self):
+        """执行所有活跃用户的周总结折叠"""
+        if not self.config.get("enable_memory_folding", True):
+            return
+
+        folding_days = int(self.config.get("weekly_folding_days", 7))
+        delay = int(self.config.get("weekly_folding_delay", 1))
+        jitter = int(self.config.get("weekly_folding_jitter", 0))
+
+        user_ids = list(self.logic.last_chat_time.keys())
+        if not user_ids:
+            return
+
+        for user_id in user_ids:
+            if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
+                break
+
+            try:
+                await self.logic.fold_weekly_summaries(user_id, days=folding_days)
+            except Exception as e:
+                logger.error(f"Engram: Weekly folding failed for {user_id}: {e}")
+
+            if delay > 0 or jitter > 0:
+                await asyncio.sleep(max(0, delay) + max(0, random.randint(0, jitter)))
 
     # ========== 记忆衰减与修剪 ==========
 

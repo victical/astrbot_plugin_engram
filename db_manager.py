@@ -126,6 +126,17 @@ class DatabaseManager:
                 (MemoryIndex.created_at < end_time)
             ))
 
+    def get_summaries_by_type(self, user_id, source_type, days=7):
+        """按类型获取近 N 天总结，按时间倒序返回"""
+        with self.db.connection_context():
+            cutoff = datetime.datetime.now() - datetime.timedelta(days=max(1, int(days)))
+            query = MemoryIndex.select().where(
+                (MemoryIndex.user_id == user_id) &
+                (MemoryIndex.source_type == source_type) &
+                (MemoryIndex.created_at >= cutoff)
+            ).order_by(MemoryIndex.created_at.desc())
+            return list(query)
+
     def decay_active_scores(self, decay_rate=1):
         """全局衰减所有记忆的 active_score"""
         with self.db.connection_context():

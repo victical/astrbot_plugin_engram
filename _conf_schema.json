@@ -43,7 +43,7 @@
     "editor_mode": true,
     "editor_language": "markdown",
     "editor_theme": "vs-dark",
-    "default": "你是{{ai_name}}，请根据聊天记录，写一篇简短的日记。核心原则：简单！短小！像写手帐一样，一笔带过，不要写作文。 - 字数限制：100字以内。  - 视角：第一人称。-称呼：根据对话语境或你们的关系。 - 内容：      1. 简单记录发生了什么 (如：主人醒了)。2. 必须保留细节 (如：喜欢吃西瓜)，这是重点。3. 心情如何 (如：开心)。- 禁止：禁止长篇大论的心理描写，禁止啰嗦的铺垫。对话内容： {{chat_text}}",
+    "default": "你是{{ai_name}}，请根据聊天记录生成【结构化 JSON 记忆摘要】，用于后续检索。\n\n【要求】\n- 只基于对话中明确出现的信息，不允许编造。\n- summary 用自然语言一句话概括，30~60字。\n- key_facts 是3~5条核心事实（短句）。\n- keywords 是5~10个关键词（实体/主题/事件/地点/数值）。\n- entities 是对话中出现的人名/物品/地点/作品等实体。\n- mood 用1~3个词描述情绪（可为空）。\n\n【输出 JSON 格式】\n{\n  \"summary\": \"...\",\n  \"key_facts\": [\"...\", \"...\"],\n  \"keywords\": [\"...\", \"...\"],\n  \"entities\": [\"...\", \"...\"],\n  \"mood\": \"...\"\n}\n\n【对话内容】\n{{chat_text}}\n\n注意：只输出 JSON，不要包含 Markdown 或其他解释。",
     "hint": "{{ai_name}}：bot名字 {{chat_text}}：对话内容"
   },
   "max_recent_memories": {
@@ -278,6 +278,65 @@
     "type": "int",
     "default": 5,
     "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
+  },
+  "enable_memory_folding": {
+    "description": "启用周总结折叠",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后每周按计划将近 N 天日级记忆折叠为一条 weekly 总结，写入向量库与索引。"
+  },
+  "weekly_folding_days": {
+    "description": "周总结折叠回溯天数",
+    "type": "int",
+    "default": 7,
+    "hint": "执行周总结时纳入最近多少天的 daily/private 记忆。"
+  },
+  "folding_min_samples": {
+    "description": "触发周总结最少样本数",
+    "type": "int",
+    "default": 3,
+    "hint": "候选日记条数不足该值时跳过周总结生成。"
+  },
+  "weekly_folding_weekday": {
+    "description": "周总结执行星期",
+    "type": "int",
+    "default": 6,
+    "hint": "0=周一 ... 6=周日。默认周日执行。"
+  },
+  "weekly_folding_hour": {
+    "description": "周总结执行小时",
+    "type": "int",
+    "default": 2,
+    "hint": "24小时制，默认凌晨 2 点。"
+  },
+  "weekly_folding_delay": {
+    "description": "周总结用户间隔延迟（秒）",
+    "type": "int",
+    "default": 1,
+    "hint": "批量用户执行时每个用户后的固定延迟。"
+  },
+  "weekly_folding_jitter": {
+    "description": "周总结用户间随机抖动（秒）",
+    "type": "int",
+    "default": 0,
+    "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
+  },
+  "weekly_folding_model": {
+    "description": "周总结使用模型",
+    "type": "string",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "留空时回退到 summarize_model 或默认模型。"
+  },
+  "weekly_folding_prompt": {
+    "description": "周总结提示词",
+    "type": "string",
+    "obvious_hint": true,
+    "editor_mode": true,
+    "editor_language": "markdown",
+    "editor_theme": "vs-dark",
+    "default": "你是一名记忆整理助手。请根据下方【daily_summary 列表】生成一段周总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 保留关键人物/地点/事件/数值；\n3. 语言简洁，120~220字。\n\n【daily_summary 列表】\n{{memory_texts}}",
+    "hint": "{{memory_texts}}：最近多条日级总结列表"
   },
   "enable_profile_confidence": {
     "description": "启用画像置信度机制",

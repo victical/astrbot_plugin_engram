@@ -30,6 +30,7 @@ import datetime
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
+from ..services.intent_classifier import IntentClassifier
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
@@ -58,6 +59,7 @@ class MemoryManager:
         self.executor = executor
         self.db = db_manager
         self.profile_manager = profile_manager
+        self._intent_classifier = IntentClassifier(config=self.config, context=self.context)
         
         # ChromaDB 延迟初始化（避免构造函数阻塞）
         self.chroma_path = os.path.join(self.data_dir, "engram_chroma")
@@ -305,6 +307,61 @@ class MemoryManager:
 
         return score
 
+    def _normalize_str_list(self, value, max_len=None):
+        """将输入归一为字符串列表（去空、去重、保序）"""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            items = [value]
+        elif isinstance(value, list):
+            items = value
+        else:
+            items = [str(value)]
+
+        seen = set()
+        result = []
+        for item in items:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+            if max_len and len(result) >= max_len:
+                break
+        return result
+
+    def _build_structured_summary(self, payload: dict) -> str:
+        """从结构化 JSON 中拼装可检索摘要"""
+        summary = str(payload.get("summary", "")).strip()
+        key_facts = self._normalize_str_list(payload.get("key_facts"), max_len=4)
+        keywords = self._normalize_str_list(payload.get("keywords"), max_len=10)
+        entities = self._normalize_str_list(payload.get("entities"), max_len=6)
+        mood = str(payload.get("mood", "")).strip()
+
+        if not summary:
+            if key_facts:
+                summary = "；".join(key_facts[:3])
+            elif keywords:
+                summary = "、".join(keywords[:6])
+
+        extras = []
+        if key_facts:
+            extras.append("要点:" + "；".join(key_facts))
+        if keywords:
+            extras.append("关键词:" + "、".join(keywords))
+        if entities:
+            extras.append("涉及:" + "、".join(entities))
+        if mood:
+            extras.append("情绪:" + mood)
+
+        if extras:
+            summary = (summary + "\n" + " | ".join(extras)).strip()
+
+        # 防御性裁剪，避免过长
+        if len(summary) > 220:
+            summary = summary[:217] + "..."
+        return summary
+
     # ========== 消息记录 ==========
     
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
@@ -549,6 +606,20 @@ class MemoryManager:
         # 总结仅用于归档，不在此处做画像更新
         summary = full_content
 
+        # 尝试解析结构化 JSON，生成可检索摘要
+        try:
+            content = full_content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "{" in content and "}" in content:
+                content = content[content.find("{"):content.rfind("}") + 1]
+
+            payload = json.loads(content)
+            if isinstance(payload, dict):
+                summary = self._build_structured_summary(payload)
+        except Exception as e:
+            logger.debug(f"Engram: Failed to parse structured summary, fallback to raw: {e}")
+
         ref_uuids = [m.uuid for m in raw_msgs]
         created_at = self._ensure_datetime(raw_msgs[-1].timestamp)
 
@@ -585,6 +656,150 @@ class MemoryManager:
             except Exception as e:
                 logger.error(f"Engram: Force summarize failed for {uid}: {e}")
         return summarized
+
+    async def fold_weekly_summaries(self, user_id, days=7):
+        """将近 N 天的日级总结折叠为一条周总结，写入 SQLite + ChromaDB。"""
+        loop = asyncio.get_event_loop()
+
+        try:
+            days = max(1, int(days))
+        except (TypeError, ValueError):
+            days = 7
+
+        min_samples = self.config.get("folding_min_samples", 3)
+        try:
+            min_samples = max(1, int(min_samples))
+        except (TypeError, ValueError):
+            min_samples = 3
+
+        # 优先读取 daily_summary，兼容当前生产环境中尚未区分 source_type 的 private
+        daily_summaries = await loop.run_in_executor(
+            self.executor,
+            self.db.get_summaries_by_type,
+            user_id,
+            "daily_summary",
+            days
+        )
+        if not daily_summaries:
+            daily_summaries = await loop.run_in_executor(
+                self.executor,
+                self.db.get_summaries_by_type,
+                user_id,
+                "private",
+                days
+            )
+
+        # 兜底：若时间窗口内为空，按最近记忆列表回溯（兼容历史测试数据/旧数据时间戳）
+        if not daily_summaries:
+            recent = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, 100)
+            daily_summaries = [
+                item for item in recent
+                if getattr(item, "source_type", "") in {"daily_summary", "private"}
+            ]
+
+        if len(daily_summaries) < min_samples:
+            return None
+
+        # db 返回倒序，这里改为时间正序，便于 LLM 归纳事件脉络
+        daily_summaries = list(reversed(daily_summaries))
+
+        memory_texts = "\n".join([
+            f"- [{self._ensure_datetime(item.created_at).strftime('%Y-%m-%d %H:%M:%S')}] {item.summary}"
+            for item in daily_summaries
+        ])
+
+        prompt_template = self.config.get(
+            "weekly_folding_prompt",
+            "请根据下面的【daily_summary 列表】生成一段周总结，要求：\n"
+            "1) 只基于给定内容，不编造；\n"
+            "2) 保留关键人物/地点/事件/数值；\n"
+            "3) 输出 120~220 字中文摘要。\n\n"
+            "【daily_summary 列表】:\n{{memory_texts}}"
+        )
+        prompt = str(prompt_template).replace("{{memory_texts}}", memory_texts)
+
+        max_retries = 3
+        retry_delay = 2
+        summary_text = ""
+
+        for attempt in range(max_retries):
+            try:
+                weekly_model = str(self.config.get("weekly_folding_model", "")).strip()
+                summarize_model = str(self.config.get("summarize_model", "")).strip()
+
+                provider = None
+                if weekly_model:
+                    provider = self.context.get_provider_by_id(weekly_model)
+                if not provider and summarize_model:
+                    provider = self.context.get_provider_by_id(summarize_model)
+                if not provider:
+                    provider = self.context.get_using_provider()
+
+                if not provider:
+                    break
+
+                resp = await provider.text_chat(prompt=prompt)
+                summary_text = (resp.completion_text or "").strip()
+                if len(summary_text) >= 5:
+                    break
+
+                logger.warning(
+                    "Engram: weekly folding attempt %d produced empty/short result",
+                    attempt + 1
+                )
+            except Exception as e:
+                logger.error(f"Engram: weekly folding attempt {attempt + 1} error: {e}")
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+
+        if not summary_text or len(summary_text) < 5:
+            logger.error(f"Engram: Failed to fold weekly summaries for {user_id} after {max_retries} attempts")
+            return None
+
+        created_at = datetime.datetime.now()
+        index_id = str(uuid.uuid4())
+        ai_name = self.config.get("ai_name", "助手")
+        source_ids = [item.index_id for item in daily_summaries]
+
+        # 维持时间链：新周总结挂在该用户当前最新索引之后
+        last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
+        prev_index_id = last_index.index_id if last_index else None
+
+        await self._ensure_chroma_initialized()
+
+        add_params = {
+            "ids": [index_id],
+            "documents": [summary_text],
+            "metadatas": [{
+                "user_id": user_id,
+                "source_type": "weekly",
+                "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "ai_name": ai_name,
+                "folding_days": days
+            }]
+        }
+        await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+
+        index_params = {
+            "index_id": index_id,
+            "summary": summary_text,
+            "ref_uuids": json.dumps(source_ids),
+            "prev_index_id": prev_index_id,
+            "source_type": "weekly",
+            "user_id": user_id,
+            "created_at": created_at
+        }
+        await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
+
+        logger.info(
+            "Engram: Weekly folding saved for user %s (source=%d, index=%s)",
+            user_id,
+            len(source_ids),
+            index_id[:8]
+        )
+        return summary_text
     
     # ========== 记忆检索 ==========
     
@@ -594,6 +809,12 @@ class MemoryManager:
         await self._ensure_chroma_initialized()
 
         loop = asyncio.get_event_loop()
+
+        # 查询分类：动态阈值与权重调整
+        intent_type, intent_score = self._intent_classifier.classify_query(query)
+        if intent_type == "skip":
+            logger.debug("Engram: Query classified as skip, skipping retrieval")
+            return []
 
         # 1. ChromaDB 检索（多取一些结果以便过滤和重排序后仍有足够数据）
         query_params = {
@@ -607,7 +828,7 @@ class MemoryManager:
             return []
 
         # 获取配置
-        similarity_threshold = self.config.get("memory_similarity_threshold", 1.5)
+        similarity_threshold = float(self.config.get("memory_similarity_threshold", 1.5))
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
         enable_memory_decay = self.config.get("enable_memory_decay", True)
@@ -630,9 +851,38 @@ class MemoryManager:
         weight_recency = float(self.config.get("rank_weight_recency", 0.08))
         weight_activity = float(self.config.get("rank_weight_activity", 0.06))
 
+        # 动态阈值与权重调整（按查询类别）
+        if intent_type == "recall":
+            similarity_threshold *= 1.15  # 放宽阈值
+            weight_vector = max(weight_vector, 0.55)
+            weight_keyword = min(weight_keyword, 0.35)
+            weight_recency = max(weight_recency, 0.1)
+        elif intent_type == "preference_fact":
+            similarity_threshold *= 0.85  # 收紧阈值
+            weight_keyword = max(weight_keyword, 0.65)
+            weight_vector = min(weight_vector, 0.3)
+            weight_recency = min(weight_recency, 0.05)
+        elif intent_type == "event_narrative":
+            similarity_threshold *= 0.95
+            weight_vector = max(weight_vector, 0.35)
+            weight_keyword = max(weight_keyword, 0.65)
+            weight_recency = min(weight_recency, 0.05)
+
         # 仅在启用记忆衰减时保留 activity 强影响，否则降权，避免语义冲突
         if not enable_memory_decay:
             weight_activity *= 0.2
+
+        if self.config.get("debug_injection", False):
+            logger.info(
+                "Engram: Retrieval tuning intent=%s score=%s threshold=%.3f weights(v=%.2f,k=%.2f,r=%.2f,a=%.2f)",
+                intent_type,
+                intent_score,
+                similarity_threshold,
+                weight_vector,
+                weight_keyword,
+                weight_recency,
+                weight_activity
+            )
 
         # 2. 预处理结果并计算关键词匹配度（BM25 风格）
         distances = results.get('distances', [[]])[0] if 'distances' in results else []
