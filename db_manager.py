@@ -146,6 +146,47 @@ class DatabaseManager:
         with self.db.connection_context():
             return list(MemoryIndex.select().where(MemoryIndex.user_id == user_id).order_by(MemoryIndex.created_at.desc()).limit(limit))
 
+    def search_memory_indexes_by_keywords(
+        self,
+        user_id,
+        keywords,
+        limit=50,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+    ):
+        """关键词兜底检索：在 SQLite 中按 summary 模糊匹配候选记忆。"""
+        with self.db.connection_context():
+            query = MemoryIndex.select().where(MemoryIndex.user_id == user_id)
+
+            # 时间范围过滤（左闭右开）
+            if start_time:
+                query = query.where(MemoryIndex.created_at >= start_time)
+            if end_time:
+                query = query.where(MemoryIndex.created_at < end_time)
+
+            # 来源类型过滤
+            if isinstance(source_types, (list, tuple, set)):
+                source_types = [str(t).strip() for t in source_types if str(t).strip()]
+                if source_types:
+                    query = query.where(MemoryIndex.source_type << source_types)
+
+            # summary 关键词 OR 匹配
+            normalized_keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+            if normalized_keywords:
+                conditions = [MemoryIndex.summary.contains(k) for k in normalized_keywords]
+                cond = conditions[0]
+                for item in conditions[1:]:
+                    cond = cond | item
+                query = query.where(cond)
+
+            try:
+                limit = max(1, int(limit))
+            except (TypeError, ValueError):
+                limit = 50
+
+            return list(query.order_by(MemoryIndex.created_at.desc()).limit(limit))
+
     def get_memories_since(self, user_id, since_time):
         with self.db.connection_context():
             return list(MemoryIndex.select().where((MemoryIndex.user_id == user_id) & (MemoryIndex.created_at >= since_time)))
@@ -337,8 +378,8 @@ class StableDatabaseInterface:
         if missing:
             missing_sorted = sorted(set(missing))
             message = (
-                f"Engram DB contract check failed at {stage}: "
-                f"missing methods -> {', '.join(missing_sorted)}"
+                f"Engram DB 契约检查失败，阶段={stage}："
+                f"缺失方法 -> {', '.join(missing_sorted)}"
             )
             logger.error(message)
             if raise_on_error:
@@ -346,7 +387,7 @@ class StableDatabaseInterface:
             return False, missing_sorted
 
         logger.debug(
-            "Engram DB contract check passed at %s (%d methods)",
+            "Engram DB 契约检查通过：阶段=%s（方法数=%d）",
             stage,
             len(method_names)
         )

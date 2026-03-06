@@ -126,8 +126,8 @@ class MemoryManager:
         if missing:
             missing_sorted = sorted(set(missing))
             message = (
-                f"Engram DB contract check failed at {stage}: "
-                f"missing methods -> {', '.join(missing_sorted)}"
+                f"Engram DB 契约检查失败，阶段={stage}："
+                f"缺失方法 -> {', '.join(missing_sorted)}"
             )
             logger.error(message)
             raise AttributeError(message)
@@ -167,11 +167,11 @@ class MemoryManager:
                 )
                 self._chroma_initialized = True
                 logger.info(
-                    "Engram: ChromaDB initialized successfully (embedding_provider=%s)",
+                    "Engram：ChromaDB 初始化成功（embedding_provider=%s）",
                     self._embedding_provider_id
                 )
             except Exception as e:
-                logger.error(f"Engram: Failed to initialize ChromaDB: {e}")
+                logger.error(f"Engram：初始化 ChromaDB 失败：{e}")
                 raise
     
     # ========== 辅助方法 ==========
@@ -425,10 +425,10 @@ class MemoryManager:
     def _warn_embedding_unavailable(self, message: str):
         """向量模型不可用时仅记录日志，不抛异常。"""
         if not self._embedding_unavailable_logged:
-            logger.warning(f"Engram: {message}")
+            logger.warning(f"Engram：{message}")
             self._embedding_unavailable_logged = True
         else:
-            logger.debug(f"Engram: {message}")
+            logger.debug(f"Engram：{message}")
 
     @staticmethod
     def _is_dimension_mismatch_error(error: Exception) -> bool:
@@ -581,7 +581,7 @@ class MemoryManager:
 
                         if not chunk_failed and len(merged_vectors) == len(texts):
                             logger.info(
-                                "Engram: embedding 请求超出 provider 批量上限，已自动分片（total=%s, chunk=%s）",
+                                "Engram：embedding 请求超出 provider 批量上限，已自动分片（total=%s, chunk=%s）",
                                 len(texts),
                                 max_batch_size,
                             )
@@ -617,7 +617,7 @@ class MemoryManager:
         except Exception as e:
             if self._is_dimension_mismatch_error(e):
                 logger.warning(
-                    "Engram: Chroma 向量维度不匹配（旧库维度与当前 embedding 维度不同）。"
+                    "Engram：Chroma 向量维度不匹配（旧库维度与当前 embedding 维度不同）。"
                     "请执行管理员指令 /mem_rebuild_vector full 重建向量库，"
                     "或切回原 embedding_provider。"
                 )
@@ -642,7 +642,7 @@ class MemoryManager:
         except Exception as e:
             if self._is_dimension_mismatch_error(e):
                 logger.warning(
-                    "Engram: Chroma 检索维度不匹配（旧库维度与当前 embedding 维度不同）。"
+                    "Engram：Chroma 检索维度不匹配（旧库维度与当前 embedding 维度不同）。"
                     "请执行管理员指令 /mem_rebuild_vector full 重建向量库，"
                     "或切回原 embedding_provider。"
                 )
@@ -799,20 +799,20 @@ class MemoryManager:
                     metadatas=batch_add["metadatas"]
                 )
                 if not added:
-                    logger.warning("Engram: Batch add skipped due to unavailable embedding provider")
+                    logger.warning("Engram：批量写入已跳过（embedding provider 不可用）")
                     return
                 logger.info(
-                    "Engram: Batch add %d memories for user %s",
-                    len(batch_add["ids"]),
-                    user_id
+                    "Engram：已为用户 %s 批量写入 %d 条记忆",
+                    user_id,
+                    len(batch_add["ids"])
                 )
                 break
             except Exception as e:
                 if attempt >= max_retries:
-                    logger.error(f"Save summarization error: {e}")
+                    logger.error(f"Engram：保存总结结果失败：{e}")
                     return
                 logger.warning(
-                    "Engram: Batch add failed (attempt %d/%d), retrying in %ss: %s",
+                    "Engram：批量写入失败（第 %d/%d 次），%ss 后重试：%s",
                     attempt,
                     max_retries,
                     retry_delay,
@@ -886,15 +886,15 @@ class MemoryManager:
                 if full_content and len(full_content) >= 5:
                     break # 成功获取总结
                 
-                logger.warning(f"Summarization attempt {attempt + 1} produced empty or too short result.")
+                logger.warning(f"Engram：第 {attempt + 1} 次总结结果为空或过短。")
             except Exception as e:
-                logger.error(f"Summarization attempt {attempt + 1} error: {e}")
+                logger.error(f"Engram：第 {attempt + 1} 次总结失败：{e}")
             
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
         
         if not full_content or len(full_content) < 5:
-            logger.error(f"Failed to summarize chat for user {user_id} after {max_retries} attempts.")
+            logger.error(f"Engram：用户 {user_id} 在重试 {max_retries} 次后仍总结失败。")
             return None
 
         # 总结仅用于归档，不在此处做画像更新
@@ -912,7 +912,7 @@ class MemoryManager:
             if isinstance(payload, dict):
                 summary = self._build_structured_summary(payload)
         except Exception as e:
-            logger.debug(f"Engram: Failed to parse structured summary, fallback to raw: {e}")
+            logger.debug(f"Engram：结构化总结解析失败，已回退原始文本：{e}")
 
         ref_uuids = [m.uuid for m in raw_msgs]
         created_at = self._ensure_datetime(raw_msgs[-1].timestamp)
@@ -934,7 +934,7 @@ class MemoryManager:
         summarized = 0
         for uid in user_ids:
             if self._is_shutdown or getattr(self.executor, "_shutdown", False):
-                logger.debug("Engram: Global summarize aborted due to shutdown")
+                logger.debug("Engram：全局归档因关闭信号已中止")
                 break
 
             # 跳过空值或系统内置账号
@@ -948,7 +948,7 @@ class MemoryManager:
                 await self._summarize_private_chat(uid)
                 summarized += 1
             except Exception as e:
-                logger.error(f"Engram: Force summarize failed for {uid}: {e}")
+                logger.error(f"Engram：强制归档失败，uid={uid}：{e}")
         return summarized
 
     async def _fold_summaries(
@@ -1037,19 +1037,19 @@ class MemoryManager:
                     break
 
                 logger.warning(
-                    "Engram: %s folding attempt %d produced empty/short result",
+                    "Engram：%s 折叠第 %d 次结果为空或过短",
                     level_label,
                     attempt + 1
                 )
             except Exception as e:
-                logger.error(f"Engram: {level_label} folding attempt {attempt + 1} error: {e}")
+                logger.error(f"Engram：{level_label} 折叠第 {attempt + 1} 次失败：{e}")
 
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
 
         if not summary_text or len(summary_text) < 5:
-            logger.error(f"Engram: Failed to fold {level_label} summaries for {user_id} after {max_retries} attempts")
+            logger.error(f"Engram：用户 {user_id} 的 {level_label} 折叠在重试 {max_retries} 次后仍失败")
             return None
 
         created_at = datetime.datetime.now()
@@ -1083,7 +1083,7 @@ class MemoryManager:
             metadatas=add_params["metadatas"]
         )
         if not added:
-            logger.warning("Engram: %s folding skipped due to unavailable embedding provider", level_label)
+            logger.warning("Engram：%s 折叠已跳过（embedding provider 不可用）", level_label)
             return None
 
         index_params = {
@@ -1098,7 +1098,7 @@ class MemoryManager:
         await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
 
         logger.info(
-            "Engram: %s folding saved for user %s (source=%d, index=%s)",
+            "Engram：已保存 %s 折叠结果，user=%s（来源=%d，index=%s）",
             level_label.capitalize(),
             user_id,
             len(source_ids),
@@ -1176,6 +1176,243 @@ class MemoryManager:
             model_config_key="yearly_folding_model",
             level_label="yearly"
         )
+
+    async def _retrieve_memories_by_keyword_fallback(
+        self,
+        user_id,
+        query,
+        limit,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+    ):
+        """向量不可用时的兜底检索：SQLite 关键词召回 + 本地重排。"""
+        loop = asyncio.get_event_loop()
+
+        candidate_limit = min(
+            max(10, limit * 8),
+            max(20, int(self.config.get("memory_query_max_results", 60)))
+        )
+
+        keyword_tokens = list(self._generate_query_keywords(query))
+        if query and str(query).strip():
+            keyword_tokens.append(str(query).strip())
+        keyword_tokens = list(dict.fromkeys([k for k in keyword_tokens if k]))[:30]
+
+        # 优先使用 DB 专用关键词检索接口；旧接口下回退到最近记忆列表过滤
+        if hasattr(self.db, "search_memory_indexes_by_keywords"):
+            candidates = await loop.run_in_executor(
+                self.executor,
+                self.db.search_memory_indexes_by_keywords,
+                user_id,
+                keyword_tokens,
+                candidate_limit,
+                start_time,
+                end_time,
+                source_types,
+            )
+        else:
+            candidates = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, candidate_limit)
+
+        if not candidates:
+            return []
+
+        allowed_types = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        normalized_source_types = []
+        if isinstance(source_types, (list, tuple, set)):
+            normalized_source_types = [
+                str(t).strip().lower() for t in source_types
+                if str(t).strip().lower() in allowed_types
+            ]
+
+        filtered = []
+        for item in candidates:
+            created_at = self._ensure_datetime(item.created_at)
+            if start_time and created_at < start_time:
+                continue
+            if end_time and created_at >= end_time:
+                continue
+            if normalized_source_types and str(getattr(item, "source_type", "")).lower() not in normalized_source_types:
+                continue
+            filtered.append(item)
+
+        if not filtered:
+            return []
+
+        # 构造关键词文档频率用于轻量 IDF
+        query_keywords = self._generate_query_keywords(query)
+        keyword_doc_freq = {k: 0 for k in query_keywords}
+        for item in filtered:
+            summary = str(getattr(item, "summary", "") or "")
+            summary_lower = summary.lower()
+            summary_tokens_en = Counter(_ENGLISH_WORD_PATTERN.findall(summary_lower))
+
+            summary_ngrams_zh = Counter()
+            for block in _CHINESE_BLOCK_PATTERN.findall(summary):
+                block_len = len(block)
+                for n in (2, 3, 4):
+                    if block_len < n:
+                        continue
+                    for i in range(0, block_len - n + 1):
+                        summary_ngrams_zh[block[i:i + n]] += 1
+
+            for kw in query_keywords:
+                if self._count_keyword_matches(kw, summary_tokens_en, summary_ngrams_zh) > 0:
+                    keyword_doc_freq[kw] += 1
+
+        corpus_stats = {
+            "total_docs": len(filtered),
+            "keyword_doc_freq": keyword_doc_freq,
+        }
+
+        rescored = []
+        for item in filtered:
+            summary = str(getattr(item, "summary", "") or "")
+            keyword_score, _ = self._calc_keyword_score(query, summary, corpus_stats)
+            recency_ts = self._ensure_datetime(item.created_at).timestamp() if getattr(item, "created_at", None) else 0
+            rescored.append({
+                "item": item,
+                "keyword_score": keyword_score,
+                "recency_ts": recency_ts,
+            })
+
+        rescored.sort(key=lambda x: (x["keyword_score"], x["recency_ts"]), reverse=True)
+        selected = [x["item"] for x in rescored[:limit]]
+
+        show_relevance_score = self.config.get("show_relevance_score", True)
+        enable_context_hint = bool(self.config.get("enable_memory_context_hint", True))
+        try:
+            memory_context_window = int(self.config.get("memory_context_window", 2))
+        except (TypeError, ValueError):
+            memory_context_window = 2
+        memory_context_window = max(0, min(10, memory_context_window))
+
+        db_indices = {item.index_id: item for item in selected}
+
+        # 向前追溯链路上下文
+        prev_index_map = {}
+        if enable_context_hint and memory_context_window > 0:
+            pending_prev_ids = {
+                db_indices[idx].prev_index_id
+                for idx in db_indices
+                if db_indices[idx].prev_index_id
+            }
+            for _ in range(memory_context_window):
+                if not pending_prev_ids:
+                    break
+
+                if hasattr(self.db, "get_prev_indices_by_ids"):
+                    fetched_prev = await loop.run_in_executor(
+                        self.executor,
+                        self.db.get_prev_indices_by_ids,
+                        list(pending_prev_ids)
+                    )
+                else:
+                    fetched_prev = await loop.run_in_executor(
+                        self.executor,
+                        self.db.get_memory_indexes_by_ids,
+                        list(pending_prev_ids)
+                    )
+
+                if not fetched_prev:
+                    break
+                prev_index_map.update(fetched_prev)
+                pending_prev_ids = {
+                    it.prev_index_id
+                    for it in fetched_prev.values()
+                    if it.prev_index_id and it.prev_index_id not in prev_index_map
+                }
+
+        # 批量读取原文
+        index_uuid_map = {}
+        for idx, db_index in db_indices.items():
+            if not db_index.ref_uuids:
+                continue
+            try:
+                uuids = json.loads(db_index.ref_uuids)
+            except (TypeError, ValueError):
+                uuids = []
+            if uuids:
+                index_uuid_map[idx] = uuids
+
+        raw_map = {}
+        if index_uuid_map:
+            if hasattr(self.db, "get_raw_memories_map_by_uuid_lists"):
+                raw_map = await loop.run_in_executor(
+                    self.executor,
+                    self.db.get_raw_memories_map_by_uuid_lists,
+                    index_uuid_map
+                )
+            else:
+                def _legacy_build_raw_map():
+                    _result = {}
+                    for _idx, _uuids in index_uuid_map.items():
+                        _result[_idx] = self.db.get_memories_by_uuids(_uuids)
+                    return _result
+                raw_map = await loop.run_in_executor(self.executor, _legacy_build_raw_map)
+
+        best_score = max((x["keyword_score"] for x in rescored[:limit]), default=0.0)
+        all_memories = []
+        for row in rescored[:limit]:
+            item = row["item"]
+            idx = item.index_id
+            summary = item.summary
+            created_at = self._ensure_datetime(item.created_at).strftime("%Y-%m-%d %H:%M:%S")
+            short_id = idx[:8]
+
+            if show_relevance_score and best_score > 0:
+                relevance_percent = max(1, min(100, int(row["keyword_score"] / best_score * 100)))
+                relevance_badge = f"🎯 {relevance_percent}% | "
+            else:
+                relevance_badge = ""
+
+            context_hint = ""
+            if enable_context_hint and memory_context_window > 0 and item.prev_index_id:
+                timeline_snippets = []
+                prev_id = item.prev_index_id
+                step = 0
+                while prev_id and step < memory_context_window:
+                    prev_item = prev_index_map.get(prev_id)
+                    if not prev_item:
+                        break
+                    timeline_snippets.append(prev_item.summary[:24].replace("\n", " "))
+                    prev_id = prev_item.prev_index_id
+                    step += 1
+                if timeline_snippets:
+                    timeline_text = " ⟶ ".join(timeline_snippets)
+                    if len(timeline_text) > 80:
+                        timeline_text = timeline_text[:77] + "..."
+                    context_hint = f"\n   └ ⏪ 前情时间线：{timeline_text}"
+
+            raw_preview = ""
+            raw_msgs = raw_map.get(idx, [])
+            filtered_raw = [
+                m.content[:50] for m in raw_msgs
+                if self._is_valid_message_content(m.content)
+            ][:1]
+            if filtered_raw:
+                raw_preview = f"\n   └ 📄 相关原文：{filtered_raw[0]}"
+
+            all_memories.append(
+                f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n"
+                f"📝 归档：{summary}{context_hint}{raw_preview}"
+            )
+
+        # 关键词兜底命中时同样增强 active_score
+        reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
+        if all_memories and reinforce_bonus > 0:
+            for row in rescored[:limit]:
+                try:
+                    await loop.run_in_executor(
+                        self.executor,
+                        self.db.update_active_score,
+                        row["item"].index_id,
+                        reinforce_bonus
+                    )
+                except Exception as e:
+                    logger.debug(f"Engram：fallback 增强记忆 {row['item'].index_id[:8]} 活跃度失败：{e}")
+
+        return all_memories
     
     # ========== 记忆检索 ==========
     
@@ -1202,24 +1439,24 @@ class MemoryManager:
             try:
                 intent_type, intent_score = self._intent_classifier.classify_query(query)
             except Exception as e:
-                logger.warning(f"Engram: classify_query failed ({e}), fallback to default intent")
+                logger.warning(f"Engram：classify_query 调用失败（{e}），已回退默认意图")
                 intent_type, intent_score = "recall", 0.0
         else:
-            logger.warning("Engram: IntentClassifier has no classify_query, fallback to should_retrieve_memory")
+            logger.warning("Engram：IntentClassifier 缺少 classify_query，已回退 should_retrieve_memory")
             if hasattr(self._intent_classifier, "should_retrieve_memory"):
                 try:
                     should_retrieve = await self._intent_classifier.should_retrieve_memory(query)
                     if not should_retrieve:
-                        logger.debug("Engram: should_retrieve_memory=False, skipping retrieval")
+                        logger.debug("Engram：should_retrieve_memory=False，已跳过检索")
                         return []
                 except Exception as e:
-                    logger.warning(f"Engram: should_retrieve_memory fallback failed ({e}), continue retrieval")
+                    logger.warning(f"Engram：should_retrieve_memory 回退调用失败（{e}），继续检索")
 
         if intent_type == "skip" and not force_retrieve:
-            logger.debug("Engram: Query classified as skip, skipping retrieval")
+            logger.debug("Engram：查询被判定为 skip，已跳过检索")
             return []
         if intent_type == "skip" and force_retrieve:
-            logger.debug("Engram: Query classified as skip, but force_retrieve=True so continue retrieval")
+            logger.debug("Engram：查询被判定为 skip，但 force_retrieve=True，继续检索")
 
         # 构造 where 过滤：用户维度 + 可选来源类型
         # Chroma 复杂过滤统一走 $and，避免“字段 + $or”混写兼容性问题
@@ -1254,11 +1491,26 @@ class MemoryManager:
                 where=where_filter
             )
         except Exception as e:
-            logger.warning(f"Engram: Memory query skipped due to embedding unavailable/error: {e}")
-            return []
+            logger.warning(f"Engram：记忆查询异常，已回退关键词检索：{e}")
+            return await self._retrieve_memories_by_keyword_fallback(
+                user_id=user_id,
+                query=query,
+                limit=limit,
+                start_time=start_time,
+                end_time=end_time,
+                source_types=normalized_source_types,
+            )
 
         if not results or not results.get('ids') or not results['ids'] or not results['ids'][0]:
-            return []
+            logger.debug("Engram：向量检索结果为空，已回退关键词检索")
+            return await self._retrieve_memories_by_keyword_fallback(
+                user_id=user_id,
+                query=query,
+                limit=limit,
+                start_time=start_time,
+                end_time=end_time,
+                source_types=normalized_source_types,
+            )
 
         # 获取配置
         similarity_threshold = float(self.config.get("memory_similarity_threshold", 1.5))
@@ -1314,7 +1566,7 @@ class MemoryManager:
 
         if self.config.get("debug_injection", False):
             logger.info(
-                "Engram: Retrieval tuning intent=%s score=%s threshold=%.3f weights(v=%.2f,k=%.2f,r=%.2f,a=%.2f)",
+                "Engram：检索调优 intent=%s score=%s threshold=%.3f 权重(v=%.2f,k=%.2f,r=%.2f,a=%.2f)",
                 intent_type,
                 intent_score,
                 similarity_threshold,
@@ -1342,7 +1594,7 @@ class MemoryManager:
 
             # 过滤低相关性结果
             if distance > similarity_threshold:
-                logger.debug(f"Skipping memory with distance {distance:.3f} (threshold: {similarity_threshold})")
+                logger.debug(f"Engram：记忆距离 {distance:.3f} 超过阈值 {similarity_threshold}，已跳过")
                 continue
 
             index_id = results['ids'][0][i]
@@ -1558,7 +1810,7 @@ class MemoryManager:
                                 _result[_idx] = self.db.get_memories_by_uuids(_uuids)
                             except Exception as e:
                                 logger.debug(
-                                    "Engram: legacy get_memories_by_uuids failed for index=%s, fallback empty raw map: %s",
+                                    "Engram：旧版 get_memories_by_uuids 调用失败，index=%s，已回退为空原文映射：%s",
                                     str(_idx)[:8],
                                     e,
                                 )
@@ -1639,7 +1891,7 @@ class MemoryManager:
                         reinforce_bonus
                     )
                 except Exception as e:
-                    logger.debug(f"Engram: Failed to reinforce memory {data['index_id'][:8]}: {e}")
+                    logger.debug(f"Engram：增强记忆 {data['index_id'][:8]} 活跃度失败：{e}")
 
         return all_memories
 
@@ -1667,6 +1919,28 @@ class MemoryManager:
         
         return target_memory, raw_msgs
     
+    async def _find_memory_by_short_id(self, user_id, short_id):
+        """按短 ID（8位）或完整 ID 查询记忆索引。"""
+        loop = asyncio.get_event_loop()
+        short_id = str(short_id or "").strip()
+
+        def _find_memory():
+            with self.db.db.connection_context():
+                from ..db_manager import MemoryIndex
+                if len(short_id) == 8:
+                    query = MemoryIndex.select().where(
+                        (MemoryIndex.user_id == user_id) &
+                        (MemoryIndex.index_id.startswith(short_id))
+                    )
+                else:
+                    query = MemoryIndex.select().where(
+                        (MemoryIndex.user_id == user_id) &
+                        (MemoryIndex.index_id == short_id)
+                    )
+                return query.first()
+
+        return await loop.run_in_executor(self.executor, _find_memory)
+
     async def get_memory_detail_by_id(self, user_id, short_id):
         """
         根据记忆 ID（短 ID 或完整 UUID）获取记忆详情
@@ -1679,73 +1953,36 @@ class MemoryManager:
             (memory_index, raw_msgs) 或 (None, error_message)
         """
         loop = asyncio.get_event_loop()
-        
-        # 1. 查找匹配的记忆索引
-        def _find_memory():
-            with self.db.db.connection_context():
-                from ..db_manager import MemoryIndex
-                # 如果是短ID（8位），查找匹配的完整UUID
-                if len(short_id) == 8:
-                    query = MemoryIndex.select().where(
-                        (MemoryIndex.user_id == user_id) &
-                        (MemoryIndex.index_id.startswith(short_id))
-                    )
-                else:
-                    # 完整UUID
-                    query = MemoryIndex.select().where(
-                        (MemoryIndex.user_id == user_id) &
-                        (MemoryIndex.index_id == short_id)
-                    )
-                return query.first()
-        
-        target_memory = await loop.run_in_executor(self.executor, _find_memory)
-        
+
+        target_memory = await self._find_memory_by_short_id(user_id, short_id)
+
         if not target_memory:
             return None, f"找不到 ID 为 {short_id} 的记忆，请确认 ID 是否正确。"
-        
+
         # 2. 解析原文 UUID
         if not target_memory.ref_uuids:
             return target_memory, []
-            
+
         uuids = json.loads(target_memory.ref_uuids)
         raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
-        
+
         return target_memory, raw_msgs
     
     # ========== 记忆删除与撤销 ==========
     
-    async def delete_memory_by_sequence(self, user_id, sequence_num, delete_raw=False):
-        """
-        删除指定序号的记忆（支持撤销）
-        
-        Args:
-            user_id: 用户ID
-            sequence_num: 记忆序号（基于 mem_list 的序号，最新的为 1）
-            delete_raw: 是否同时删除关联的原始消息
-            
-        Returns:
-            (success: bool, message: str, summary: str)
-        """
+    async def _delete_memory_entry(self, user_id, target_memory, delete_raw=False):
+        """删除单条记忆索引（统一序号/ID 两种入口），并写入撤销历史。"""
         loop = asyncio.get_event_loop()
-        
-        # 1. 获取目标记忆
-        limit = sequence_num + 2
-        memories = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, limit)
-        
-        if not memories or len(memories) < sequence_num:
-            return False, "找不到该序号的记忆，请确认序号是否存在。", ""
-            
-        target_memory = memories[sequence_num - 1]
         index_id = target_memory.index_id
         summary = target_memory.summary
-        
+
         try:
             # 确保 ChromaDB 已初始化
             await self._ensure_chroma_initialized()
-            
+
             # 保存删除前的数据（用于撤销）
             deleted_uuids = json.loads(target_memory.ref_uuids) if target_memory.ref_uuids else []
-            
+
             # 获取向量数据（用于恢复）
             vector_data = None
             try:
@@ -1760,8 +1997,8 @@ class MemoryManager:
                         'document': chroma_result['documents'][0] if chroma_result.get('documents') else summary
                     }
             except Exception as e:
-                logger.debug(f"Failed to get vector data for backup: {e}")
-            
+                logger.debug(f"Engram：获取备份向量数据失败：{e}")
+
             # 创建删除记录
             delete_record = {
                 'index_id': index_id,
@@ -1776,18 +2013,17 @@ class MemoryManager:
                 'deleted_uuids': deleted_uuids,
                 'vector_data': vector_data
             }
-            
+
             # 保存到删除历史
             if user_id not in self._delete_history:
                 self._delete_history[user_id] = []
             self._delete_history[user_id].insert(0, delete_record)
-            # 只保留最近N次删除
             self._delete_history[user_id] = self._delete_history[user_id][:self._max_undo_history]
-            
-            # 2. 从 ChromaDB 删除向量数据
+
+            # 1. 从 ChromaDB 删除向量数据
             await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
-            
-            # 3. 如果需要，删除关联的原始消息
+
+            # 2. 如果需要，删除关联的原始消息
             if delete_raw and target_memory.ref_uuids:
                 uuids = json.loads(target_memory.ref_uuids)
                 await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
@@ -1799,15 +2035,38 @@ class MemoryManager:
                         with self.db.db.connection_context():
                             RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
                     await loop.run_in_executor(self.executor, _mark_unarchived)
-            
-            # 4. 从 SQLite 删除记忆索引
+
+            # 3. 从 SQLite 删除记忆索引
             await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
-            
+
             return True, "删除成功", summary
-            
         except Exception as e:
-            logger.error(f"Delete memory error: {e}")
+            logger.error(f"Engram：删除记忆失败：{e}")
             return False, f"删除失败：{e}", summary
+
+    async def delete_memory_by_sequence(self, user_id, sequence_num, delete_raw=False):
+        """
+        删除指定序号的记忆（支持撤销）
+        
+        Args:
+            user_id: 用户ID
+            sequence_num: 记忆序号（基于 mem_list 的序号，最新的为 1）
+            delete_raw: 是否同时删除关联的原始消息
+            
+        Returns:
+            (success: bool, message: str, summary: str)
+        """
+        loop = asyncio.get_event_loop()
+
+        # 1. 获取目标记忆
+        limit = sequence_num + 2
+        memories = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, limit)
+
+        if not memories or len(memories) < sequence_num:
+            return False, "找不到该序号的记忆，请确认序号是否存在。", ""
+
+        target_memory = memories[sequence_num - 1]
+        return await self._delete_memory_entry(user_id, target_memory, delete_raw=delete_raw)
     
     async def undo_last_delete(self, user_id):
         """
@@ -1873,7 +2132,7 @@ class MemoryManager:
                     metadatas=add_params["metadatas"]
                 )
                 if not added:
-                    logger.warning("Engram: Undo skipped vector restore due to unavailable embedding provider")
+                    logger.warning("Engram：撤销操作已跳过向量恢复（embedding provider 不可用）")
             
             # 3. 恢复原始消息的归档状态
             if delete_record['deleted_uuids']:
@@ -1886,12 +2145,12 @@ class MemoryManager:
                 try:
                     await loop.run_in_executor(self.executor, _mark_archived)
                 except Exception as e:
-                    logger.debug(f"Failed to restore raw messages archive status: {e}")
+                    logger.debug(f"Engram：恢复原始消息归档状态失败：{e}")
             
             return True, "撤销成功", delete_record['summary']
             
         except Exception as e:
-            logger.error(f"Undo delete error: {e}")
+            logger.error(f"Engram：撤销删除失败：{e}")
             # 恢复失败，将记录放回历史
             self._delete_history[user_id].insert(0, delete_record)
             return False, f"撤销失败：{e}", delete_record['summary']
@@ -1908,53 +2167,17 @@ class MemoryManager:
         Returns:
             (success: bool, message: str, summary: str)
         """
-        loop = asyncio.get_event_loop()
-        
-        # 1. 查找匹配的记忆索引
-        def _find_memory():
-            with self.db.db.connection_context():
-                from ..db_manager import MemoryIndex
-                # 如果是短ID（8位），查找匹配的完整UUID
-                if len(short_id) == 8:
-                    query = MemoryIndex.select().where(
-                        (MemoryIndex.user_id == user_id) &
-                        (MemoryIndex.index_id.startswith(short_id))
-                    )
-                else:
-                    # 完整UUID
-                    query = MemoryIndex.select().where(
-                        (MemoryIndex.user_id == user_id) &
-                        (MemoryIndex.index_id == short_id)
-                    )
-                return query.first()
-        
+        short_id = str(short_id or "").strip()
+
         try:
-            target_memory = await loop.run_in_executor(self.executor, _find_memory)
-            
+            target_memory = await self._find_memory_by_short_id(user_id, short_id)
             if not target_memory:
                 return False, f"找不到 ID 为 {short_id} 的记忆，请确认 ID 是否正确。", ""
-            
-            index_id = target_memory.index_id
-            summary = target_memory.summary
-            
-            # 确保 ChromaDB 已初始化
-            await self._ensure_chroma_initialized()
-            
-            # 2. 从 ChromaDB 删除向量数据
-            await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
-            
-            # 3. 如果需要，删除关联的原始消息
-            if delete_raw and target_memory.ref_uuids:
-                uuids = json.loads(target_memory.ref_uuids)
-                await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
-            
-            # 4. 从 SQLite 删除记忆索引
-            await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
-            
-            return True, "删除成功", summary
-            
+
+            return await self._delete_memory_entry(user_id, target_memory, delete_raw=delete_raw)
+
         except Exception as e:
-            logger.error(f"Delete memory by ID error: {e}")
+            logger.error(f"Engram：按 ID 删除记忆失败：{e}")
             return False, f"删除失败：{e}", ""
     
     async def rebuild_vector_collection(self, full_rebuild: bool = False, batch_size: int = 200):
@@ -2000,13 +2223,13 @@ class MemoryManager:
                     except FileExistsError:
                         pass
                     except Exception as e:
-                        logger.warning(f"Engram: backup ChromaDB failed, continue rebuild: {e}")
+                        logger.warning(f"Engram：备份 ChromaDB 失败，将继续重建：{e}")
                         backup_dir = ""
 
                 try:
                     self.chroma_client.delete_collection(name="long_term_memories")
                 except Exception as e:
-                    logger.debug(f"Engram: delete old Chroma collection skipped/failed, continue rebuild: {e}")
+                    logger.debug(f"Engram：删除旧 Chroma 集合已跳过或失败，将继续重建：{e}")
                 self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
 
             await loop.run_in_executor(self.executor, _backup_and_reset_collection)
@@ -2059,7 +2282,7 @@ class MemoryManager:
                             "backup_dir": backup_dir
                         }
             except Exception as e:
-                logger.error(f"Engram: rebuild_vector_collection batch failed: {e}")
+                logger.error(f"Engram：rebuild_vector_collection 批次失败：{e}")
                 failed += len(batch)
 
         return {
@@ -2125,7 +2348,7 @@ class MemoryManager:
             return True, data, stats
             
         except Exception as e:
-            logger.error(f"Export raw messages error: {e}")
+            logger.error(f"Engram：导出原始消息失败：{e}")
             return False, f"导出失败：{e}", {}
     
     async def export_all_users_messages(self, format="jsonl", start_date=None, end_date=None, limit=None):
@@ -2177,7 +2400,7 @@ class MemoryManager:
             return True, data, stats
             
         except Exception as e:
-            logger.error(f"Export all users messages error: {e}")
+            logger.error(f"Engram：导出全部用户消息失败：{e}")
             return False, f"导出失败：{e}", {}
     
     def _export_as_jsonl(self, raw_msgs):

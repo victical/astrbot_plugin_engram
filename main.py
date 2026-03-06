@@ -24,7 +24,7 @@ import time
 import re
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.4.9")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.5.4")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -72,17 +72,17 @@ class EngramPlugin(Star):
     def _is_command_message(self, content: str) -> bool:
         """检测消息是否为指令"""
         if not self.config.get("enable_command_filter", True):
-            logger.debug(f"Engram: Command filter disabled, not filtering: {content[:30]}")
+            logger.debug(f"Engram：指令过滤已关闭，不进行过滤：{content[:30]}")
             return False
         
         text = content.strip()
         
         # 1. 检查指令前缀
         command_prefixes = self.config.get("command_prefixes", ["/", "!", "#", "~"])
-        logger.debug(f"Engram: Checking command prefixes {command_prefixes} for message: {text[:30]}")
+        logger.debug(f"Engram：正在检查消息是否匹配指令前缀 {command_prefixes}：{text[:30]}")
         for prefix in command_prefixes:
             if text.startswith(prefix):
-                logger.debug(f"Engram: Message matched prefix '{prefix}', filtering out")
+                logger.debug(f"Engram：消息命中前缀 '{prefix}'，已过滤")
                 return True
         
         # 2. 检查完整指令匹配
@@ -349,10 +349,10 @@ class EngramPlugin(Star):
         try:
             start_time, end_time, time_desc = self._parse_time_expr(parse_target)
         except re.error as e:
-            logger.warning(f"Engram mem_search_tool invalid time_expr regex parse failed: {e}")
+            logger.warning(f"Engram mem_search_tool：time_expr 正则解析失败：{e}")
             start_time, end_time, time_desc = None, None, ""
         except Exception as e:
-            logger.warning(f"Engram mem_search_tool parse_time_expr failed: {e}")
+            logger.warning(f"Engram mem_search_tool：解析 time_expr 失败：{e}")
             start_time, end_time, time_desc = None, None, ""
 
         normalized_types = self._normalize_source_types(source_types, default_types=default_types)
@@ -367,7 +367,7 @@ class EngramPlugin(Star):
                 source_types=normalized_types or None
             )
         except Exception as e:
-            logger.error(f"Engram mem_search_tool error: {e}")
+            logger.error(f"Engram mem_search_tool 异常：{e}")
             return "工具检索失败，请稍后重试。"
 
         if not memories:
@@ -402,7 +402,7 @@ class EngramPlugin(Star):
         try:
             should_retrieve = await self._intent_classifier.should_retrieve_memory(query)
         except Exception as e:
-            logger.warning(f"Engram: intent check failed, fallback skip retrieval: {e}")
+            logger.warning(f"Engram：意图检查失败，已回退为跳过检索：{e}")
             should_retrieve = False
 
         if should_retrieve:
@@ -411,28 +411,28 @@ class EngramPlugin(Star):
             try:
                 cache_hit, memories, topic_key = self._get_cached_topic_memories(user_id, query)
             except Exception as e:
-                logger.debug(f"Engram: topic cache read failed, fallback retrieval: {e}")
+                logger.debug(f"Engram：话题缓存读取失败，已回退为直接检索：{e}")
                 cache_hit, memories, topic_key = False, [], ""
 
             if not cache_hit:
                 try:
                     memories = await self.logic.retrieve_memories(user_id, query)
                 except Exception as e:
-                    logger.error(f"Engram: retrieve_memories failed in on_llm_request: {e}")
+                    logger.error(f"Engram：on_llm_request 中 retrieve_memories 调用失败：{e}")
                     memories = []
 
                 try:
                     self._set_cached_topic_memories(user_id, query, topic_key, memories)
                 except Exception as e:
-                    logger.debug(f"Engram: topic cache write failed, ignored: {e}")
+                    logger.debug(f"Engram：话题缓存写入失败，已忽略：{e}")
             else:
-                logger.debug(f"Engram: Topic cache hit for {user_id}, query={query[:30]}")
+                logger.debug(f"Engram：话题缓存命中，user_id={user_id}，query={query[:30]}")
 
             if memories:
                 memory_prompt = "\n".join(memories)
                 memory_block = f"【长期记忆回溯】：\n{memory_prompt}\n"
         else:
-            logger.debug(f"Engram: Skipping memory retrieval for trivial query: {query[:30]}")
+            logger.debug(f"Engram：当前查询较弱，已跳过记忆检索：{query[:30]}")
 
         tool_hint_block = self._build_tool_hint_block(
             memory_count=len(memories),
@@ -546,7 +546,7 @@ class EngramPlugin(Star):
         try:
             memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(user_id, memory_id)
         except Exception as e:
-            logger.error(f"Engram mem_get_detail_tool error: {e}")
+            logger.error(f"Engram mem_get_detail_tool 异常：{e}")
             return "工具检索失败，请稍后重试。"
 
         if not memory_index:
@@ -593,7 +593,7 @@ class EngramPlugin(Star):
         # 检查用户原始消息是否为指令，是则跳过记录 AI 回复
         user_message = event.message_str
         if self._is_command_message(user_message):
-            logger.debug(f"Engram: Skipping AI response recording for command: {user_message[:30]}")
+            logger.debug(f"Engram：检测到指令消息，跳过记录 AI 回复：{user_message[:30]}")
             return
         
         # 获取结果对象
@@ -614,7 +614,7 @@ class EngramPlugin(Star):
             try:
                 await self.logic._update_interaction_stats(user_id)
             except Exception as e:
-                logger.debug(f"Engram: Failed to update interaction stats for {user_id}: {e}")
+                logger.debug(f"Engram：更新用户 {user_id} 的互动统计失败：{e}")
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def on_private_message(self, event: AstrMessageEvent):
@@ -705,14 +705,14 @@ class EngramPlugin(Star):
                             city = stranger_info.get("city", "")
                             update_payload["basic_info"]["location"] = f"{prov}-{city}".strip("-")
                         
-                        logger.info(f"Engram: Synced OneBot info for {user_id}: gender={gender}, age={age}")
+                        logger.info(f"Engram：已同步 OneBot 用户信息 user_id={user_id}，gender={gender}，age={age}")
             except Exception as api_err:
-                logger.debug(f"Engram: OneBot API call skipped or failed: {api_err}")
+                logger.debug(f"Engram：OneBot API 调用已跳过或失败：{api_err}")
 
             await self.logic.update_user_profile(user_id, update_payload)
             self._last_onebot_sync[user_id] = now
         except Exception as e:
-            logger.error(f"Auto update basic info failed: {e}")
+            logger.error(f"Engram：自动更新基础信息失败：{e}")
 
     @filter.command("mem_list")
     async def mem_list(self, event: AstrMessageEvent, count: str = ""):
@@ -929,7 +929,7 @@ class EngramPlugin(Star):
             self.logic.unsaved_msg_count[user_id] = 0
             yield event.plain_result("🗑️ 已成功清除您所有未归档的原始对话消息。")
         except Exception as e:
-            logger.error(f"Clear raw memory failed: {e}")
+            logger.error(f"Engram：清理原始记忆失败：{e}")
             yield event.plain_result(f"❌ 清除失败：{e}")
 
     @filter.command("mem_clear_archive")
@@ -961,7 +961,7 @@ class EngramPlugin(Star):
             
             yield event.plain_result("🗑️ 已成功清除您所有的长期记忆归档，原始消息已重置为待归档状态。")
         except Exception as e:
-            logger.error(f"Clear archive memory failed: {e}")
+            logger.error(f"Engram：清理归档记忆失败：{e}")
             yield event.plain_result(f"❌ 清除失败：{e}")
 
     @filter.command("mem_clear_all")
@@ -985,7 +985,7 @@ class EngramPlugin(Star):
             self.logic.unsaved_msg_count[user_id] = 0
             yield event.plain_result("🗑️ 已成功彻底清除您所有的原始对话消息和归档记忆。")
         except Exception as e:
-            logger.error(f"Clear all memory failed: {e}")
+            logger.error(f"Engram：清理全部记忆失败：{e}")
             yield event.plain_result(f"❌ 清除失败：{e}")
 
     @filter.command_group("profile")
@@ -1026,7 +1026,7 @@ class EngramPlugin(Star):
             from astrbot.api.message_components import Image as MsgImage
             yield event.chain_result([MsgImage.fromBytes(img_bytes)])
         except Exception as e:
-            logger.error(f"Profile rendering failed: {e}")
+            logger.error(f"Engram：画像渲染失败：{e}")
             import traceback
             logger.debug(traceback.format_exc())
             yield event.plain_result(f"⚠️ 档案绘制失败，转为文本模式：\n{json.dumps(profile, indent=2, ensure_ascii=False)}")
@@ -1138,7 +1138,7 @@ class EngramPlugin(Star):
                     f"{extra_backup_line}"
                 )
         except Exception as e:
-            logger.error(f"Engram: rebuild vectors failed: {e}")
+            logger.error(f"Engram：重建向量库失败：{e}")
             yield event.plain_result(f"❌ 向量库重建失败：{e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -1200,11 +1200,11 @@ class EngramPlugin(Star):
                     asyncio.gather(*self._scheduler._tasks, return_exceptions=True),
                     timeout=0.5
                 )
-                logger.debug("Engram: All scheduler tasks stopped gracefully")
+                logger.debug("Engram：所有调度任务已优雅停止")
             except asyncio.TimeoutError:
-                logger.debug("Engram: Some scheduler tasks did not complete in time")
+                logger.debug("Engram：部分调度任务未在限定时间内完成")
             except Exception as e:
-                logger.debug(f"Engram: Error waiting for scheduler tasks: {e}")
+                logger.debug(f"Engram：等待调度任务结束时发生异常：{e}")
         
         # 步骤3：最后关闭线程池和其他资源
         self.logic._memory_manager.shutdown()

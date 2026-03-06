@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-03-07
+
+### Changed
+- 统一删除链路：`delete_memory_by_id` 与 `delete_memory_by_sequence` 复用同一核心逻辑，确保 ID/序号删除行为一致（含撤销历史与原始消息归档状态处理）。
+- 检索降级增强：向量检索异常或结果为空时，自动回退到 SQLite 关键词检索（保留时间范围与来源类型过滤）。
+- 版本号统一：`main.py @register`、`metadata.yaml`、`CHANGELOG.md` 统一到 `1.5.4`。
+
+### Added
+- 新增 `DatabaseManager.search_memory_indexes_by_keywords()` 作为向量不可用时的数据库兜底检索接口。
+- 新增测试：`tests/test_memory_delete_by_id.py`、`tests/test_memory_fallback.py`（覆盖 ID 删除撤销链路与检索降级骨架）。
+
 ## [1.4.3] - 2026-02-17
 
 ### Added
