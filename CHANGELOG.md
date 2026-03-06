@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 检索降级增强：向量检索异常或结果为空时，自动回退到 SQLite 关键词检索（保留时间范围与来源类型过滤）。
 - 写入链路解耦：`_summarize_private_chat` 调整为“先落 SQLite 索引与归档，再尝试写入向量”；向量失败时仅进入待补偿队列，不阻断主链路。
 - 测试入口标准化：新增 `tests/conftest.py` 统一导入路径与工作目录，支持在仓库内直接执行 `pytest -q`。
+- 新增最小 CI：GitHub Actions 在 `beta/main` 的 push 与 PR 自动执行 pytest（Python 3.11/3.12）。
 - 版本号统一：`main.py @register`、`metadata.yaml`、`CHANGELOG.md` 统一到 `1.5.4`。
 
 ### Added

@@ -213,7 +213,7 @@
 **改造任务**
 - [x] 修复 `astrbot_plugin_engram` 导入路径问题（已新增项目根 `__init__.py`）
 - [x] 明确测试启动方式（README 已增补 pytest 说明）
-- [ ] 增加最小 CI（push/pr 自动跑 tests）
+- [x] 增加最小 CI（push/pr 自动跑 tests）
 
 **验收标准**
 - [x] `pytest -q` 可收集并执行（当前 34 passed）
@@ -223,7 +223,7 @@
 - 完成日期：
 - 负责人：
 - Commit/PR：
-- 备注：已新增 `tests/conftest.py` 统一导入路径与工作目录，当前仓库内可直接执行 `pytest -q`。
+- 备注：已新增 `.github/workflows/ci.yml`，在 `beta/main` push 与 PR 自动执行测试（Python 3.11/3.12）。
 
 ---
 
