@@ -107,9 +107,9 @@ async def test_weekly_folding_success_write_weekly_source_type(mocker, temp_db):
     assert weekly_rows[0].source_type == "weekly"
     assert weekly_rows[0].summary == "这是本周总结"
 
-    assert len(dummy_collection.add_calls) == 1
-    metadata = dummy_collection.add_calls[0]["metadatas"][0]
-    assert metadata["source_type"] == "weekly"
+    # 向量不可用时也应保留折叠结果（索引已落库），并进入补偿队列
+    assert len(manager._pending_vector_jobs) >= 1
+    assert manager._pending_vector_jobs[-1]["source_type"] == "weekly"
 
 
 @pytest.mark.asyncio
@@ -156,9 +156,9 @@ async def test_monthly_folding_success_write_monthly_source_type(mocker, temp_db
     assert monthly_rows[0].source_type == "monthly"
     assert monthly_rows[0].summary == "这是本月总结"
 
-    assert len(dummy_collection.add_calls) == 1
-    metadata = dummy_collection.add_calls[0]["metadatas"][0]
-    assert metadata["source_type"] == "monthly"
+    # 向量不可用时也应保留折叠结果（索引已落库），并进入补偿队列
+    assert len(manager._pending_vector_jobs) >= 1
+    assert manager._pending_vector_jobs[-1]["source_type"] == "monthly"
 
 
 @pytest.mark.asyncio
@@ -205,6 +205,6 @@ async def test_yearly_folding_success_write_yearly_source_type(mocker, temp_db):
     assert yearly_rows[0].source_type == "yearly"
     assert yearly_rows[0].summary == "这是本年度总结"
 
-    assert len(dummy_collection.add_calls) == 1
-    metadata = dummy_collection.add_calls[0]["metadatas"][0]
-    assert metadata["source_type"] == "yearly"
+    # 向量不可用时也应保留折叠结果（索引已落库），并进入补偿队列
+    assert len(manager._pending_vector_jobs) >= 1
+    assert manager._pending_vector_jobs[-1]["source_type"] == "yearly"

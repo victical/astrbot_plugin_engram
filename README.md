@@ -143,6 +143,22 @@ data/plugins_data/astrbot_plugin_engram/exports/
 
 - 用户信息的获取与解析参考了 [astrbot_plugin_box](https://github.com/Zhalslar/astrbot_plugin_box)。
 
+## 🧪 开发测试（pytest）
+
+在项目根目录执行：
+
+```bash
+pytest -q
+```
+
+说明：
+- 项目已内置 `tests/conftest.py`，可直接在仓库目录运行测试，无需手动设置 `PYTHONPATH`。
+- 若需只跑新增回归测试：
+
+```bash
+pytest -q tests/test_memory_delete_by_id.py tests/test_memory_fallback.py tests/test_summarize_persistence.py
+```
+
 ## 🧪 功能测试指南
 
 如果您需要验证插件的所有核心功能，请按照以下步骤操作：

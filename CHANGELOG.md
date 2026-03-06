@@ -10,11 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - 统一删除链路：`delete_memory_by_id` 与 `delete_memory_by_sequence` 复用同一核心逻辑，确保 ID/序号删除行为一致（含撤销历史与原始消息归档状态处理）。
 - 检索降级增强：向量检索异常或结果为空时，自动回退到 SQLite 关键词检索（保留时间范围与来源类型过滤）。
+- 写入链路解耦：`_summarize_private_chat` 调整为“先落 SQLite 索引与归档，再尝试写入向量”；向量失败时仅进入待补偿队列，不阻断主链路。
+- 测试入口标准化：新增 `tests/conftest.py` 统一导入路径与工作目录，支持在仓库内直接执行 `pytest -q`。
 - 版本号统一：`main.py @register`、`metadata.yaml`、`CHANGELOG.md` 统一到 `1.5.4`。
 
 ### Added
 - 新增 `DatabaseManager.search_memory_indexes_by_keywords()` 作为向量不可用时的数据库兜底检索接口。
-- 新增测试：`tests/test_memory_delete_by_id.py`、`tests/test_memory_fallback.py`（覆盖 ID 删除撤销链路与检索降级骨架）。
+- 新增向量补偿队列：`MemoryManager._pending_vector_jobs`（内存态），用于记录向量写入失败索引并在重建成功后清理。
+- 新增测试：`tests/test_memory_delete_by_id.py`、`tests/test_memory_fallback.py`、`tests/test_summarize_persistence.py`（覆盖 ID 删除撤销链路、检索降级与“向量失败不丢总结”）。
 
 ## [1.4.3] - 2026-02-17
 

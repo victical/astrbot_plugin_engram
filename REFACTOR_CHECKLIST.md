@@ -86,7 +86,7 @@
 
 ### P0-3 写入解耦（先落库，再向量化）
 
-- 状态：`[ ] 未开始`
+- 状态：`[x] 已完成`
 - 优先级：高
 - 目标：总结成功不因向量写入失败而丢失。
 
@@ -94,20 +94,20 @@
 - `core/memory_manager.py`
 
 **改造任务**
-- [ ] 调整 `_summarize_private_chat()` 顺序：先写 `MemoryIndex` 与归档状态
-- [ ] 向量写入失败时记录失败任务（待补队列/待重建标记）
-- [ ] 保留手动补偿入口（`/mem_rebuild_vector`）可回灌缺失向量
+- [x] 调整 `_summarize_private_chat()` 顺序：先写 `MemoryIndex` 与归档状态
+- [x] 向量写入失败时记录失败任务（待补队列/待重建标记）
+- [x] 保留手动补偿入口（`/mem_rebuild_vector`）可回灌缺失向量（并在重建成功后清理待补队列）
 
 **验收标准**
-- [ ] embedding 不可用时，`/mem_list` 仍可看到新归档
-- [ ] 恢复 embedding 后可通过重建补齐向量
-- [ ] 不出现“总结完成但数据丢失”
+- [x] embedding 不可用时，`/mem_list` 仍可看到新归档（已补单测）
+- [x] 恢复 embedding 后可通过重建补齐向量（已接入 pending 队列清理）
+- [x] 不出现“总结完成但数据丢失”（已补单测）
 
 **进度记录**
 - 完成日期：
 - 负责人：
 - Commit/PR：
-- 备注：
+- 备注：新增 `tests/test_summarize_persistence.py` 验证“向量失败但总结落库成功”。
 
 ---
 
@@ -212,18 +212,18 @@
 
 **改造任务**
 - [x] 修复 `astrbot_plugin_engram` 导入路径问题（已新增项目根 `__init__.py`）
-- [ ] 明确测试启动方式（README 增补）
+- [x] 明确测试启动方式（README 已增补 pytest 说明）
 - [ ] 增加最小 CI（push/pr 自动跑 tests）
 
 **验收标准**
-- [ ] `pytest -q` 可收集并执行
+- [x] `pytest -q` 可收集并执行（当前 34 passed）
 - [ ] CI 状态为绿色
 
 **进度记录**
 - 完成日期：
 - 负责人：
 - Commit/PR：
-- 备注：当前可通过 `python -c "import sys,pytest;sys.path.insert(0,r'E:\\AI\\shouban');..."` 方式执行定向测试；待补充标准化 pytest 启动配置。
+- 备注：已新增 `tests/conftest.py` 统一导入路径与工作目录，当前仓库内可直接执行 `pytest -q`。
 
 ---
 

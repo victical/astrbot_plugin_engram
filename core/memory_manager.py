@@ -108,6 +108,10 @@ class MemoryManager:
         self._is_shutdown = False
         self._embedding_provider_id = str(self.config.get("embedding_provider", "")).strip()
         self._embedding_unavailable_logged = False
+
+        # 向量写入失败补偿队列（内存态）：用于后续重建/告警
+        self._pending_vector_jobs = []
+        self._max_pending_vector_jobs = 5000
     
     def shutdown(self):
         """关闭记忆管理器"""
@@ -126,7 +130,7 @@ class MemoryManager:
         if missing:
             missing_sorted = sorted(set(missing))
             message = (
-                f"Engram DB 契约检查失败，阶段={stage}："
+                f"Engram DB 契约检查失败（missing methods），阶段={stage}："
                 f"缺失方法 -> {', '.join(missing_sorted)}"
             )
             logger.error(message)
@@ -429,6 +433,41 @@ class MemoryManager:
             self._embedding_unavailable_logged = True
         else:
             logger.debug(f"Engram：{message}")
+
+    def _enqueue_pending_vector_jobs(self, rows, reason: str = ""):
+        """记录向量写入失败的索引，便于后续重建补偿。"""
+        if not rows:
+            return
+
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for row in rows:
+            idx = str(row.get("index_id", "")).strip()
+            if not idx:
+                continue
+            self._pending_vector_jobs.append({
+                "index_id": idx,
+                "user_id": str(row.get("user_id", "")),
+                "source_type": str(row.get("source_type", "")),
+                "created_at": str(row.get("created_at", "")),
+                "reason": str(reason or "embedding_unavailable"),
+                "queued_at": now,
+            })
+
+        # 防止队列无限增长
+        if len(self._pending_vector_jobs) > self._max_pending_vector_jobs:
+            self._pending_vector_jobs = self._pending_vector_jobs[-self._max_pending_vector_jobs:]
+
+    def _clear_pending_vector_jobs(self, index_ids):
+        """在向量补齐成功后清除补偿队列记录。"""
+        if not index_ids or not self._pending_vector_jobs:
+            return
+        id_set = {str(i) for i in index_ids if str(i)}
+        if not id_set:
+            return
+        self._pending_vector_jobs = [
+            item for item in self._pending_vector_jobs
+            if str(item.get("index_id", "")) not in id_set
+        ]
 
     @staticmethod
     def _is_dimension_mismatch_error(error: Exception) -> bool:
@@ -786,33 +825,45 @@ class MemoryManager:
         if not batch_add["ids"]:
             return
 
+        # 先落库（SQLite）再尝试向量写入，避免 embedding 问题导致总结丢失
+        for index_params in index_params_list:
+            await loop.run_in_executor(self.executor, lambda p=index_params: self.db.save_memory_index(**p))
+
+        # 归档已总结的消息
+        if archive_uuids_summarized:
+            await loop.run_in_executor(self.executor, self.db.mark_as_archived, archive_uuids_summarized)
+
+        # 最后写入向量库；失败时记录待补偿任务，不影响主链路成功
         max_retries = 3
         retry_delay = 2
+        vector_write_ok = False
+        vector_fail_reason = ""
+
         for attempt in range(1, max_retries + 1):
             try:
-                # 确保 ChromaDB 已初始化
                 await self._ensure_chroma_initialized()
-                # 批量写入向量数据
                 added = await self._collection_add_texts(
                     ids=batch_add["ids"],
                     documents=batch_add["documents"],
                     metadatas=batch_add["metadatas"]
                 )
-                if not added:
-                    logger.warning("Engram：批量写入已跳过（embedding provider 不可用）")
-                    return
-                logger.info(
-                    "Engram：已为用户 %s 批量写入 %d 条记忆",
-                    user_id,
-                    len(batch_add["ids"])
-                )
+                if added:
+                    vector_write_ok = True
+                    logger.info(
+                        "Engram：已为用户 %s 批量写入 %d 条记忆向量",
+                        user_id,
+                        len(batch_add["ids"])
+                    )
+                else:
+                    vector_fail_reason = "embedding_unavailable_or_dimension_mismatch"
                 break
             except Exception as e:
+                vector_fail_reason = str(e)
                 if attempt >= max_retries:
-                    logger.error(f"Engram：保存总结结果失败：{e}")
-                    return
+                    logger.error(f"Engram：记忆向量写入失败（已落库，待补偿）：{e}")
+                    break
                 logger.warning(
-                    "Engram：批量写入失败（第 %d/%d 次），%ss 后重试：%s",
+                    "Engram：向量批量写入失败（第 %d/%d 次），%ss 后重试：%s",
                     attempt,
                     max_retries,
                     retry_delay,
@@ -821,13 +872,31 @@ class MemoryManager:
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
 
-        # 批量写入索引（逐条写入 SQLite）
-        for index_params in index_params_list:
-            await loop.run_in_executor(self.executor, lambda p=index_params: self.db.save_memory_index(**p))
+        if vector_write_ok:
+            self._clear_pending_vector_jobs(batch_add["ids"])
+        else:
+            pending_rows = []
+            for idx, index_params in zip(batch_add["ids"], index_params_list):
+                created_at = index_params.get("created_at")
+                created_str = (
+                    created_at.strftime("%Y-%m-%d %H:%M:%S")
+                    if hasattr(created_at, "strftime")
+                    else str(created_at)
+                )
+                pending_rows.append({
+                    "index_id": idx,
+                    "user_id": user_id,
+                    "source_type": index_params.get("source_type", "private"),
+                    "created_at": created_str,
+                })
 
-        # 归档已总结的消息
-        if archive_uuids_summarized:
-            await loop.run_in_executor(self.executor, self.db.mark_as_archived, archive_uuids_summarized)
+            self._enqueue_pending_vector_jobs(pending_rows, reason=vector_fail_reason)
+            logger.warning(
+                "Engram：用户 %s 的 %d 条总结已落库，但向量写入失败，已加入待补偿队列（当前队列=%d）",
+                user_id,
+                len(pending_rows),
+                len(self._pending_vector_jobs)
+            )
     
     async def _process_single_summary_batch(self, user_id, raw_msgs, date_key):
         """处理单批次（单日）消息的总结"""
@@ -1061,8 +1130,6 @@ class MemoryManager:
         last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
         prev_index_id = last_index.index_id if last_index else None
 
-        await self._ensure_chroma_initialized()
-
         add_params = {
             "ids": [index_id],
             "documents": [summary_text],
@@ -1077,15 +1144,8 @@ class MemoryManager:
                 "source_types": ",".join(source_types)
             }]
         }
-        added = await self._collection_add_texts(
-            ids=add_params["ids"],
-            documents=add_params["documents"],
-            metadatas=add_params["metadatas"]
-        )
-        if not added:
-            logger.warning("Engram：%s 折叠已跳过（embedding provider 不可用）", level_label)
-            return None
 
+        # 先落索引，向量失败不阻断折叠主流程
         index_params = {
             "index_id": index_id,
             "summary": summary_text,
@@ -1096,6 +1156,38 @@ class MemoryManager:
             "created_at": created_at
         }
         await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
+
+        vector_write_ok = False
+        vector_fail_reason = ""
+        try:
+            await self._ensure_chroma_initialized()
+            added = await self._collection_add_texts(
+                ids=add_params["ids"],
+                documents=add_params["documents"],
+                metadatas=add_params["metadatas"]
+            )
+            if added:
+                vector_write_ok = True
+                self._clear_pending_vector_jobs([index_id])
+            else:
+                vector_fail_reason = "embedding_unavailable_or_dimension_mismatch"
+        except Exception as e:
+            vector_fail_reason = str(e)
+
+        if not vector_write_ok:
+            self._enqueue_pending_vector_jobs([
+                {
+                    "index_id": index_id,
+                    "user_id": user_id,
+                    "source_type": output_source_type,
+                    "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            ], reason=vector_fail_reason)
+            logger.warning(
+                "Engram：%s 折叠向量写入失败，索引已落库，已加入待补偿队列（index=%s）",
+                level_label,
+                index_id[:8],
+            )
 
         logger.info(
             "Engram：已保存 %s 折叠结果，user=%s（来源=%d，index=%s）",
@@ -2269,6 +2361,7 @@ class MemoryManager:
                 ok = await self._collection_add_texts(ids=ids, documents=documents, metadatas=metadatas)
                 if ok:
                     rebuilt += len(batch)
+                    self._clear_pending_vector_jobs(ids)
                 else:
                     failed += len(batch)
                     if failed == len(batch):
