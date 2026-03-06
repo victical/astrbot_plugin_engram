@@ -65,7 +65,7 @@ class ProfileCommandHandler:
             
             return (True, img_bytes)
         except Exception as e:
-            logger.error(f"Profile rendering failed: {e}")
+            logger.error(f"Engram：画像渲染失败：{e}")
             import traceback
             logger.debug(traceback.format_exc())
             return (False, f"⚠️ 档案绘制失败，转为文本模式：\n{json.dumps(profile, indent=2, ensure_ascii=False)}")
@@ -110,37 +110,41 @@ class ProfileCommandHandler:
         await self.profile.update_user_profile(user_id, update_data)
         return f"✅ 已更新画像：{key} = {value}"
     
-    async def handle_force_persona(self, user_id: str, days: str = "") -> tuple:
-        """
-        处理 engram_force_persona 命令
-        
-        Args:
-            user_id: 用户ID
-            days: 回溯天数
-            
-        Returns:
-            tuple: (开始消息, 完成消息) 或 (错误消息, None)
-        """
-        # 解析天数参数
+    def resolve_force_persona_days(self, days: str = "") -> tuple:
+        """解析 engram_force_persona 的天数参数。"""
         if days and days.isdigit():
             days_int = int(days)
             if days_int <= 0:
-                return ("⚠️ 天数必须大于 0。", None)
+                return False, "⚠️ 天数必须大于 0。", 0
             if days_int > 365:
-                return ("⚠️ 天数不能超过 365 天。", None)
+                return False, "⚠️ 天数不能超过 365 天。", 0
         else:
-            days_int = 3  # 默认获取前3天的记忆
-        
-        # 计算时间范围：获取前N天的记忆
-        now = datetime.datetime.now()
-        start_time = (now - datetime.timedelta(days=days_int)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_time = now  # 到现在为止
+            days_int = 3
+
+        return True, "", days_int
+
+    def build_force_persona_messages(self, days_int: int) -> tuple[str, str]:
+        """构建 engram_force_persona 开始/完成文案。"""
         time_desc = f"前 {days_int} 天"
-        
-        # 调用画像更新
-        await self.profile.update_persona_daily(user_id, start_time, end_time)
-        
         return (
             f"⏳ 正在基于{time_desc}的记忆强制更新用户画像，请稍候...",
             f"✅ 画像更新完成（基于{time_desc}的记忆）。您可以使用 /profile show 查看。"
         )
+
+    async def handle_force_persona(self, user_id: str, days_int: int) -> tuple:
+        """
+        执行 engram_force_persona 更新。
+
+        Args:
+            user_id: 用户ID
+            days_int: 已校验的回溯天数
+
+        Returns:
+            tuple: (start_message, done_message)
+        """
+        now = datetime.datetime.now()
+        start_time = (now - datetime.timedelta(days=days_int)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = now
+
+        await self.profile.update_persona_daily(user_id, start_time, end_time)
+        return self.build_force_persona_messages(days_int)

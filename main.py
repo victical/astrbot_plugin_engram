@@ -15,12 +15,10 @@ from .services import (
     ToolHintStrategyService,
     ConfigPresetService,
 )
-from .utils import get_constellation, get_zodiac, get_career
+from . import utils as utils_module
 
 import asyncio
-import json
 import datetime
-import time
 import re
 
 
@@ -56,7 +54,7 @@ class EngramPlugin(Star):
             self.config, self.logic._profile_manager, self.logic.db,
             self.profile_renderer, self.logic.executor
         )
-        self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager)
+        self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager, utils_module=utils_module)
         self._llm_injector = LLMContextInjector()
         self._intent_classifier = IntentClassifier(config=self.config, context=context)
         self._topic_cache_service = TopicMemoryCacheService(config=self.config)
@@ -66,8 +64,6 @@ class EngramPlugin(Star):
         self._scheduler = MemoryScheduler(self.logic, self.config)
         asyncio.create_task(self._scheduler.start())
         
-        # OneBot 同步时间缓存
-        self._last_onebot_sync = {}
 
     def _is_command_message(self, content: str) -> bool:
         """检测消息是否为指令"""
@@ -629,195 +625,35 @@ class EngramPlugin(Star):
         user_name = event.get_sender_name()
         await self.logic.record_message(user_id=user_id, session_id=user_id, role="user", content=content, user_name=user_name)
         
-        # 频率控制：每 12 小时最多同步一次 OneBot 信息
-        now = time.time()
-        last_sync = self._last_onebot_sync.get(user_id, 0)
-        if now - last_sync < 12 * 3600:
-            return
-
-        # 被动更新基础信息 (通过 OneBot V11 接口获取更多细节)
-        try:
-            # 1. 基础 Payload
-            avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
-            update_payload = {
-                "basic_info": {
-                    "qq_id": user_id,
-                    "nickname": user_name,
-                    "avatar_url": avatar_url
-                }
-            }
-
-            # 2. 尝试调用 OneBot V11 get_stranger_info 接口
-            try:
-                # 兼容不同版本的 AstrBot 获取 bot 实例的方式
-                bot = getattr(event, 'bot', None)
-                if bot and hasattr(bot, 'get_stranger_info'):
-                    # 某些实现需要整数 ID
-                    try: uid_int = int(user_id)
-                    except: uid_int = user_id
-                    
-                    stranger_info = await bot.get_stranger_info(user_id=uid_int)
-                    if stranger_info:
-                        # 映射 OneBot V11 字段到画像结构
-                        # sex: male, female, unknown
-                        sex_map = {"male": "男", "female": "女", "unknown": "未知"}
-                        gender = sex_map.get(stranger_info.get("sex"), "未知")
-                        age = stranger_info.get("age", "未知")
-                        nickname = stranger_info.get("nickname", user_name)
-                        
-                        update_payload["basic_info"]["gender"] = gender
-                        update_payload["basic_info"]["age"] = age
-                        update_payload["basic_info"]["nickname"] = nickname
-                        
-                        # 补充生日、生肖、签名 (OneBot V11 扩展)
-                        if "birthday" in stranger_info: update_payload["basic_info"]["birthday"] = stranger_info["birthday"]
-                        
-                        # 解析生日并计算星座和生肖
-                        b_year = stranger_info.get("birthday_year")
-                        b_month = stranger_info.get("birthday_month")
-                        b_day = stranger_info.get("birthday_day")
-
-                        if b_year and b_month and b_day:
-                            update_payload["basic_info"]["birthday"] = f"{b_year}-{b_month}-{b_day}"
-                            update_payload["basic_info"]["constellation"] = get_constellation(int(b_month), int(b_day))
-                            update_payload["basic_info"]["zodiac"] = get_zodiac(int(b_year), int(b_month), int(b_day))
-                        elif "birthday" in stranger_info and str(stranger_info["birthday"]).isdigit():
-                            b_str = str(stranger_info["birthday"])
-                            if len(b_str) == 8:
-                                b_year, b_month, b_day = b_str[:4], b_str[4:6], b_str[6:]
-                                update_payload["basic_info"]["birthday"] = f"{b_year}-{b_month}-{b_day}"
-                                update_payload["basic_info"]["constellation"] = get_constellation(int(b_month), int(b_day))
-                                update_payload["basic_info"]["zodiac"] = get_zodiac(int(b_year), int(b_month), int(b_day))
-
-                        if "zodiac" in stranger_info: update_payload["basic_info"]["zodiac"] = stranger_info["zodiac"]
-                        if "signature" in stranger_info: update_payload["basic_info"]["signature"] = stranger_info["signature"]
-                        
-                        # 补充职业
-                        career_id = stranger_info.get("makeFriendCareer")
-                        if career_id and career_id != "0":
-                            update_payload["basic_info"]["job"] = get_career(int(career_id))
-
-                        # 某些 OneBot 扩展实现可能会提供 location
-                        if "location" in stranger_info:
-                            update_payload["basic_info"]["location"] = stranger_info["location"]
-                        elif stranger_info.get("country") == "中国":
-                            prov = stranger_info.get("province", "")
-                            city = stranger_info.get("city", "")
-                            update_payload["basic_info"]["location"] = f"{prov}-{city}".strip("-")
-                        
-                        logger.info(f"Engram：已同步 OneBot 用户信息 user_id={user_id}，gender={gender}，age={age}")
-            except Exception as api_err:
-                logger.debug(f"Engram：OneBot API 调用已跳过或失败：{api_err}")
-
-            await self.logic.update_user_profile(user_id, update_payload)
-            self._last_onebot_sync[user_id] = now
-        except Exception as e:
-            logger.error(f"Engram：自动更新基础信息失败：{e}")
+        # 被动更新基础信息（委托给 OneBotSyncHandler，内部自带频率控制）
+        await self._onebot_handler.sync_user_info(event, user_id=user_id, user_name=user_name)
 
     @filter.command("mem_list")
     async def mem_list(self, event: AstrMessageEvent, count: str = ""):
         """查看最近生成的长期记忆归档"""
         user_id = event.get_sender_id()
-        
-        # 支持可选的数量参数，未指定则使用配置项
-        if count and count.isdigit():
-            limit = int(count)
-            if limit <= 0:
-                yield event.plain_result("⚠️ 数量必须大于 0。")
-                return
-            elif limit > 50:
-                yield event.plain_result("⚠️ 单次最多查询 50 条记忆。")
-                return
-        else:
-            limit = self.config.get("list_memory_count", 5)
-        
-        loop = asyncio.get_event_loop()
-        memories = await loop.run_in_executor(self.logic.executor, self.logic.db.get_memory_list, user_id, limit)
-        if not memories:
-            yield event.plain_result("🧐 你目前还没有生成的长期记忆。")
-            return
-        result = [f"📜 最近的 {len(memories)} 条长期记忆：\n" + "—" * 15]
-        for i, m in enumerate(memories):
-            # 确保时间戳是 datetime 对象
-            created_at = self.logic._ensure_datetime(m.created_at)
-            short_id = str(getattr(m, "index_id", "") or "")[:8] or "未知ID"
-            result.append(
-                f"{i+1}. 🆔 {short_id} | ⏰ {created_at.strftime('%m-%d %H:%M')}\n"
-                f"   📝 {m.summary}\n"
-            )
-
-        result.append("\n💡 发送 /mem_view <序号或ID> 可查看某条记忆的完整对话原文。")
-        result.append("💡 发送 /mem_delete <ID> 可按记忆 ID 删除指定记忆。")
-        result.append("💡 发送 /mem_list <数量> 可自定义查询条数。")
-        yield event.plain_result("\n".join(result))
+        result = await self._mem_handler.handle_mem_list(user_id=user_id, count=count)
+        yield event.plain_result(result)
 
     @filter.command("mem_view")
     async def mem_view(self, event: AstrMessageEvent, index: str):
         """查看指定序号或 ID 记忆的完整对话原文"""
         user_id = event.get_sender_id()
-        
-        # 智能判断：数字且 ≤ 50 使用序号查看，否则使用 ID 查看
-        if index.isdigit():
-            seq = int(index)
-            if seq <= 0:
-                yield event.plain_result("⚠️ 序号必须大于 0。")
-                return
-            if seq > 50:
-                yield event.plain_result("⚠️ 序号超过 50，请使用记忆 ID 进行查看。")
-                return
-            
-            # 按序号查看
-            memory_index, raw_msgs = await self.logic.get_memory_detail(user_id, seq)
-            display_label = f"序号 {seq}"
-        else:
-            # 按 ID 查看
-            if len(index) < 8:
-                yield event.plain_result("⚠️ 记忆 ID 至少需要 8 位，例如：/mem_view bdd54504")
-                return
-            
-            # 使用新的 API 按 ID 获取详情
-            memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(user_id, index)
-            
-            if not memory_index:
-                yield event.plain_result(f"❌ {raw_msgs}")  # raw_msgs 是错误消息
-                return
-            
-            display_label = f"ID {memory_index.index_id[:8]}"
-        
-        if not memory_index:
-            yield event.plain_result(raw_msgs)  # 这里 raw_msgs 返回的是错误提示字符串
-            return
-            
-        # 格式化输出
-        created_at = self.logic._ensure_datetime(memory_index.created_at)
-        result = [
-            f"📖 记忆详情 ({display_label})",
-            f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
-            f"📝 归档：{memory_index.summary}",
-            "————————————————",
-            "🎙️ 原始对话回溯："
-        ]
-        
-        if not raw_msgs:
-            result.append("(暂无关联的原始对话数据)")
-        else:
-            for m in raw_msgs:
-                # 使用公共过滤方法
-                if not self.logic._is_valid_message_content(m.content):
-                    continue
-                
-                # 确保时间戳是 datetime 对象
-                ts = self.logic._ensure_datetime(m.timestamp)
-                time_str = ts.strftime("%H:%M:%S")
-                role_name = "我" if m.role == "assistant" else (m.user_name or "你")
-                result.append(f"[{time_str}] {role_name}: {m.content}")
-                
-        yield event.plain_result("\n".join(result))
+        result = await self._mem_handler.handle_mem_view(user_id=user_id, index=index)
+        yield event.plain_result(result)
 
     @filter.command("mem_search")
     async def mem_search(self, event: AstrMessageEvent, query: str):
         """搜索与关键词相关的长期记忆（按相关性排序）"""
         user_id = event.get_sender_id()
+
+        handler = getattr(self, "_mem_handler", None)
+        if handler is not None:
+            result = await handler.handle_mem_search(user_id=user_id, query=query)
+            yield event.plain_result(result)
+            return
+
+        # 兼容 __new__ 场景测试：回退到直连逻辑
         memories = await self.logic.retrieve_memories(user_id, query, limit=3, force_retrieve=True)
         if not memories:
             yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆。")
@@ -830,163 +666,43 @@ class EngramPlugin(Star):
     async def mem_delete(self, event: AstrMessageEvent, index: str):
         """删除指定序号或 ID 的总结记忆（保留原始消息）"""
         user_id = event.get_sender_id()
-        
-        # 智能判断：数字且 ≤ 50 使用序号删除，否则使用 ID 删除
-        if index.isdigit():
-            seq = int(index)
-            if seq <= 0:
-                yield event.plain_result("⚠️ 序号必须大于 0。")
-                return
-            if seq > 50:
-                yield event.plain_result("⚠️ 序号超过 50，请使用记忆 ID 进行删除。")
-                return
-            
-            # 按序号删除
-            success, message, summary = await self.logic.delete_memory_by_sequence(user_id, seq, delete_raw=False)
-            
-            if success:
-                yield event.plain_result(f"🗑️ 已删除记忆 #{seq}：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 原始对话消息已保留，可重新归档。")
-            else:
-                yield event.plain_result(f"❌ {message}")
-        else:
-            # 按 ID 删除
-            if len(index) < 8:
-                yield event.plain_result("⚠️ 记忆 ID 至少需要 8 位，例如：/mem_delete a1b2c3d4")
-                return
-            
-            success, message, summary = await self.logic.delete_memory_by_id(user_id, index, delete_raw=False)
-            
-            if success:
-                yield event.plain_result(f"🗑️ 已删除记忆 ID {index[:8]}：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 原始对话消息已保留，可重新归档。")
-            else:
-                yield event.plain_result(f"❌ {message}")
+        result = await self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=False)
+        yield event.plain_result(result)
 
     @filter.command("mem_delete_all")
     async def mem_delete_all(self, event: AstrMessageEvent, index: str):
         """删除指定序号或 ID 的总结记忆及其关联的原始消息"""
         user_id = event.get_sender_id()
-        
-        # 智能判断：数字且 ≤ 50 使用序号删除，否则使用 ID 删除
-        if index.isdigit():
-            seq = int(index)
-            if seq <= 0:
-                yield event.plain_result("⚠️ 序号必须大于 0。")
-                return
-            if seq > 50:
-                yield event.plain_result("⚠️ 序号超过 50，请使用记忆 ID 进行删除。")
-                return
-            
-            # 按序号删除
-            success, message, summary = await self.logic.delete_memory_by_sequence(user_id, seq, delete_raw=True)
-            
-            if success:
-                yield event.plain_result(f"🗑️ 已彻底删除记忆 #{seq} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /mem_undo 撤销此操作。")
-            else:
-                yield event.plain_result(f"❌ {message}")
-        else:
-            # 按 ID 删除
-            if len(index) < 8:
-                yield event.plain_result("⚠️ 记忆 ID 至少需要 8 位，例如：/mem_delete_all a1b2c3d4")
-                return
-            
-            success, message, summary = await self.logic.delete_memory_by_id(user_id, index, delete_raw=True)
-            
-            if success:
-                yield event.plain_result(f"🗑️ 已彻底删除记忆 ID {index[:8]} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /mem_undo 撤销此操作。")
-            else:
-                yield event.plain_result(f"❌ {message}")
+        result = await self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=True)
+        yield event.plain_result(result)
 
     @filter.command("mem_undo")
     async def mem_undo(self, event: AstrMessageEvent):
         """撤销最近一次删除操作"""
         user_id = event.get_sender_id()
-        
-        success, message, summary = await self.logic.undo_last_delete(user_id)
-        
-        if success:
-            yield event.plain_result(f"✅ 撤销成功！已恢复记忆：\n📝 {summary[:80]}{'...' if len(summary) > 80 else ''}\n\n💡 记忆已重新添加到您的记忆库中。")
-        else:
-            yield event.plain_result(f"❌ {message}")
+        result = await self._mem_handler.handle_mem_undo(user_id=user_id)
+        yield event.plain_result(result)
 
     @filter.command("mem_clear_raw")
     async def mem_clear_raw(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有未归档的原始消息数据"""
         user_id = event.get_sender_id()
-        if confirm != "confirm":
-            yield event.plain_result("⚠️ 危险操作：此指令将永久删除您所有**尚未归档**的聊天原文，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear_raw confirm")
-            return
-        
-        loop = asyncio.get_event_loop()
-        try:
-            # 仅删除 RawMemory 中未归档的消息
-            from .db_manager import RawMemory
-            def _clear_raw():
-                with self.logic.db.db.connection_context():
-                    RawMemory.delete().where((RawMemory.user_id == user_id) & (RawMemory.is_archived == False)).execute()
-            
-            await loop.run_in_executor(self.logic.executor, _clear_raw)
-            # 重置内存计数
-            self.logic.unsaved_msg_count[user_id] = 0
-            yield event.plain_result("🗑️ 已成功清除您所有未归档的原始对话消息。")
-        except Exception as e:
-            logger.error(f"Engram：清理原始记忆失败：{e}")
-            yield event.plain_result(f"❌ 清除失败：{e}")
+        result = await self._mem_handler.handle_mem_clear_raw(user_id=user_id, confirm=confirm)
+        yield event.plain_result(result)
 
     @filter.command("mem_clear_archive")
     async def mem_clear_archive(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有长期记忆归档（保留原始消息）"""
         user_id = event.get_sender_id()
-        if confirm != "confirm":
-            yield event.plain_result("⚠️ 危险操作：此指令将永久删除您所有的**长期记忆归档**及向量检索数据，但会保留原始聊天记录。\n\n如果您确定要执行，请发送：\n/mem_clear_archive confirm")
-            return
-        
-        loop = asyncio.get_event_loop()
-        try:
-            # 确保 ChromaDB 已初始化
-            await self.logic._ensure_chroma_initialized()
-            
-            # 1. 清除 SQLite 中的总结索引 (MemoryIndex)
-            from .db_manager import MemoryIndex, RawMemory
-            def _clear_archive():
-                with self.logic.db.db.connection_context():
-                    # 删除索引
-                    MemoryIndex.delete().where(MemoryIndex.user_id == user_id).execute()
-                    # 将所有已归档的消息重新标记为未归档，以便可以重新总结
-                    RawMemory.update(is_archived=False).where(RawMemory.user_id == user_id).execute()
-            
-            await loop.run_in_executor(self.logic.executor, _clear_archive)
-            
-            # 2. 清除 ChromaDB 中的向量数据
-            await loop.run_in_executor(self.logic.executor, lambda: self.logic.collection.delete(where={"user_id": user_id}))
-            
-            yield event.plain_result("🗑️ 已成功清除您所有的长期记忆归档，原始消息已重置为待归档状态。")
-        except Exception as e:
-            logger.error(f"Engram：清理归档记忆失败：{e}")
-            yield event.plain_result(f"❌ 清除失败：{e}")
+        result = await self._mem_handler.handle_mem_clear_archive(user_id=user_id, confirm=confirm)
+        yield event.plain_result(result)
 
     @filter.command("mem_clear_all")
     async def mem_clear_all(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有原始消息和长期记忆数据"""
         user_id = event.get_sender_id()
-        if confirm != "confirm":
-            yield event.plain_result("⚠️ 警告：此指令将永久删除您所有的聊天原文、长期记忆归档及向量检索数据，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear_all confirm")
-            return
-        
-        loop = asyncio.get_event_loop()
-        try:
-            # 确保 ChromaDB 已初始化
-            await self.logic._ensure_chroma_initialized()
-            
-            # 清除 SQLite 中的原始消息和索引
-            await loop.run_in_executor(self.logic.executor, self.logic.db.clear_user_data, user_id)
-            # 清除 ChromaDB 中的向量数据
-            await loop.run_in_executor(self.logic.executor, lambda: self.logic.collection.delete(where={"user_id": user_id}))
-            # 重置内存计数
-            self.logic.unsaved_msg_count[user_id] = 0
-            yield event.plain_result("🗑️ 已成功彻底清除您所有的原始对话消息和归档记忆。")
-        except Exception as e:
-            logger.error(f"Engram：清理全部记忆失败：{e}")
-            yield event.plain_result(f"❌ 清除失败：{e}")
+        result = await self._mem_handler.handle_mem_clear_all(user_id=user_id, confirm=confirm)
+        yield event.plain_result(result)
 
     @filter.command_group("profile")
     def profile_group(self, event: AstrMessageEvent): 
@@ -998,103 +714,60 @@ class EngramPlugin(Star):
     async def profile_clear(self, event: AstrMessageEvent, confirm: str = ""):
         """清除用户画像数据"""
         user_id = event.get_sender_id()
-        if confirm != "confirm":
-            yield event.plain_result("⚠️ 危险操作：此指令将永久删除您的用户画像文件，所有侧写特征将被重置。\n\n如果您确定要执行，请发送：\n/profile clear confirm")
-            return
-        
-        await self.logic.clear_user_profile(user_id)
-        yield event.plain_result("🗑️ 您的用户画像已成功重置。")
+        result = await self._profile_handler.handle_profile_clear(user_id=user_id, confirm=confirm)
+        yield event.plain_result(result)
 
     @profile_group.command("show")
     async def profile_show(self, event: AstrMessageEvent):
         """显示手账风格的用户深度画像"""
         user_id = event.get_sender_id()
-        profile = await self.logic.get_user_profile(user_id)
-        if not profile or not profile.get("basic_info"):
-            yield event.plain_result("👤 您当前还没有建立深度画像。")
-            return
-        
-        try:
-            # 获取记忆数量
-            loop = asyncio.get_event_loop()
-            memories = await loop.run_in_executor(self.logic.executor, self.logic.db.get_memory_list, user_id, 100)
-            memory_count = len(memories)
-            
-            # 渲染画像
-            img_bytes = await self.profile_renderer.render(user_id, profile, memory_count)
-            
+        success, result = await self._profile_handler.handle_profile_show(user_id=user_id)
+        if success:
             from astrbot.api.message_components import Image as MsgImage
-            yield event.chain_result([MsgImage.fromBytes(img_bytes)])
-        except Exception as e:
-            logger.error(f"Engram：画像渲染失败：{e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            yield event.plain_result(f"⚠️ 档案绘制失败，转为文本模式：\n{json.dumps(profile, indent=2, ensure_ascii=False)}")
+            yield event.chain_result([MsgImage.fromBytes(result)])
+        else:
+            yield event.plain_result(result)
 
     @profile_group.command("set")
     async def profile_set(self, event: AstrMessageEvent, key: str, value: str):
         """手动设置画像字段的值 (如: profile set basic_info.job 学生)"""
         user_id = event.get_sender_id()
-        keys = key.split('.')
-        update_data = {}
-        curr = update_data
-        for k in keys[:-1]:
-            curr[k] = {}
-            curr = curr[k]
-        curr[keys[-1]] = value
-        await self.logic.update_user_profile(user_id, update_data)
-        yield event.plain_result(f"✅ 已更新画像：{key} = {value}")
+        result = await self._profile_handler.handle_profile_set(user_id=user_id, key=key, value=value)
+        yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize")
     async def force_summarize(self, event: AstrMessageEvent):
         """[管理员] 立即对当前所有未处理对话进行记忆归档"""
         user_id = event.get_sender_id()
-        yield event.plain_result("⏳ 正在强制执行记忆归档，请稍候...")
-        await self.logic._summarize_private_chat(user_id)
-        yield event.plain_result("✅ 记忆归档完成。您可以使用 /mem_list 查看。")
+        start_msg, done_msg = self._mem_handler.get_force_summarize_messages()
+        yield event.plain_result(start_msg)
+        await self._mem_handler.handle_force_summarize(user_id=user_id)
+        yield event.plain_result(done_msg)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize_all")
     async def force_summarize_all(self, event: AstrMessageEvent):
         """[管理员] 立即对所有用户未处理对话进行记忆归档"""
-        yield event.plain_result("⏳ 正在强制执行全局记忆归档，请稍候...")
-        total = await self.logic.summarize_all_users()
-        yield event.plain_result(f"✅ 全局记忆归档完成。已处理 {total} 位用户。")
+        yield event.plain_result(self._mem_handler.get_force_summarize_all_start_message())
+        done_msg = await self._mem_handler.handle_force_summarize_all()
+        yield event.plain_result(done_msg)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_persona")
     async def force_persona(self, event: AstrMessageEvent, days: str = ""):
-        """[管理员] 立即基于指定天数的记忆强制深度更新画像
-        
-        参数:
-            days: 回溯天数（可选，默认为1天/今天，设置为7则获取前7天的记忆）
-        """
+        """[管理员] 立即基于指定天数的记忆强制深度更新画像"""
         user_id = event.get_sender_id()
-        
-        # 解析天数参数
-        if days and days.isdigit():
-            days_int = int(days)
-            if days_int <= 0:
-                yield event.plain_result("⚠️ 天数必须大于 0。")
-                return
-            if days_int > 365:
-                yield event.plain_result("⚠️ 天数不能超过 365 天。")
-                return
-        else:
-            days_int = 3  # 默认获取前3天的记忆
-        
-        # 计算时间范围：获取前N天的记忆
-        now = datetime.datetime.now()
-        start_time = (now - datetime.timedelta(days=days_int)).replace(hour=0, minute=0, second=0, microsecond=0)
-        end_time = now  # 到现在为止
-        time_desc = f"前 {days_int} 天"
-        
-        yield event.plain_result(f"⏳ 正在基于{time_desc}的记忆强制更新用户画像，请稍候...")
-        
-        # 调用画像更新
-        await self.logic._update_persona_daily(user_id, start_time, end_time)
-        yield event.plain_result(f"✅ 画像更新完成（基于{time_desc}的记忆）。您可以使用 /profile show 查看。")
+
+        ok, err_msg, days_int = self._profile_handler.resolve_force_persona_days(days)
+        if not ok:
+            yield event.plain_result(err_msg)
+            return
+
+        start_msg, done_msg = self._profile_handler.build_force_persona_messages(days_int)
+        yield event.plain_result(start_msg)
+        await self._profile_handler.handle_force_persona(user_id=user_id, days_int=days_int)
+        yield event.plain_result(done_msg)
 
     async def _run_rebuild_vectors(self, event: AstrMessageEvent, full_rebuild_flag: bool):
         """执行向量重建并回传统一结果。"""

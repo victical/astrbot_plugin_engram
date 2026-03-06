@@ -84,37 +84,47 @@ class MemoryCommandHandler:
     
     async def handle_mem_view(self, user_id: str, index: str) -> str:
         """
-        处理 mem_view 命令
-        
+        处理 mem_view 命令（支持序号或ID）
+
         Args:
             user_id: 用户ID
-            index: 记忆序号
-            
+            index: 记忆序号或ID
+
         Returns:
             str: 格式化的命令结果
         """
-        if not index.isdigit():
-            return "⚠️ 请输入正确的序号，例如：/mem_view 1"
-        
-        seq = int(index)
-        if seq <= 0:
-            return "⚠️ 序号必须大于 0。"
-        
-        memory_index, raw_msgs = await self.memory.get_memory_detail(user_id, seq)
-        
+        # 智能判断：数字且 ≤ 50 使用序号查看，否则使用 ID 查看
+        if index.isdigit():
+            seq = int(index)
+            if seq <= 0:
+                return "⚠️ 序号必须大于 0。"
+            if seq > 50:
+                return "⚠️ 序号超过 50，请使用记忆 ID 进行查看。"
+
+            memory_index, raw_msgs = await self.memory.get_memory_detail(user_id, seq)
+            display_label = f"序号 {seq}"
+        else:
+            if len(index) < 8:
+                return "⚠️ 记忆 ID 至少需要 8 位，例如：/mem_view bdd54504"
+
+            memory_index, raw_msgs = await self.memory.get_memory_detail_by_id(user_id, index)
+            if not memory_index:
+                return f"❌ {raw_msgs}"
+
+            display_label = f"ID {memory_index.index_id[:8]}"
+
         if not memory_index:
-            return raw_msgs  # 这里 raw_msgs 是错误提示字符串
-        
-        # 格式化输出
+            return str(raw_msgs)
+
         created_at = self.memory._ensure_datetime(memory_index.created_at)
         result = [
-            f"📖 记忆详情 (序号 {seq})",
+            f"📖 记忆详情 ({display_label})",
             f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
             f"📝 归档：{memory_index.summary}",
             "————————————————",
             "🎙️ 原始对话回溯："
         ]
-        
+
         if not raw_msgs:
             result.append("(暂无关联的原始对话数据)")
         else:
@@ -125,7 +135,7 @@ class MemoryCommandHandler:
                 time_str = ts.strftime("%H:%M:%S")
                 role_name = "我" if m.role == "assistant" else (m.user_name or "你")
                 result.append(f"[{time_str}] {role_name}: {m.content}")
-        
+
         return "\n".join(result)
     
     async def handle_mem_search(self, user_id: str, query: str) -> str:
@@ -243,7 +253,7 @@ class MemoryCommandHandler:
             self.memory.unsaved_msg_count[user_id] = 0
             return "🗑️ 已成功清除您所有未归档的原始对话消息。"
         except Exception as e:
-            logger.error(f"Clear raw memory failed: {e}")
+            logger.error(f"Engram：清理原始记忆失败：{e}")
             return f"❌ 清除失败：{e}"
     
     async def handle_mem_clear_archive(self, user_id: str, confirm: str = "") -> str:
@@ -276,7 +286,7 @@ class MemoryCommandHandler:
             
             return "🗑️ 已成功清除您所有的长期记忆归档，原始消息已重置为待归档状态。"
         except Exception as e:
-            logger.error(f"Clear archive memory failed: {e}")
+            logger.error(f"Engram：清理归档记忆失败：{e}")
             return f"❌ 清除失败：{e}"
     
     async def handle_mem_clear_all(self, user_id: str, confirm: str = "") -> str:
@@ -307,18 +317,21 @@ class MemoryCommandHandler:
             
             return "🗑️ 已成功彻底清除您所有的原始对话消息和归档记忆。"
         except Exception as e:
-            logger.error(f"Clear all memory failed: {e}")
+            logger.error(f"Engram：清理全部记忆失败：{e}")
             return f"❌ 清除失败：{e}"
     
-    async def handle_force_summarize(self, user_id: str) -> tuple:
-        """
-        处理 engram_force_summarize 命令
-        
-        Args:
-            user_id: 用户ID
-            
-        Returns:
-            tuple: (开始消息, 完成消息)
-        """
-        await self.memory._summarize_private_chat(user_id)
+    def get_force_summarize_messages(self) -> tuple[str, str]:
+        """获取 engram_force_summarize 的开始/完成文案。"""
         return ("⏳ 正在强制执行记忆归档，请稍候...", "✅ 记忆归档完成。您可以使用 /mem_list 查看。")
+
+    async def handle_force_summarize(self, user_id: str) -> None:
+        """执行 engram_force_summarize。"""
+        await self.memory._summarize_private_chat(user_id)
+
+    def get_force_summarize_all_start_message(self) -> str:
+        return "⏳ 正在强制执行全局记忆归档，请稍候..."
+
+    async def handle_force_summarize_all(self) -> str:
+        """执行 engram_force_summarize_all，返回完成文案。"""
+        total = await self.memory.summarize_all_users()
+        return f"✅ 全局记忆归档完成。已处理 {total} 位用户。"
