@@ -76,22 +76,43 @@ class ExportHandler:
     async def handle_stats_command(self, event):
         """处理统计命令"""
         user_id = event.get_sender_id()
-        
+
         loop = asyncio.get_event_loop()
-        
+
         # 获取当前用户统计
         user_stats = await loop.run_in_executor(
             self.logic.executor,
             self.logic.db.get_message_stats,
             user_id
         )
-        
+
         # 获取全局统计
         global_stats = await loop.run_in_executor(
             self.logic.executor,
             self.logic.db.get_all_users_stats
         )
-        
+
+        # 长期记忆索引统计
+        def _count_user_indexes(uid):
+            from .db_manager import MemoryIndex
+            with self.logic.db.db.connection_context():
+                return MemoryIndex.select().where(MemoryIndex.user_id == uid).count()
+
+        def _count_all_indexes():
+            from .db_manager import MemoryIndex
+            with self.logic.db.db.connection_context():
+                return MemoryIndex.select().count()
+
+        user_memory_indexes = await loop.run_in_executor(
+            self.logic.executor,
+            _count_user_indexes,
+            user_id
+        )
+        all_memory_indexes = await loop.run_in_executor(
+            self.logic.executor,
+            _count_all_indexes
+        )
+
         result = f"""
 📊 消息统计
 
@@ -100,6 +121,9 @@ class ExportHandler:
 - 总计：{user_stats.get('total', 0)} 条
 - 已归档：{user_stats.get('archived', 0)} 条
 - 未归档：{user_stats.get('unarchived', 0)} 条
+
+🧠 长期记忆索引：
+- 总计：{user_memory_indexes} 条
 
 👥 角色分布：
 - 用户消息：{user_stats.get('user_messages', 0)} 条
@@ -111,6 +135,9 @@ class ExportHandler:
 - 总计：{global_stats.get('total', 0)} 条
 - 已归档：{global_stats.get('archived', 0)} 条
 - 未归档：{global_stats.get('unarchived', 0)} 条
+
+🧠 长期记忆索引：
+- 总计：{all_memory_indexes} 条
 
 👥 角色分布：
 - 用户消息：{global_stats.get('user_messages', 0)} 条

@@ -13,7 +13,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
-from ..db_manager import DatabaseManager
+from ..db_manager import DatabaseManager, StableDatabaseInterface
 from .memory_manager import MemoryManager
 from .profile_manager import ProfileManager
 
@@ -42,8 +42,10 @@ class MemoryFacade:
         # 共享的线程池
         self.executor = ThreadPoolExecutor(max_workers=4)
         
-        # 数据库管理器
-        self.db = DatabaseManager(self.data_dir)
+        # 数据库管理器（稳定接口层 + 启动契约自检）
+        raw_db = DatabaseManager(self.data_dir)
+        self.db = StableDatabaseInterface(raw_db)
+        self.db.verify_contract(stage="MemoryFacade.__init__")
         
         # 初始化 ProfileManager（先初始化，因为 MemoryManager 可能需要它）
         self._profile_manager = ProfileManager(
@@ -128,9 +130,26 @@ class MemoryFacade:
         """对私聊进行总结并存入长期记忆"""
         return await self._memory_manager._summarize_private_chat(user_id)
     
-    async def retrieve_memories(self, user_id, query, limit=3):
-        """检索相关记忆"""
-        return await self._memory_manager.retrieve_memories(user_id, query, limit)
+    async def retrieve_memories(
+        self,
+        user_id,
+        query,
+        limit=3,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+        force_retrieve: bool = False,
+    ):
+        """检索相关记忆（支持时间、来源类型过滤，以及显式强制检索）。"""
+        return await self._memory_manager.retrieve_memories(
+            user_id,
+            query,
+            limit,
+            start_time=start_time,
+            end_time=end_time,
+            source_types=source_types,
+            force_retrieve=force_retrieve,
+        )
     
     async def get_memory_detail(self, user_id, sequence_num):
         """获取记忆详情（按序号）"""
@@ -167,6 +186,14 @@ class MemoryFacade:
     async def fold_weekly_summaries(self, user_id, days=7):
         """按用户执行周总结折叠"""
         return await self._memory_manager.fold_weekly_summaries(user_id, days)
+
+    async def fold_monthly_summaries(self, user_id, days=30):
+        """按用户执行月总结折叠"""
+        return await self._memory_manager.fold_monthly_summaries(user_id, days)
+
+    async def fold_yearly_summaries(self, user_id, days=365):
+        """按用户执行年度总结折叠"""
+        return await self._memory_manager.fold_yearly_summaries(user_id, days)
 
     async def rebuild_vector_collection(self, full_rebuild: bool = False, batch_size: int = 200):
         """手动重建向量库"""

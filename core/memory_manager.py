@@ -21,6 +21,7 @@
 
 import chromadb
 import os
+import shutil
 import uuid
 import json
 import re
@@ -40,6 +41,29 @@ _CHINESE_BLOCK_PATTERN = re.compile(r"[\u4e00-\u9fa5]+")
 
 class MemoryManager:
     """记忆管理器"""
+
+    # MemoryManager 运行所需的 DB 契约（用于启动阶段自检）
+    REQUIRED_DB_METHODS = (
+        "save_raw_memory",
+        "get_unarchived_raw",
+        "get_last_memory_index",
+        "mark_as_archived",
+        "save_memory_index",
+        "get_all_user_ids",
+        "get_summaries_by_type",
+        "get_memory_list",
+        "get_memory_indexes_by_ids",
+        "get_prev_indices_by_ids",
+        "get_raw_memories_map_by_uuid_lists",
+        "get_memories_by_uuids",
+        "update_active_score",
+        "delete_raw_memories_by_uuids",
+        "delete_memory_index",
+        "get_all_raw_messages",
+        "get_message_stats",
+        "get_all_users_messages",
+        "get_all_users_stats",
+    )
     
     def __init__(self, context, config, data_dir, executor, db_manager, profile_manager=None):
         """
@@ -60,6 +84,9 @@ class MemoryManager:
         self.db = db_manager
         self.profile_manager = profile_manager
         self._intent_classifier = IntentClassifier(config=self.config, context=self.context)
+
+        # 启动阶段接口自检：避免 DB 契约漂移导致运行时 AttributeError
+        self._verify_db_contract(stage="MemoryManager.__init__")
         
         # ChromaDB 延迟初始化（避免构造函数阻塞）
         self.chroma_path = os.path.join(self.data_dir, "engram_chroma")
@@ -79,15 +106,45 @@ class MemoryManager:
         self._max_undo_history = 3
         
         self._is_shutdown = False
+        self._embedding_provider_id = str(self.config.get("embedding_provider", "")).strip()
+        self._embedding_unavailable_logged = False
     
     def shutdown(self):
         """关闭记忆管理器"""
         self._is_shutdown = True
-    
+
+    def _verify_db_contract(self, stage="startup"):
+        """校验 DB 接口契约，优先复用稳定接口层的 verify_contract。"""
+        if hasattr(self.db, "verify_contract"):
+            self.db.verify_contract(required_methods=self.REQUIRED_DB_METHODS, stage=stage)
+            return
+
+        missing = [
+            name for name in self.REQUIRED_DB_METHODS
+            if not callable(getattr(self.db, name, None))
+        ]
+        if missing:
+            missing_sorted = sorted(set(missing))
+            message = (
+                f"Engram DB contract check failed at {stage}: "
+                f"missing methods -> {', '.join(missing_sorted)}"
+            )
+            logger.error(message)
+            raise AttributeError(message)
+
     # ========== ChromaDB 管理 ==========
     
     async def _ensure_chroma_initialized(self):
         """确保 ChromaDB 已初始化（延迟初始化，避免构造函数阻塞）"""
+        # 仅日志告警：向量模型未配置时不抛错，后续检索/写入链路会优雅降级
+        self._embedding_provider_id = str(self.config.get("embedding_provider", "")).strip()
+        if not self._embedding_provider_id:
+            self._warn_embedding_unavailable("未配置 embedding_provider，将跳过向量检索与写入")
+        elif not self.context or not self.context.get_provider_by_id(self._embedding_provider_id):
+            self._warn_embedding_unavailable(
+                f"embedding_provider '{self._embedding_provider_id}' 不可用，将跳过向量检索与写入"
+            )
+
         if self._chroma_initialized:
             return
         
@@ -96,7 +153,7 @@ class MemoryManager:
             if self._chroma_initialized:
                 return
             
-            # 在线程池中初始化 ChromaDB（避免阻塞事件循环）
+            # 在线程池中初始化 ChromaDB（避免构造函数阻塞）
             loop = asyncio.get_event_loop()
             
             def _init_chroma():
@@ -109,7 +166,10 @@ class MemoryManager:
                     self.executor, _init_chroma
                 )
                 self._chroma_initialized = True
-                logger.info("Engram: ChromaDB initialized successfully")
+                logger.info(
+                    "Engram: ChromaDB initialized successfully (embedding_provider=%s)",
+                    self._embedding_provider_id
+                )
             except Exception as e:
                 logger.error(f"Engram: Failed to initialize ChromaDB: {e}")
                 raise
@@ -362,6 +422,233 @@ class MemoryManager:
             summary = summary[:217] + "..."
         return summary
 
+    def _warn_embedding_unavailable(self, message: str):
+        """向量模型不可用时仅记录日志，不抛异常。"""
+        if not self._embedding_unavailable_logged:
+            logger.warning(f"Engram: {message}")
+            self._embedding_unavailable_logged = True
+        else:
+            logger.debug(f"Engram: {message}")
+
+    @staticmethod
+    def _is_dimension_mismatch_error(error: Exception) -> bool:
+        """判断是否为向量维度不匹配错误。"""
+        msg = str(error or "").lower()
+        return "expecting embedding with dimension" in msg and "got" in msg
+
+    async def _get_embedding_provider(self):
+        """获取配置的嵌入 Provider（不可用时返回 None，仅日志告警）。"""
+        provider_id = str(self.config.get("embedding_provider", "")).strip()
+        if not provider_id:
+            self._warn_embedding_unavailable("未配置 embedding_provider")
+            return None, ""
+
+        provider = self.context.get_provider_by_id(provider_id) if self.context else None
+        if not provider:
+            self._warn_embedding_unavailable(f"embedding_provider '{provider_id}' 不可用")
+            return None, provider_id
+
+        return provider, provider_id
+
+    def _normalize_embeddings_result(self, result):
+        """兼容多种 provider 返回格式，标准化为 List[List[float]]。"""
+        if result is None:
+            return []
+
+        if hasattr(result, "embeddings"):
+            result = getattr(result, "embeddings")
+
+        if isinstance(result, dict):
+            if "embeddings" in result:
+                result = result.get("embeddings")
+            elif "data" in result:
+                result = result.get("data")
+
+        if hasattr(result, "data") and not isinstance(result, (list, tuple, dict, str, bytes)):
+            result = getattr(result, "data")
+
+        if not isinstance(result, (list, tuple)):
+            return []
+
+        if result and isinstance(result[0], dict) and "embedding" in result[0]:
+            result = [item.get("embedding") for item in result]
+
+        vectors = []
+        for vec in result:
+            if not isinstance(vec, (list, tuple)):
+                continue
+            try:
+                vectors.append([float(x) for x in vec])
+            except (TypeError, ValueError):
+                continue
+
+        return vectors
+
+    @staticmethod
+    def _extract_max_batch_size_from_error(error: Exception) -> int:
+        """从 provider 错误信息中提取最大 batch 限制（提取失败返回 0）。"""
+        msg = str(error or "")
+        if not msg:
+            return 0
+
+        patterns = (
+            r"maximum\s+allowed\s+batch\s+size\s*(?:is\s*)?(\d+)",
+            r"batch\s+size\s*\d+\s*>\s*maximum\s+allowed\s+batch\s+size\s*(\d+)",
+            r"max(?:imum)?\s+batch\s+size[^\d]*(\d+)",
+        )
+        lower_msg = msg.lower()
+        for pattern in patterns:
+            match = re.search(pattern, lower_msg)
+            if not match:
+                continue
+            try:
+                return max(1, int(match.group(1)))
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    async def _ensure_embeddings(self, texts):
+        """使用配置的嵌入 Provider 生成向量，禁止回退到 Chroma 内置模型。"""
+        if not texts:
+            return []
+
+        provider, provider_id = await self._get_embedding_provider()
+        if not provider:
+            return []
+
+        method_names = (
+            "text_embedding",
+            "embeddings",
+            "embed_texts",
+            "embed_documents",
+            "embed",
+            "get_embeddings",
+        )
+
+        last_error = None
+        for method_name in method_names:
+            method = getattr(provider, method_name, None)
+            if not callable(method):
+                continue
+
+            call_variants = ("texts", "input", "documents", "text", "positional")
+
+            async def _invoke(variant: str, payload):
+                if variant == "texts":
+                    result = method(texts=payload)
+                elif variant == "input":
+                    result = method(input=payload)
+                elif variant == "documents":
+                    result = method(documents=payload)
+                elif variant == "text":
+                    result = method(text=payload)
+                else:
+                    result = method(payload)
+
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return self._normalize_embeddings_result(result)
+
+            for variant in call_variants:
+                try:
+                    vectors = await _invoke(variant, texts)
+                    if vectors:
+                        return vectors
+                except TypeError as e:
+                    last_error = e
+                    continue
+                except Exception as e:
+                    last_error = e
+                    max_batch_size = self._extract_max_batch_size_from_error(e)
+                    if max_batch_size > 0 and len(texts) > max_batch_size:
+                        merged_vectors = []
+                        chunk_failed = False
+                        for i in range(0, len(texts), max_batch_size):
+                            chunk = texts[i:i + max_batch_size]
+                            try:
+                                chunk_vectors = await _invoke(variant, chunk)
+                                if not chunk_vectors or len(chunk_vectors) != len(chunk):
+                                    chunk_failed = True
+                                    last_error = ValueError(
+                                        f"embedding chunk result mismatch: chunk={len(chunk)}, vecs={len(chunk_vectors) if chunk_vectors else 0}"
+                                    )
+                                    break
+                                merged_vectors.extend(chunk_vectors)
+                            except Exception as chunk_error:
+                                last_error = chunk_error
+                                chunk_failed = True
+                                break
+
+                        if not chunk_failed and len(merged_vectors) == len(texts):
+                            logger.info(
+                                "Engram: embedding 请求超出 provider 批量上限，已自动分片（total=%s, chunk=%s）",
+                                len(texts),
+                                max_batch_size,
+                            )
+                            return merged_vectors
+                    break
+
+        self._warn_embedding_unavailable(
+            f"embedding_provider '{provider_id or 'N/A'}' 未返回可用向量，last_error={last_error}"
+        )
+        return []
+
+    async def _collection_add_texts(self, ids, documents, metadatas, embeddings=None):
+        """统一写入 Chroma，强制使用外部 embeddings。不可用时跳过并返回 False。"""
+        if embeddings is None:
+            embeddings = await self._ensure_embeddings(documents)
+
+        if not embeddings or len(embeddings) != len(documents):
+            self._warn_embedding_unavailable(
+                f"写入向量已跳过：embedding 数量与文档数量不一致（embeddings={len(embeddings) if embeddings else 0}, docs={len(documents)}）"
+            )
+            return False
+
+        add_params = {
+            "ids": ids,
+            "documents": documents,
+            "metadatas": metadatas,
+            "embeddings": embeddings,
+        }
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+            return True
+        except Exception as e:
+            if self._is_dimension_mismatch_error(e):
+                logger.warning(
+                    "Engram: Chroma 向量维度不匹配（旧库维度与当前 embedding 维度不同）。"
+                    "请执行管理员指令 /mem_rebuild_vector full 重建向量库，"
+                    "或切回原 embedding_provider。"
+                )
+                return False
+            raise
+
+    async def _collection_query_text(self, query, n_results, where):
+        """统一查询 Chroma，强制使用外部 query_embeddings。不可用时返回 None。"""
+        query_vectors = await self._ensure_embeddings([query])
+        if not query_vectors:
+            self._warn_embedding_unavailable("查询向量生成失败，已跳过本次记忆检索")
+            return None
+
+        query_params = {
+            "query_embeddings": [query_vectors[0]],
+            "n_results": n_results,
+            "where": where,
+        }
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(self.executor, lambda: self.collection.query(**query_params))
+        except Exception as e:
+            if self._is_dimension_mismatch_error(e):
+                logger.warning(
+                    "Engram: Chroma 检索维度不匹配（旧库维度与当前 embedding 维度不同）。"
+                    "请执行管理员指令 /mem_rebuild_vector full 重建向量库，"
+                    "或切回原 embedding_provider。"
+                )
+                return None
+            raise
+
     # ========== 消息记录 ==========
     
     async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
@@ -506,7 +793,14 @@ class MemoryManager:
                 # 确保 ChromaDB 已初始化
                 await self._ensure_chroma_initialized()
                 # 批量写入向量数据
-                await loop.run_in_executor(self.executor, lambda: self.collection.add(**batch_add))
+                added = await self._collection_add_texts(
+                    ids=batch_add["ids"],
+                    documents=batch_add["documents"],
+                    metadatas=batch_add["metadatas"]
+                )
+                if not added:
+                    logger.warning("Engram: Batch add skipped due to unavailable embedding provider")
+                    return
                 logger.info(
                     "Engram: Batch add %d memories for user %s",
                     len(batch_add["ids"]),
@@ -657,8 +951,19 @@ class MemoryManager:
                 logger.error(f"Engram: Force summarize failed for {uid}: {e}")
         return summarized
 
-    async def fold_weekly_summaries(self, user_id, days=7):
-        """将近 N 天的日级总结折叠为一条周总结，写入 SQLite + ChromaDB。"""
+    async def _fold_summaries(
+        self,
+        user_id,
+        *,
+        days,
+        min_samples,
+        source_types,
+        output_source_type,
+        prompt_template,
+        model_config_key,
+        level_label
+    ):
+        """通用折叠逻辑：将 lower-level 摘要折叠为 higher-level 摘要。"""
         loop = asyncio.get_event_loop()
 
         try:
@@ -666,56 +971,44 @@ class MemoryManager:
         except (TypeError, ValueError):
             days = 7
 
-        min_samples = self.config.get("folding_min_samples", 3)
         try:
             min_samples = max(1, int(min_samples))
         except (TypeError, ValueError):
             min_samples = 3
 
-        # 优先读取 daily_summary，兼容当前生产环境中尚未区分 source_type 的 private
-        daily_summaries = await loop.run_in_executor(
-            self.executor,
-            self.db.get_summaries_by_type,
-            user_id,
-            "daily_summary",
-            days
-        )
-        if not daily_summaries:
-            daily_summaries = await loop.run_in_executor(
+        # 依次按 source_type 拉取候选
+        selected = []
+        for source_type in source_types:
+            selected = await loop.run_in_executor(
                 self.executor,
                 self.db.get_summaries_by_type,
                 user_id,
-                "private",
+                source_type,
                 days
             )
+            if selected:
+                break
 
-        # 兜底：若时间窗口内为空，按最近记忆列表回溯（兼容历史测试数据/旧数据时间戳）
-        if not daily_summaries:
-            recent = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, 100)
-            daily_summaries = [
+        # 兜底：若时间窗口内为空，按最近记忆列表回溯
+        if not selected:
+            recent = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, 300)
+            allowed_types = set(source_types)
+            selected = [
                 item for item in recent
-                if getattr(item, "source_type", "") in {"daily_summary", "private"}
+                if getattr(item, "source_type", "") in allowed_types
             ]
 
-        if len(daily_summaries) < min_samples:
+        if len(selected) < min_samples:
             return None
 
         # db 返回倒序，这里改为时间正序，便于 LLM 归纳事件脉络
-        daily_summaries = list(reversed(daily_summaries))
+        selected = list(reversed(selected))
 
         memory_texts = "\n".join([
             f"- [{self._ensure_datetime(item.created_at).strftime('%Y-%m-%d %H:%M:%S')}] {item.summary}"
-            for item in daily_summaries
+            for item in selected
         ])
 
-        prompt_template = self.config.get(
-            "weekly_folding_prompt",
-            "请根据下面的【daily_summary 列表】生成一段周总结，要求：\n"
-            "1) 只基于给定内容，不编造；\n"
-            "2) 保留关键人物/地点/事件/数值；\n"
-            "3) 输出 120~220 字中文摘要。\n\n"
-            "【daily_summary 列表】:\n{{memory_texts}}"
-        )
         prompt = str(prompt_template).replace("{{memory_texts}}", memory_texts)
 
         max_retries = 3
@@ -724,12 +1017,12 @@ class MemoryManager:
 
         for attempt in range(max_retries):
             try:
-                weekly_model = str(self.config.get("weekly_folding_model", "")).strip()
+                preferred_model = str(self.config.get(model_config_key, "")).strip()
                 summarize_model = str(self.config.get("summarize_model", "")).strip()
 
                 provider = None
-                if weekly_model:
-                    provider = self.context.get_provider_by_id(weekly_model)
+                if preferred_model:
+                    provider = self.context.get_provider_by_id(preferred_model)
                 if not provider and summarize_model:
                     provider = self.context.get_provider_by_id(summarize_model)
                 if not provider:
@@ -744,26 +1037,27 @@ class MemoryManager:
                     break
 
                 logger.warning(
-                    "Engram: weekly folding attempt %d produced empty/short result",
+                    "Engram: %s folding attempt %d produced empty/short result",
+                    level_label,
                     attempt + 1
                 )
             except Exception as e:
-                logger.error(f"Engram: weekly folding attempt {attempt + 1} error: {e}")
+                logger.error(f"Engram: {level_label} folding attempt {attempt + 1} error: {e}")
 
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
 
         if not summary_text or len(summary_text) < 5:
-            logger.error(f"Engram: Failed to fold weekly summaries for {user_id} after {max_retries} attempts")
+            logger.error(f"Engram: Failed to fold {level_label} summaries for {user_id} after {max_retries} attempts")
             return None
 
         created_at = datetime.datetime.now()
         index_id = str(uuid.uuid4())
         ai_name = self.config.get("ai_name", "助手")
-        source_ids = [item.index_id for item in daily_summaries]
+        source_ids = [item.index_id for item in selected]
 
-        # 维持时间链：新周总结挂在该用户当前最新索引之后
+        # 维持时间链：新总结挂在该用户当前最新索引之后
         last_index = await loop.run_in_executor(self.executor, self.db.get_last_memory_index, user_id)
         prev_index_id = last_index.index_id if last_index else None
 
@@ -774,57 +1068,196 @@ class MemoryManager:
             "documents": [summary_text],
             "metadatas": [{
                 "user_id": user_id,
-                "source_type": "weekly",
+                "source_type": output_source_type,
                 "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "ai_name": ai_name,
-                "folding_days": days
+                "folding_days": days,
+                "folding_level": output_source_type,
+                "source_count": len(source_ids),
+                "source_types": ",".join(source_types)
             }]
         }
-        await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+        added = await self._collection_add_texts(
+            ids=add_params["ids"],
+            documents=add_params["documents"],
+            metadatas=add_params["metadatas"]
+        )
+        if not added:
+            logger.warning("Engram: %s folding skipped due to unavailable embedding provider", level_label)
+            return None
 
         index_params = {
             "index_id": index_id,
             "summary": summary_text,
             "ref_uuids": json.dumps(source_ids),
             "prev_index_id": prev_index_id,
-            "source_type": "weekly",
+            "source_type": output_source_type,
             "user_id": user_id,
             "created_at": created_at
         }
         await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
 
         logger.info(
-            "Engram: Weekly folding saved for user %s (source=%d, index=%s)",
+            "Engram: %s folding saved for user %s (source=%d, index=%s)",
+            level_label.capitalize(),
             user_id,
             len(source_ids),
             index_id[:8]
         )
         return summary_text
+
+    async def fold_weekly_summaries(self, user_id, days=7):
+        """将近 N 天的日级总结折叠为一条周总结，写入 SQLite + ChromaDB。"""
+        min_samples = self.config.get("folding_min_samples", 3)
+        prompt_template = self.config.get(
+            "weekly_folding_prompt",
+            "你是一名记忆整理助手。请根据下方【daily_summary 列表】生成一段周总结。\n\n"
+            "要求：\n"
+            "1. 只基于给定内容，不编造；\n"
+            "2. 保留关键人物/地点/事件/数值；\n"
+            "3. 语言简洁，120~220字。\n\n"
+            "【daily_summary 列表】\n{{memory_texts}}"
+        )
+        return await self._fold_summaries(
+            user_id,
+            days=days,
+            min_samples=min_samples,
+            source_types=["daily_summary", "private"],
+            output_source_type="weekly",
+            prompt_template=prompt_template,
+            model_config_key="weekly_folding_model",
+            level_label="weekly"
+        )
+
+    async def fold_monthly_summaries(self, user_id, days=30):
+        """将近 N 天的周级总结折叠为一条月总结，写入 SQLite + ChromaDB。"""
+        min_samples = self.config.get("monthly_folding_min_samples", 4)
+        prompt_template = self.config.get(
+            "monthly_folding_prompt",
+            "你是一名记忆整理助手。请根据下方【weekly_summary 列表】生成一段月总结。\n\n"
+            "要求：\n"
+            "1. 只基于给定内容，不编造；\n"
+            "2. 保留关键人物/地点/事件/数值；\n"
+            "3. 提炼本月主题、关键变化与持续偏好；\n"
+            "4. 语言简洁，160~280字。\n\n"
+            "【weekly_summary 列表】\n{{memory_texts}}"
+        )
+        return await self._fold_summaries(
+            user_id,
+            days=days,
+            min_samples=min_samples,
+            source_types=["weekly", "daily_summary", "private"],
+            output_source_type="monthly",
+            prompt_template=prompt_template,
+            model_config_key="monthly_folding_model",
+            level_label="monthly"
+        )
+
+    async def fold_yearly_summaries(self, user_id, days=365):
+        """将近 N 天的月级总结折叠为一条年度总结，写入 SQLite + ChromaDB。"""
+        min_samples = self.config.get("yearly_folding_min_samples", 6)
+        prompt_template = self.config.get(
+            "yearly_folding_prompt",
+            "你是一名记忆整理助手。请根据下方【monthly_summary 列表】生成一段年度总结。\n\n"
+            "要求：\n"
+            "1. 只基于给定内容，不编造；\n"
+            "2. 归纳全年主线、阶段变化与稳定偏好；\n"
+            "3. 保留关键人物/地点/事件/数值；\n"
+            "4. 语言简洁，220~420字。\n\n"
+            "【monthly_summary 列表】\n{{memory_texts}}"
+        )
+        return await self._fold_summaries(
+            user_id,
+            days=days,
+            min_samples=min_samples,
+            source_types=["monthly", "weekly"],
+            output_source_type="yearly",
+            prompt_template=prompt_template,
+            model_config_key="yearly_folding_model",
+            level_label="yearly"
+        )
     
     # ========== 记忆检索 ==========
     
-    async def retrieve_memories(self, user_id, query, limit=3):
-        """检索相关记忆并返回原文摘要及背景（基于时间链），支持 RRF/混合策略排序"""
+    async def retrieve_memories(
+        self,
+        user_id,
+        query,
+        limit=3,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+        force_retrieve: bool = False,
+    ):
+        """检索相关记忆并返回原文摘要及背景（基于时间链），支持 RRF/混合策略排序和时间/类型过滤。"""
         # 确保 ChromaDB 已初始化
         await self._ensure_chroma_initialized()
 
         loop = asyncio.get_event_loop()
 
         # 查询分类：动态阈值与权重调整
-        intent_type, intent_score = self._intent_classifier.classify_query(query)
-        if intent_type == "skip":
+        # 兼容兜底：防止旧版 IntentClassifier 缺失 classify_query 导致崩溃
+        intent_type, intent_score = "recall", 0.0
+        if hasattr(self._intent_classifier, "classify_query"):
+            try:
+                intent_type, intent_score = self._intent_classifier.classify_query(query)
+            except Exception as e:
+                logger.warning(f"Engram: classify_query failed ({e}), fallback to default intent")
+                intent_type, intent_score = "recall", 0.0
+        else:
+            logger.warning("Engram: IntentClassifier has no classify_query, fallback to should_retrieve_memory")
+            if hasattr(self._intent_classifier, "should_retrieve_memory"):
+                try:
+                    should_retrieve = await self._intent_classifier.should_retrieve_memory(query)
+                    if not should_retrieve:
+                        logger.debug("Engram: should_retrieve_memory=False, skipping retrieval")
+                        return []
+                except Exception as e:
+                    logger.warning(f"Engram: should_retrieve_memory fallback failed ({e}), continue retrieval")
+
+        if intent_type == "skip" and not force_retrieve:
             logger.debug("Engram: Query classified as skip, skipping retrieval")
             return []
+        if intent_type == "skip" and force_retrieve:
+            logger.debug("Engram: Query classified as skip, but force_retrieve=True so continue retrieval")
+
+        # 构造 where 过滤：用户维度 + 可选来源类型
+        # Chroma 复杂过滤统一走 $and，避免“字段 + $or”混写兼容性问题
+        allowed_types = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        normalized_source_types = []
+        if isinstance(source_types, (list, tuple, set)):
+            for item in source_types:
+                token = str(item or "").strip().lower()
+                if token in allowed_types and token not in normalized_source_types:
+                    normalized_source_types.append(token)
+        elif isinstance(source_types, str) and source_types.strip():
+            token = source_types.strip().lower()
+            if token in allowed_types:
+                normalized_source_types = [token]
+
+        where_clauses = [{"user_id": user_id}]
+        if len(normalized_source_types) == 1:
+            where_clauses.append({"source_type": normalized_source_types[0]})
+        elif len(normalized_source_types) > 1:
+            where_clauses.append({"$or": [{"source_type": t} for t in normalized_source_types]})
+
+        where_filter = where_clauses[0] if len(where_clauses) == 1 else {"$and": where_clauses}
 
         # 1. ChromaDB 检索（多取一些结果以便过滤和重排序后仍有足够数据）
-        query_params = {
-            "query_texts": [query],
-            "n_results": min(limit * 3, 15),  # 多取结果以便重排序
-            "where": {"user_id": user_id}
-        }
-        results = await loop.run_in_executor(self.executor, lambda: self.collection.query(**query_params))
+        try:
+            results = await self._collection_query_text(
+                query=query,
+                n_results=min(
+                    limit * 6,
+                    max(10, int(self.config.get("memory_query_max_results", 60)))
+                ),
+                where=where_filter
+            )
+        except Exception as e:
+            logger.warning(f"Engram: Memory query skipped due to embedding unavailable/error: {e}")
+            return []
 
-        if not results or not results['ids'] or not results['ids'][0]:
+        if not results or not results.get('ids') or not results['ids'] or not results['ids'][0]:
             return []
 
         # 获取配置
@@ -832,6 +1265,13 @@ class MemoryManager:
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
         enable_memory_decay = self.config.get("enable_memory_decay", True)
+        enable_context_hint = bool(self.config.get("enable_memory_context_hint", True))
+        try:
+            memory_context_window = int(self.config.get("memory_context_window", 2))
+        except (TypeError, ValueError):
+            memory_context_window = 2
+        memory_context_window = max(0, min(10, memory_context_window))
+
         rank_strategy = str(self.config.get("rank_strategy", "rrf")).lower()
         if rank_strategy not in {"rrf", "hybrid"}:
             rank_strategy = "rrf"
@@ -940,6 +1380,28 @@ class MemoryManager:
         index_ids = [item['index_id'] for item in memory_data]
         index_map = await loop.run_in_executor(self.executor, self.db.get_memory_indexes_by_ids, index_ids)
 
+        # 可选：按时间窗口过滤（基于 DB created_at，避免 metadata 时间格式误差）
+        if start_time or end_time:
+            filtered_by_time = []
+            for item in memory_data:
+                db_index = index_map.get(item['index_id'])
+                created_dt = db_index.created_at if db_index else None
+                if not created_dt:
+                    continue
+                if start_time and created_dt < start_time:
+                    continue
+                if end_time and created_dt >= end_time:
+                    continue
+                filtered_by_time.append(item)
+            memory_data = filtered_by_time
+
+            if not memory_data:
+                return []
+
+            # 过滤后重建索引映射
+            index_ids = [item['index_id'] for item in memory_data]
+            index_map = {idx: index_map[idx] for idx in index_ids if idx in index_map}
+
         now_ts = time.time()
         # 30天半衰期：越近的记忆 recency 越高
         recency_half_life_days = float(self.config.get("rank_recency_half_life_days", 30))
@@ -1023,6 +1485,8 @@ class MemoryManager:
         # 4. 只保留前 limit 条
         memory_data = memory_data[:limit]
 
+        # retrieve_memories 的时间过滤不会改变记忆增强逻辑；仅缩小候选范围
+
         # 5. 批量拉取索引、前序链路、原文，避免循环内多次 run_in_executor
         index_ids = [item['index_id'] for item in memory_data]
         db_indices = {}
@@ -1030,7 +1494,7 @@ class MemoryManager:
         raw_map = {}
 
         if index_ids:
-            db_indices = await loop.run_in_executor(self.executor, self.db.get_memory_indices_by_ids, index_ids)
+            db_indices = await loop.run_in_executor(self.executor, self.db.get_memory_indexes_by_ids, index_ids)
 
             # 按窗口宽度批量向前追溯上下文链路
             if enable_context_hint and memory_context_window > 0:
@@ -1042,11 +1506,21 @@ class MemoryManager:
                 for _ in range(memory_context_window):
                     if not pending_prev_ids:
                         break
-                    fetched_prev = await loop.run_in_executor(
-                        self.executor,
-                        self.db.get_prev_indices_by_ids,
-                        list(pending_prev_ids)
-                    )
+
+                    if hasattr(self.db, "get_prev_indices_by_ids"):
+                        fetched_prev = await loop.run_in_executor(
+                            self.executor,
+                            self.db.get_prev_indices_by_ids,
+                            list(pending_prev_ids)
+                        )
+                    else:
+                        # 兼容旧版 DBManager：退化为通用批量索引查询
+                        fetched_prev = await loop.run_in_executor(
+                            self.executor,
+                            self.db.get_memory_indexes_by_ids,
+                            list(pending_prev_ids)
+                        )
+
                     if not fetched_prev:
                         break
                     prev_index_map.update(fetched_prev)
@@ -1069,11 +1543,29 @@ class MemoryManager:
                     index_uuid_map[idx] = uuids
 
             if index_uuid_map:
-                raw_map = await loop.run_in_executor(
-                    self.executor,
-                    self.db.get_raw_memories_map_by_uuid_lists,
-                    index_uuid_map
-                )
+                if hasattr(self.db, "get_raw_memories_map_by_uuid_lists"):
+                    raw_map = await loop.run_in_executor(
+                        self.executor,
+                        self.db.get_raw_memories_map_by_uuid_lists,
+                        index_uuid_map
+                    )
+                else:
+                    # 兼容旧版 DBManager：按每条索引兜底查询
+                    def _legacy_build_raw_map():
+                        _result = {}
+                        for _idx, _uuids in index_uuid_map.items():
+                            try:
+                                _result[_idx] = self.db.get_memories_by_uuids(_uuids)
+                            except Exception as e:
+                                logger.debug(
+                                    "Engram: legacy get_memories_by_uuids failed for index=%s, fallback empty raw map: %s",
+                                    str(_idx)[:8],
+                                    e,
+                                )
+                                _result[_idx] = []
+                        return _result
+
+                    raw_map = await loop.run_in_executor(self.executor, _legacy_build_raw_map)
 
         # 6. 构造带时间线背景和评分的记忆文本
         all_memories = []
@@ -1375,7 +1867,13 @@ class MemoryManager:
                         'created_at': delete_record['created_at'].strftime("%Y-%m-%d %H:%M:%S") if hasattr(delete_record['created_at'], 'strftime') else str(delete_record['created_at'])
                     }]
                 }
-                await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+                added = await self._collection_add_texts(
+                    ids=add_params["ids"],
+                    documents=add_params["documents"],
+                    metadatas=add_params["metadatas"]
+                )
+                if not added:
+                    logger.warning("Engram: Undo skipped vector restore due to unavailable embedding provider")
             
             # 3. 恢复原始消息的归档状态
             if delete_record['deleted_uuids']:
@@ -1459,6 +1957,121 @@ class MemoryManager:
             logger.error(f"Delete memory by ID error: {e}")
             return False, f"删除失败：{e}", ""
     
+    async def rebuild_vector_collection(self, full_rebuild: bool = False, batch_size: int = 200):
+        """重建向量库（从 SQLite 的 MemoryIndex 重新写入 ChromaDB）。"""
+        await self._ensure_chroma_initialized()
+
+        try:
+            batch_size = max(1, int(batch_size))
+        except (TypeError, ValueError):
+            batch_size = 200
+
+        loop = asyncio.get_event_loop()
+        backup_dir = ""
+
+        def _load_all_indexes():
+            from ..db_manager import MemoryIndex
+            rows = []
+            with self.db.db.connection_context():
+                query = MemoryIndex.select().order_by(MemoryIndex.created_at.asc())
+                for item in query:
+                    summary = str(item.summary or "").strip()
+                    if not summary:
+                        continue
+                    created_at = self._ensure_datetime(item.created_at)
+                    rows.append({
+                        "index_id": item.index_id,
+                        "summary": summary,
+                        "user_id": item.user_id,
+                        "source_type": item.source_type,
+                        "created_at": created_at
+                    })
+            return rows
+
+        if full_rebuild:
+            def _backup_and_reset_collection():
+                nonlocal backup_dir
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_dir = os.path.join(self.data_dir, f"engram_chroma_backup_{ts}")
+
+                if os.path.isdir(self.chroma_path):
+                    try:
+                        shutil.copytree(self.chroma_path, backup_dir)
+                    except FileExistsError:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"Engram: backup ChromaDB failed, continue rebuild: {e}")
+                        backup_dir = ""
+
+                try:
+                    self.chroma_client.delete_collection(name="long_term_memories")
+                except Exception as e:
+                    logger.debug(f"Engram: delete old Chroma collection skipped/failed, continue rebuild: {e}")
+                self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
+
+            await loop.run_in_executor(self.executor, _backup_and_reset_collection)
+
+        all_rows = await loop.run_in_executor(self.executor, _load_all_indexes)
+        if not all_rows:
+            return {
+                "success": True,
+                "message": "没有可重建的记忆索引",
+                "total": 0,
+                "rebuilt": 0,
+                "failed": 0,
+                "full_rebuild": bool(full_rebuild),
+                "backup_dir": backup_dir
+            }
+
+        rebuilt = 0
+        failed = 0
+
+        for i in range(0, len(all_rows), batch_size):
+            batch = all_rows[i:i + batch_size]
+            ids = [row["index_id"] for row in batch]
+            documents = [row["summary"] for row in batch]
+            metadatas = []
+
+            for row in batch:
+                created_at = row["created_at"]
+                created_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at, "strftime") else str(created_at)
+                metadatas.append({
+                    "user_id": row["user_id"],
+                    "source_type": row["source_type"],
+                    "created_at": created_str,
+                    "ai_name": self.config.get("ai_name", "助手")
+                })
+
+            try:
+                ok = await self._collection_add_texts(ids=ids, documents=documents, metadatas=metadatas)
+                if ok:
+                    rebuilt += len(batch)
+                else:
+                    failed += len(batch)
+                    if failed == len(batch):
+                        return {
+                            "success": False,
+                            "message": "重建中断：检测到向量维度不匹配或 embedding 不可用",
+                            "total": len(all_rows),
+                            "rebuilt": rebuilt,
+                            "failed": failed,
+                            "full_rebuild": bool(full_rebuild),
+                            "backup_dir": backup_dir
+                        }
+            except Exception as e:
+                logger.error(f"Engram: rebuild_vector_collection batch failed: {e}")
+                failed += len(batch)
+
+        return {
+            "success": failed == 0,
+            "message": "重建完成" if failed == 0 else "重建完成（部分失败）",
+            "total": len(all_rows),
+            "rebuilt": rebuilt,
+            "failed": failed,
+            "full_rebuild": bool(full_rebuild),
+            "backup_dir": backup_dir
+        }
+
     # ========== 数据导出 ==========
     
     async def export_raw_messages(self, user_id, format="jsonl", start_date=None, end_date=None, limit=None):

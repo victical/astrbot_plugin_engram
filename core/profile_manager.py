@@ -122,7 +122,8 @@ class ProfileManager:
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except:
+            except Exception as e:
+                logger.debug(f"Engram ProfileManager: read profile failed ({path}), fallback empty profile: {e}")
                 return {}
         
         return await loop.run_in_executor(self.executor, _read)
@@ -155,8 +156,8 @@ class ProfileManager:
                 try:
                     with open(path, 'r', encoding='utf-8') as f:
                         profile = json.load(f)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Engram ProfileManager: load existing profile failed ({path}), continue with empty dict: {e}")
             
             # 合并逻辑
             for key, value in update_data.items():

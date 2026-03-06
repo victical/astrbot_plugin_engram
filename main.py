@@ -1,4 +1,4 @@
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.message_components import Image
@@ -8,16 +8,23 @@ from .core import MemoryFacade, MemoryScheduler
 from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler
 from .export_handler import ExportHandler
 from .profile_renderer import ProfileRenderer
-from .services import LLMContextInjector, IntentClassifier
+from .services import (
+    LLMContextInjector,
+    IntentClassifier,
+    TopicMemoryCacheService,
+    ToolHintStrategyService,
+    ConfigPresetService,
+)
 from .utils import get_constellation, get_zodiac, get_career
 
 import asyncio
 import json
 import datetime
 import time
+import re
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.4.3")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.4.9")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -32,33 +39,36 @@ class EngramPlugin(Star):
         super().__init__(context)
         # 兼容不同版本的 AstrBot 框架
         self.config = config if config is not None else context.get_config() if hasattr(context, 'get_config') else {}
+        self.config = ConfigPresetService(self.config).apply()
         from astrbot.api.star import StarTools
         self.plugin_data_dir = StarTools.get_data_dir()
-        
-        # 初始化核心组件
-        self.logic = MemoryFacade(context, config, self.plugin_data_dir)
+
+        # 初始化核心组件（统一使用预设合并后的配置）
+        self.logic = MemoryFacade(context, self.config, self.plugin_data_dir)
         self.export_handler = ExportHandler(self.logic, self.plugin_data_dir)
-        self.profile_renderer = ProfileRenderer(config, self.plugin_data_dir)
-        
+        self.profile_renderer = ProfileRenderer(self.config, self.plugin_data_dir)
+
         # 初始化命令处理器（委托业务逻辑）
         self._mem_handler = MemoryCommandHandler(
-            config, self.logic._memory_manager, self.logic.db, self.logic.executor
+            self.config, self.logic._memory_manager, self.logic.db, self.logic.executor
         )
         self._profile_handler = ProfileCommandHandler(
-            config, self.logic._profile_manager, self.logic.db,
+            self.config, self.logic._profile_manager, self.logic.db,
             self.profile_renderer, self.logic.executor
         )
         self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager)
         self._llm_injector = LLMContextInjector()
         self._intent_classifier = IntentClassifier(config=self.config, context=context)
-        
+        self._topic_cache_service = TopicMemoryCacheService(config=self.config)
+        self._tool_hint_strategy = ToolHintStrategyService(config=self.config)
+
         # 初始化调度器
-        self._scheduler = MemoryScheduler(self.logic, config)
+        self._scheduler = MemoryScheduler(self.logic, self.config)
         asyncio.create_task(self._scheduler.start())
         
         # OneBot 同步时间缓存
         self._last_onebot_sync = {}
-        
+
     def _is_command_message(self, content: str) -> bool:
         """检测消息是否为指令"""
         if not self.config.get("enable_command_filter", True):
@@ -85,6 +95,299 @@ class EngramPlugin(Star):
         
         return False
 
+    def _parse_time_expr(self, text: str):
+        """解析工具时间表达式，返回 (start_dt, end_dt, desc)。
+
+        支持：
+        1) LLM 显式时间范围（如 2026-02-23~2026-03-01）
+        2) 未携带年份的范围/日期（如 02-23~03-01），默认按当前年份解析
+        """
+        text = str(text or "").strip()
+        if not text:
+            return None, None, ""
+
+        now = datetime.datetime.now()
+        current_year = now.year
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def _next_month_start(dt: datetime.datetime) -> datetime.datetime:
+            if dt.month == 12:
+                return dt.replace(year=dt.year + 1, month=1, day=1)
+            return dt.replace(month=dt.month + 1, day=1)
+
+        def _safe_datetime(year: int, month: int, day: int = 1):
+            try:
+                return datetime.datetime(year=year, month=month, day=day)
+            except ValueError:
+                return None
+
+        def _parse_date_or_month(raw: str):
+            """返回 (dt, kind, normalized_text, used_default_year)。"""
+            raw = str(raw or "").strip()
+            if not raw:
+                return None, "", "", False
+
+            # yyyy-mm-dd / yyyy/mm/dd / yyyy.mm.dd
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+                try:
+                    dt = datetime.datetime.strptime(raw, fmt)
+                    return dt, "day", dt.strftime("%Y-%m-%d"), False
+                except ValueError:
+                    pass
+
+            # yyyy-mm / yyyy/mm / yyyy.mm
+            for fmt in ("%Y-%m", "%Y/%m", "%Y.%m"):
+                try:
+                    dt = datetime.datetime.strptime(raw, fmt)
+                    return dt, "month", dt.strftime("%Y-%m"), False
+                except ValueError:
+                    pass
+
+            # 中文：yyyy年m月d日(号)
+            m = re.fullmatch(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})(?:日|号)?", raw)
+            if m:
+                dt = _safe_datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                if dt:
+                    return dt, "day", dt.strftime("%Y-%m-%d"), False
+
+            # 中文：yyyy年m月
+            m = re.fullmatch(r"(\d{4})年\s*(\d{1,2})月", raw)
+            if m:
+                dt = _safe_datetime(int(m.group(1)), int(m.group(2)), 1)
+                if dt:
+                    return dt, "month", dt.strftime("%Y-%m"), False
+
+            # 中文：m月d日(号)（默认今年）
+            m = re.fullmatch(r"(\d{1,2})月\s*(\d{1,2})(?:日|号)?", raw)
+            if m:
+                dt = _safe_datetime(current_year, int(m.group(1)), int(m.group(2)))
+                if dt:
+                    return dt, "day", dt.strftime("%Y-%m-%d"), True
+
+            # 中文：m月（默认今年）
+            m = re.fullmatch(r"(\d{1,2})月", raw)
+            if m:
+                dt = _safe_datetime(current_year, int(m.group(1)), 1)
+                if dt:
+                    return dt, "month", dt.strftime("%Y-%m"), True
+
+            # m-d / m/d / m.d（默认今年）
+            m = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})", raw)
+            if m:
+                dt = _safe_datetime(current_year, int(m.group(1)), int(m.group(2)))
+                if dt:
+                    return dt, "day", dt.strftime("%Y-%m-%d"), True
+
+            return None, "", "", False
+
+        # 1) 显式区间（支持含/不含年份；未写年份默认今年）
+        token_pattern = (
+            r"(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|"
+            r"\d{1,2}[-/.]\d{1,2}|"
+            r"(?:\d{4}年)?\d{1,2}月(?:\d{1,2}(?:日|号)?)?)"
+        )
+        range_match = re.search(
+            rf"({token_pattern})\s*(?:~|～|到|至|-)\s*({token_pattern})",
+            text
+        )
+        if range_match:
+            left_raw, right_raw = range_match.group(1), range_match.group(2)
+            left_dt, left_kind, left_desc, left_default_year = _parse_date_or_month(left_raw)
+            right_dt, right_kind, right_desc, right_default_year = _parse_date_or_month(right_raw)
+            if left_dt and right_dt:
+                # 统一为左闭右开
+                if right_kind == "day":
+                    right_dt = right_dt.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+                else:
+                    right_dt = _next_month_start(right_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+
+                if left_kind == "month":
+                    left_dt = left_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                else:
+                    left_dt = left_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+                if right_dt > left_dt:
+                    desc = f"{left_desc}~{right_desc}"
+                    if left_default_year or right_default_year:
+                        desc += f"（未写年份按{current_year}年）"
+                    return left_dt, right_dt, desc
+
+        # 2) 单个日期 / 单个月份（支持未写年份，默认今年）
+        single_match = re.search(token_pattern, text)
+        if single_match:
+            raw = single_match.group(1)
+            dt, kind, norm_desc, used_default_year = _parse_date_or_month(raw)
+            if dt:
+                if kind == "day":
+                    start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    end = start + datetime.timedelta(days=1)
+                else:
+                    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                    end = _next_month_start(start)
+
+                desc = norm_desc
+                if used_default_year:
+                    desc += f"（未写年份按{current_year}年）"
+                return start, end, desc
+
+        return None, None, ""
+
+    def _normalize_source_types(self, source_types, default_types=None):
+        """归一化 source_types，支持 array 与逗号分隔字符串。"""
+        allowed_source_types = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        normalized_types = []
+
+        if isinstance(source_types, list):
+            raw_types = source_types
+        elif isinstance(source_types, str) and source_types.strip():
+            raw_types = re.split(r"[\s,，]+", source_types.strip())
+        else:
+            raw_types = []
+
+        for item in raw_types:
+            token = str(item or "").strip().lower()
+            if token in allowed_source_types and token not in normalized_types:
+                normalized_types.append(token)
+
+        if normalized_types:
+            return normalized_types
+
+        if default_types:
+            return [t for t in default_types if t in allowed_source_types]
+
+        return []
+
+    def _get_topic_cache_service(self) -> TopicMemoryCacheService:
+        """延迟获取话题缓存服务（兼容 __new__ 场景测试）。"""
+        service = getattr(self, "_topic_cache_service", None)
+        if service is None:
+            service = TopicMemoryCacheService(config=self.config)
+            self._topic_cache_service = service
+        return service
+
+    def _get_tool_hint_service(self) -> ToolHintStrategyService:
+        """延迟获取工具提示策略服务（兼容 __new__ 场景测试）。"""
+        service = getattr(self, "_tool_hint_strategy", None)
+        if service is None:
+            service = ToolHintStrategyService(config=self.config)
+            self._tool_hint_strategy = service
+        return service
+
+    # 兼容保留：以下方法由 main 转发到 services.injection_strategy
+    def _extract_topic_tokens(self, query: str):
+        return self._get_topic_cache_service().extract_topic_tokens(query)
+
+    @staticmethod
+    def _topic_similarity(left_tokens, right_tokens) -> float:
+        return TopicMemoryCacheService.topic_similarity(set(left_tokens or []), set(right_tokens or []))
+
+    def _build_topic_cache_key(self, query: str) -> str:
+        return self._get_topic_cache_service().build_topic_cache_key(query)
+
+    def _get_topic_cache_ttl(self) -> int:
+        return self._get_topic_cache_service()._get_ttl()
+
+    def _get_topic_cache_max_topics(self) -> int:
+        return self._get_topic_cache_service()._get_max_topics()
+
+    def _prune_topic_cache(self, user_id: str):
+        self._get_topic_cache_service()._prune(user_id)
+
+    def _get_cached_topic_memories(self, user_id: str, query: str):
+        return self._get_topic_cache_service().get_cached(user_id, query)
+
+    def _set_cached_topic_memories(self, user_id: str, query: str, topic_key: str, memories):
+        self._get_topic_cache_service().set_cached(user_id, query, topic_key, memories)
+
+    def _should_inject_tool_hint(self, memory_count: int, should_retrieve: bool) -> bool:
+        return self._get_tool_hint_service().should_inject(memory_count=memory_count, should_retrieve=should_retrieve)
+
+    def _build_tool_hint_block(self, memory_count: int, should_retrieve: bool) -> str:
+        if not self._should_inject_tool_hint(memory_count=memory_count, should_retrieve=should_retrieve):
+            return ""
+        return self._get_tool_hint_service().build_hint_text()
+
+    async def _build_memory_search_output(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        limit: int,
+        time_expr: str,
+        source_types,
+        default_types=None,
+        title: str = "🧠 工具检索结果",
+        extra_hint: str = ""
+    ) -> str:
+        """统一构建记忆检索工具输出。"""
+        if not self.config.get("enable_memory_search_tool", True):
+            return "记忆检索工具已关闭。"
+
+        if event.get_group_id():
+            return "当前仅支持私聊场景的记忆工具检索。"
+
+        query = str(query or "").strip()
+        if not query:
+            return "query 不能为空，请提供要检索的问题或关键词。"
+
+        # 工具安全限流：配置值与参数值双重约束，最终范围固定在 1-10
+        try:
+            max_results = int(self.config.get("memory_search_tool_max_results", 3))
+        except (TypeError, ValueError):
+            max_results = 3
+        max_results = max(1, min(10, max_results))
+
+        try:
+            request_limit = int(limit)
+        except (TypeError, ValueError):
+            request_limit = max_results
+
+        final_limit = max(1, min(10, request_limit, max_results))
+        user_id = event.get_sender_id()
+
+        # 时间过滤：仅使用显式 time_expr（由 LLM 提供），不再从 query 自动识别
+        parse_target = str(time_expr or "").strip()
+        try:
+            start_time, end_time, time_desc = self._parse_time_expr(parse_target)
+        except re.error as e:
+            logger.warning(f"Engram mem_search_tool invalid time_expr regex parse failed: {e}")
+            start_time, end_time, time_desc = None, None, ""
+        except Exception as e:
+            logger.warning(f"Engram mem_search_tool parse_time_expr failed: {e}")
+            start_time, end_time, time_desc = None, None, ""
+
+        normalized_types = self._normalize_source_types(source_types, default_types=default_types)
+
+        try:
+            memories = await self.logic.retrieve_memories(
+                user_id,
+                query,
+                limit=final_limit,
+                start_time=start_time,
+                end_time=end_time,
+                source_types=normalized_types or None
+            )
+        except Exception as e:
+            logger.error(f"Engram mem_search_tool error: {e}")
+            return "工具检索失败，请稍后重试。"
+
+        if not memories:
+            return f"未检索到与“{query}”相关的长期记忆。"
+
+        result_lines = [f"{title}（共 {min(len(memories), final_limit)} 条）："]
+
+        if time_desc:
+            result_lines.append(f"⏱️ 时间筛选：{time_desc}")
+        if normalized_types:
+            result_lines.append(f"🗂️ 类型筛选：{', '.join(normalized_types)}")
+
+        for idx, memory in enumerate(memories[:final_limit], start=1):
+            result_lines.append(f"{idx}. {memory}")
+
+        if extra_hint:
+            result_lines.append(f"\n{extra_hint}")
+        result_lines.append("\n💡 如需查看某条记忆的完整原始对话，请使用 mem_get_detail_tool 并传入对应 🆔。")
+        return "\n\n".join(result_lines)
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """在调用 LLM 前注入长期记忆和用户画像"""
@@ -92,60 +395,53 @@ class EngramPlugin(Star):
         user_id = event.get_sender_id()
         query = event.message_str
         profile = await self.logic.get_user_profile(user_id)
-        profile_block = ""
-        if profile and profile.get("basic_info"):
-            basic = profile.get("basic_info", {})
-            attrs = profile.get("attributes", {})
-            prefs = profile.get("preferences", {})
-            dev = profile.get("dev_metadata", {})
-            social = profile.get("social_graph", {})
-            
-            hobbies = ", ".join(attrs.get("hobbies", [])) if isinstance(attrs.get("hobbies"), list) else ""
-            skills = ", ".join(attrs.get("skills", [])) if isinstance(attrs.get("skills"), list) else ""
-            tech = ", ".join(dev.get("tech_stack", [])) if isinstance(dev.get("tech_stack"), list) else ""
-            
-            # v2.1 优化：细分喜好类别
-            favorite_foods = ", ".join(prefs.get("favorite_foods", [])) if isinstance(prefs.get("favorite_foods"), list) else ""
-            favorite_items = ", ".join(prefs.get("favorite_items", [])) if isinstance(prefs.get("favorite_items"), list) else ""
-            favorite_activities = ", ".join(prefs.get("favorite_activities", [])) if isinstance(prefs.get("favorite_activities"), list) else ""
-            likes = ", ".join(prefs.get("likes", [])) if isinstance(prefs.get("likes"), list) else ""
-            dislikes = ", ".join(prefs.get("dislikes", [])) if isinstance(prefs.get("dislikes"), list) else ""
-            
-            profile_block = f"【用户档案】\n- 称呼: {basic.get('nickname', '用户')} (QQ: {basic.get('qq_id')})\n"
-            if basic.get('gender') and basic.get('gender') != "未知": profile_block += f"- 性别: {basic.get('gender')}\n"
-            if basic.get('age') and basic.get('age') != "未知": profile_block += f"- 年龄: {basic.get('age')}\n"
-            if basic.get('birthday') and basic.get('birthday') != "未知": profile_block += f"- 生日: {basic.get('birthday')}\n"
-            if basic.get('job') and basic.get('job') != "未知": profile_block += f"- 职业: {basic.get('job')}\n"
-            if basic.get('location') and basic.get('location') != "未知": profile_block += f"- 所在地: {basic.get('location')}\n"
-            if basic.get('constellation') and basic.get('constellation') != "未知": profile_block += f"- 星座: {basic.get('constellation')}\n"
-            if basic.get('zodiac') and basic.get('zodiac') != "未知": profile_block += f"- 生肖: {basic.get('zodiac')}\n"
-            if hobbies: profile_block += f"- 爱好: {hobbies}\n"
-            if skills or tech: profile_block += f"- 技能/技术栈: {skills} {tech}\n".strip() + "\n"
-            
-            # v2.1 优化：注入细分喜好
-            if favorite_foods: profile_block += f"- 喜欢的美食: {favorite_foods}\n"
-            if favorite_items: profile_block += f"- 喜欢的事物: {favorite_items}\n"
-            if favorite_activities: profile_block += f"- 喜欢的活动: {favorite_activities}\n"
-            if likes: profile_block += f"- 其他喜好: {likes}\n"
-            if dislikes: profile_block += f"- 讨厌: {dislikes}\n"
-            
-            # v2.1 优化：显示羁绊等级
-            status = social.get("relationship_status", "萍水相逢")
-            profile_block += f"- 当前羁绊: {status}\n\n【交互指令】\n请基于以上档案事实，以最契合用户期望的方式与其交流。\n"
+        profile_block = self._llm_injector.build_profile_block(profile)
         
         memory_block = ""
-        if await self._intent_classifier.should_retrieve_memory(query):
-            memories = await self.logic.retrieve_memories(user_id, query)
+        memories = []
+        try:
+            should_retrieve = await self._intent_classifier.should_retrieve_memory(query)
+        except Exception as e:
+            logger.warning(f"Engram: intent check failed, fallback skip retrieval: {e}")
+            should_retrieve = False
+
+        if should_retrieve:
+            cache_hit = False
+            topic_key = ""
+            try:
+                cache_hit, memories, topic_key = self._get_cached_topic_memories(user_id, query)
+            except Exception as e:
+                logger.debug(f"Engram: topic cache read failed, fallback retrieval: {e}")
+                cache_hit, memories, topic_key = False, [], ""
+
+            if not cache_hit:
+                try:
+                    memories = await self.logic.retrieve_memories(user_id, query)
+                except Exception as e:
+                    logger.error(f"Engram: retrieve_memories failed in on_llm_request: {e}")
+                    memories = []
+
+                try:
+                    self._set_cached_topic_memories(user_id, query, topic_key, memories)
+                except Exception as e:
+                    logger.debug(f"Engram: topic cache write failed, ignored: {e}")
+            else:
+                logger.debug(f"Engram: Topic cache hit for {user_id}, query={query[:30]}")
+
             if memories:
                 memory_prompt = "\n".join(memories)
                 memory_block = f"【长期记忆回溯】：\n{memory_prompt}\n"
         else:
             logger.debug(f"Engram: Skipping memory retrieval for trivial query: {query[:30]}")
-        
-        if profile_block or memory_block:
-            inject_text = f"\n\n{profile_block}{memory_block}"
-            if req.system_prompt: req.system_prompt += inject_text
-            else: req.system_prompt = f"你是一个有记忆的助手。以下是关于用户的信息：{inject_text}"
+
+        tool_hint_block = self._build_tool_hint_block(
+            memory_count=len(memories),
+            should_retrieve=should_retrieve
+        )
+
+        combined_memory_block = f"{memory_block}{tool_hint_block}"
+        if profile_block or combined_memory_block:
+            self._llm_injector.inject_context(req, profile_block, combined_memory_block)
             
             # 调试模式：输出注入的内容
             if self.config.get("debug_injection", False):
@@ -154,7 +450,139 @@ class EngramPlugin(Star):
                     logger.info(f"📋 注入的用户画像:\n{profile_block}")
                 if memory_block:
                     logger.info(f"🧠 注入的长期记忆:\n{memory_block}")
+                if tool_hint_block:
+                    logger.info(f"🛠️ 注入的工具提示:\n{tool_hint_block}")
                 logger.info(f"=== Engram 调试结束 ===")
+
+    @filter.llm_tool(name="mem_search_tool")
+    async def mem_search_tool(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        limit: int = 3,
+        time_expr: str = "",
+        source_types: list = None
+    ) -> str:
+        '''检索长期记忆（通用），仅返回给 LLM，不直接发送给用户。'''
+        output = await self._build_memory_search_output(
+            event=event,
+            query=query,
+            limit=limit,
+            time_expr=time_expr,
+            source_types=source_types,
+            default_types=None,
+            title="🧠 工具检索结果"
+        )
+        return output
+
+    @filter.llm_tool(name="mem_search_overview_tool")
+    async def mem_search_overview_tool(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        limit: int = 3,
+        time_expr: str = "",
+        source_types: list = None
+    ) -> str:
+        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
+        output = await self._build_memory_search_output(
+            event=event,
+            query=query,
+            limit=limit,
+            time_expr=time_expr,
+            source_types=source_types,
+            default_types=None,
+            title="🧠 工具检索结果"
+        )
+        return output
+
+    @filter.llm_tool(name="mem_search_detail_tool")
+    async def mem_search_detail_tool(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        limit: int = 3,
+        time_expr: str = "",
+        source_types: list = None
+    ) -> str:
+        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
+        output = await self._build_memory_search_output(
+            event=event,
+            query=query,
+            limit=limit,
+            time_expr=time_expr,
+            source_types=source_types,
+            default_types=None,
+            title="🧠 工具检索结果"
+        )
+        return output
+
+    @filter.llm_tool(name="mem_get_detail_tool")
+    async def mem_get_detail_tool(self, event: AstrMessageEvent, memory_id: str, max_messages: int = 20) -> str:
+        '''按记忆 ID 获取更完整的原始对话。
+
+        Args:
+            memory_id(string): 记忆 ID，支持 8 位短 ID 或完整 ID
+            max_messages(number): 返回原始对话条数上限
+        '''
+        if not self.config.get("enable_memory_search_tool", True):
+            return "记忆检索工具已关闭。"
+
+        if event.get_group_id():
+            return "当前仅支持私聊场景的记忆工具检索。"
+
+        memory_id = str(memory_id or "").strip()
+        if len(memory_id) < 8:
+            return "memory_id 至少需要 8 位，请先通过 mem_search_tool 获取 🆔。"
+
+        try:
+            max_messages = int(max_messages)
+        except (TypeError, ValueError):
+            max_messages = 20
+        max_messages = max(1, min(100, max_messages))
+
+        user_id = event.get_sender_id()
+
+        try:
+            memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(user_id, memory_id)
+        except Exception as e:
+            logger.error(f"Engram mem_get_detail_tool error: {e}")
+            return "工具检索失败，请稍后重试。"
+
+        if not memory_index:
+            return str(raw_msgs or f"找不到 ID 为 {memory_id} 的记忆。")
+
+        created_at = self.logic._ensure_datetime(memory_index.created_at)
+        detail_lines = [
+            f"📖 记忆详情（ID {memory_index.index_id[:8]}）",
+            f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
+            f"📝 归档：{memory_index.summary}",
+            "————————————————",
+            "🎙️ 原始对话回溯："
+        ]
+
+        if not raw_msgs:
+            detail_lines.append("(暂无关联的原始对话数据)")
+            return "\n".join(detail_lines)
+
+        shown = 0
+        for m in raw_msgs:
+            if not self.logic._is_valid_message_content(m.content):
+                continue
+
+            ts = self.logic._ensure_datetime(m.timestamp)
+            time_str = ts.strftime("%H:%M:%S")
+            role_name = "我" if m.role == "assistant" else (m.user_name or "你")
+            detail_lines.append(f"[{time_str}] {role_name}: {m.content}")
+            shown += 1
+
+            if shown >= max_messages:
+                break
+
+        if shown == 0:
+            detail_lines.append("(原始对话均为空或被过滤)")
+
+        return "\n".join(detail_lines)
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
@@ -312,9 +740,14 @@ class EngramPlugin(Star):
         for i, m in enumerate(memories):
             # 确保时间戳是 datetime 对象
             created_at = self.logic._ensure_datetime(m.created_at)
-            result.append(f"{i+1}. ⏰ {created_at.strftime('%m-%d %H:%M')}\n   📝 {m.summary}\n")
-        
-        result.append("\n💡 发送 /mem_view <序号> 可查看某条记忆的完整对话原文。")
+            short_id = str(getattr(m, "index_id", "") or "")[:8] or "未知ID"
+            result.append(
+                f"{i+1}. 🆔 {short_id} | ⏰ {created_at.strftime('%m-%d %H:%M')}\n"
+                f"   📝 {m.summary}\n"
+            )
+
+        result.append("\n💡 发送 /mem_view <序号或ID> 可查看某条记忆的完整对话原文。")
+        result.append("💡 发送 /mem_delete <ID> 可按记忆 ID 删除指定记忆。")
         result.append("💡 发送 /mem_list <数量> 可自定义查询条数。")
         yield event.plain_result("\n".join(result))
 
@@ -385,7 +818,7 @@ class EngramPlugin(Star):
     async def mem_search(self, event: AstrMessageEvent, query: str):
         """搜索与关键词相关的长期记忆（按相关性排序）"""
         user_id = event.get_sender_id()
-        memories = await self.logic.retrieve_memories(user_id, query, limit=3)
+        memories = await self.logic.retrieve_memories(user_id, query, limit=3, force_retrieve=True)
         if not memories:
             yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆。")
             return
@@ -662,6 +1095,72 @@ class EngramPlugin(Star):
         # 调用画像更新
         await self.logic._update_persona_daily(user_id, start_time, end_time)
         yield event.plain_result(f"✅ 画像更新完成（基于{time_desc}的记忆）。您可以使用 /profile show 查看。")
+
+    async def _run_rebuild_vectors(self, event: AstrMessageEvent, full_rebuild_flag: bool):
+        """执行向量重建并回传统一结果。"""
+        batch = 200
+
+        mode_text = "全量重建" if full_rebuild_flag else "增量重建"
+        yield event.plain_result(f"⏳ 正在执行向量库{mode_text}，请稍候...")
+
+        try:
+            result = await self.logic.rebuild_vector_collection(
+                full_rebuild=full_rebuild_flag,
+                batch_size=batch
+            )
+
+            success = bool(result.get("success", False))
+            total = int(result.get("total", 0))
+            rebuilt = int(result.get("rebuilt", 0))
+            failed = int(result.get("failed", 0))
+            message = str(result.get("message", "重建完成"))
+            backup_dir = str(result.get("backup_dir", "") or "")
+
+            extra_backup_line = f"\n备份目录：{backup_dir}" if backup_dir else ""
+
+            if success:
+                yield event.plain_result(
+                    f"✅ {message}\n"
+                    f"- 模式：{mode_text}\n"
+                    f"- 总索引：{total}\n"
+                    f"- 成功写入：{rebuilt}\n"
+                    f"- 失败：{failed}"
+                    f"{extra_backup_line}"
+                )
+            else:
+                yield event.plain_result(
+                    f"⚠️ {message}\n"
+                    f"- 模式：{mode_text}\n"
+                    f"- 总索引：{total}\n"
+                    f"- 成功写入：{rebuilt}\n"
+                    f"- 失败：{failed}\n"
+                    f"💡 若 embedding_provider 变更或出现向量维度不匹配，请执行 /mem_rebuild_vector full 重新嵌入全部记忆"
+                    f"{extra_backup_line}"
+                )
+        except Exception as e:
+            logger.error(f"Engram: rebuild vectors failed: {e}")
+            yield event.plain_result(f"❌ 向量库重建失败：{e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("mem_rebuild_vector")
+    async def mem_rebuild_vector(self, event: AstrMessageEvent, mode: str = ""):
+        """[管理员] 备份并重建向量库（full 表示重建并回灌）
+
+        重建说明：
+            当 embedding_provider 变更或提示向量维度不一致时，
+            请执行 /mem_rebuild_vector full 重新嵌入全部记忆，否则旧记忆将无法检索。
+        """
+        full_rebuild_flag = str(mode or "").strip().lower() == "full"
+        async for result in self._run_rebuild_vectors(event, full_rebuild_flag):
+            yield result
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("engram_rebuild_vectors")
+    async def engram_rebuild_vectors(self, event: AstrMessageEvent, full_rebuild: str = "false", batch_size: str = ""):
+        """[管理员] 兼容旧指令：重建向量库（仅 full 触发全量，batch 参数已弃用）"""
+        full_rebuild_flag = str(full_rebuild or "").strip().lower() == "full"
+        async for result in self._run_rebuild_vectors(event, full_rebuild_flag):
+            yield result
 
     @filter.command("mem_export")
     async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):

@@ -4,6 +4,7 @@
 """
 from zhdate import ZhDate
 from datetime import date
+from astrbot.api import logger
 
 
 def get_constellation(month: int, day: int) -> str:
@@ -36,7 +37,8 @@ def get_zodiac(year: int, month: int, day: int) -> str:
     try:
         spring = ZhDate(year, 1, 1).to_datetime().date()
         zodiac_year = year if current >= spring else year - 1
-    except:
+    except Exception as e:
+        logger.debug(f"Engram utils.get_zodiac fallback to solar year={year} due to lunar parse error: {e}")
         zodiac_year = year
     index = (zodiac_year - 2020) % 12
     return zodiacs[index]

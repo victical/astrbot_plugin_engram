@@ -83,8 +83,8 @@ class ProfileRenderer:
                     sub_p = os.path.join(custom_style_path, sub)
                     if os.path.isdir(sub_p):
                         font_search_paths.append(sub_p)
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Engram ProfileRenderer: scan custom style path failed ({custom_style_path}): {e}")
         
         font_search_paths.extend([
             os.path.join(self.plugin_data_dir, "fonts"),
@@ -107,7 +107,8 @@ class ProfileRenderer:
                     self._font_path = os.path.join(sp, best_match)
                     logger.info(f"Engram: Using font: {self._font_path}")
                     return self._font_path
-            except:
+            except Exception as e:
+                logger.debug(f"Engram ProfileRenderer: scan font path failed ({sp}): {e}")
                 continue
         return None
     
@@ -118,7 +119,8 @@ class ProfileRenderer:
             if font_path:
                 return ImageFont.truetype(font_path, size)
             return ImageFont.load_default()
-        except:
+        except Exception as e:
+            logger.debug(f"Engram ProfileRenderer: load font failed(size={size}), fallback default: {e}")
             return ImageFont.load_default()
     
     async def _ensure_session(self):
@@ -150,8 +152,8 @@ class ProfileRenderer:
                 # 缓存文件损坏，删除它
                 try:
                     os.remove(cache_file)
-                except:
-                    pass
+                except Exception as remove_err:
+                    logger.debug(f"Engram ProfileRenderer: remove broken avatar cache failed ({cache_file}): {remove_err}")
         
         # 缓存不存在或无效，下载头像
         try:

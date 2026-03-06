@@ -84,9 +84,10 @@ class OneBotSyncHandler:
                 bot = getattr(event, 'bot', None)
                 if bot and hasattr(bot, 'get_stranger_info'):
                     # 某些实现需要整数 ID
-                    try: 
+                    try:
                         uid_int = int(user_id)
-                    except: 
+                    except (TypeError, ValueError) as e:
+                        logger.debug(f"Engram OneBotSync: user_id cast to int failed ({user_id}), fallback raw id: {e}")
                         uid_int = user_id
                     
                     stranger_info = await bot.get_stranger_info(user_id=uid_int)

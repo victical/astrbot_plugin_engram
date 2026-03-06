@@ -3,6 +3,7 @@ import json
 import datetime
 from peewee import *
 from playhouse.sqlite_ext import JSONField, SqliteExtDatabase
+from astrbot.api import logger
 from astrbot.api.star import StarTools
 
 class BaseModel(Model):
@@ -108,6 +109,38 @@ class DatabaseManager:
         with self.db.connection_context():
             query = MemoryIndex.select().where(MemoryIndex.index_id << index_ids)
             return {item.index_id: item for item in query}
+
+    def get_prev_indices_by_ids(self, index_ids):
+        """按 index_id 批量获取前序索引（兼容 MemoryManager 链路查询）。"""
+        return self.get_memory_indexes_by_ids(index_ids)
+
+    def get_raw_memories_map_by_uuid_lists(self, index_uuid_map):
+        """批量按 UUID 列表获取原文，返回 {index_id: [RawMemory, ...]}。"""
+        if not isinstance(index_uuid_map, dict) or not index_uuid_map:
+            return {}
+
+        all_uuids = []
+        for uuids in index_uuid_map.values():
+            if isinstance(uuids, (list, tuple, set)):
+                all_uuids.extend([u for u in uuids if u])
+
+        if not all_uuids:
+            return {idx: [] for idx in index_uuid_map.keys()}
+
+        # 去重后一次性查询，避免循环内多次 DB 往返
+        unique_uuids = list(dict.fromkeys(all_uuids))
+        with self.db.connection_context():
+            query = RawMemory.select().where(RawMemory.uuid << unique_uuids)
+            raw_by_uuid = {item.uuid: item for item in query}
+
+        result_map = {}
+        for idx, uuids in index_uuid_map.items():
+            if not isinstance(uuids, (list, tuple, set)):
+                result_map[idx] = []
+                continue
+            result_map[idx] = [raw_by_uuid[u] for u in uuids if u in raw_by_uuid]
+
+        return result_map
 
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
@@ -244,3 +277,77 @@ class DatabaseManager:
                 "user_messages": user_msgs,
                 "assistant_messages": assistant_msgs
             }
+
+
+class StableDatabaseInterface:
+    """Engram DB 稳定接口层：统一收口并提供启动阶段契约自检。"""
+
+    # 覆盖 MemoryManager.retrieve_memories 链路的最小稳定契约
+    RETRIEVE_MEMORY_METHODS = (
+        "get_memory_indexes_by_ids",
+        "get_prev_indices_by_ids",
+        "get_raw_memories_map_by_uuid_lists",
+        "get_memories_by_uuids",
+        "update_active_score",
+    )
+
+    # 覆盖当前插件主链路使用到的 DB 方法（启动阶段一次性自检）
+    REQUIRED_METHODS = (
+        "save_raw_memory",
+        "get_unarchived_raw",
+        "mark_as_archived",
+        "get_memories_by_uuids",
+        "save_memory_index",
+        "get_last_memory_index",
+        "get_memory_index_by_id",
+        "get_memory_indexes_by_ids",
+        "get_prev_indices_by_ids",
+        "get_raw_memories_map_by_uuid_lists",
+        "get_memory_list",
+        "get_memories_since",
+        "get_memories_in_range",
+        "get_summaries_by_type",
+        "decay_active_scores",
+        "update_active_score",
+        "get_cold_memory_ids",
+        "delete_memory_index",
+        "delete_raw_memories_by_uuids",
+        "clear_user_data",
+        "get_all_raw_messages",
+        "get_message_stats",
+        "get_all_users_messages",
+        "get_all_user_ids",
+        "get_all_users_stats",
+    )
+
+    def __init__(self, backend):
+        self._backend = backend
+        # 向后兼容：仍允许外部通过 self.db.db.connection_context() 使用底层连接
+        self.db = getattr(backend, "db", None)
+
+    def __getattr__(self, item):
+        """默认代理到底层 DB 实现，避免破坏现有调用。"""
+        return getattr(self._backend, item)
+
+    def verify_contract(self, required_methods=None, stage="startup", raise_on_error=True):
+        """验证底层 DB 是否满足约定接口。"""
+        method_names = tuple(required_methods or self.REQUIRED_METHODS)
+        missing = [name for name in method_names if not callable(getattr(self._backend, name, None))]
+
+        if missing:
+            missing_sorted = sorted(set(missing))
+            message = (
+                f"Engram DB contract check failed at {stage}: "
+                f"missing methods -> {', '.join(missing_sorted)}"
+            )
+            logger.error(message)
+            if raise_on_error:
+                raise AttributeError(message)
+            return False, missing_sorted
+
+        logger.debug(
+            "Engram DB contract check passed at %s (%d methods)",
+            stage,
+            len(method_names)
+        )
+        return True, []

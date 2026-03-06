@@ -1,417 +1,693 @@
 {
-  "ai_name": {
-    "description": "AI 名称",
-    "type": "string",
-    "default": "助手",
-    "hint": "用于记忆归档时标记 AI 的名称，将存入向量数据库元信息中。"
+  "preset_and_basic": {
+    "description": "预设与基础",
+    "type": "object",
+    "hint": "快速选择整体行为并配置基础信息。",
+    "items": {
+      "config_preset_mode": {
+        "description": "配置预设模式",
+        "type": "string",
+        "options": [
+          "stable",
+          "balanced",
+          "aggressive",
+          "custom"
+        ],
+        "labels": [
+          "稳定（低抖动）",
+          "均衡（推荐）",
+          "激进（高召回）",
+          "自定义（完全手调）"
+        ],
+        "default": "balanced",
+        "hint": "一键应用记忆策略参数组合。custom=不覆盖你手动填写的细项；其余预设会覆盖相关检索/提示/衰减参数。"
+      },
+      "ai_name": {
+        "description": "AI 名称",
+        "type": "string",
+        "default": "助手",
+        "hint": "用于记忆归档时标记 AI 的名称，将存入向量数据库元信息中。"
+      },
+      "debug_injection": {
+        "description": "调试模式：显示注入内容",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，每次 LLM 请求时会在日志中输出注入的用户画像和记忆内容，便于调试和排查问题。"
+      },
+      "list_memory_count": {
+        "description": "查询记忆指令默认返回的数量",
+        "type": "int",
+        "default": 5,
+        "hint": "使用 /mem_list 指令时默认返回的记忆条数。可在指令中使用 /mem_list <数量> 临时覆盖此值（最多50条）"
+      }
+    }
   },
-  "debug_injection": {
-    "description": "调试模式：显示注入内容",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，每次 LLM 请求时会在日志中输出注入的用户画像和记忆内容，便于调试和排查问题。"
+  "archive": {
+    "description": "归档与总结",
+    "type": "object",
+    "hint": "原始消息归档与日级总结生成相关配置。",
+    "items": {
+      "private_memory_timeout": {
+        "description": "私聊记忆归档触发时间（秒）",
+        "type": "int",
+        "default": 1800,
+        "hint": "距离最后一次对话超过此时间将触发归档"
+      },
+      "min_msg_count": {
+        "description": "触发归档的最少消息数",
+        "type": "int",
+        "default": 4,
+        "hint": "未保存的消息达到此数量且超时后触发归档"
+      },
+      "max_history_days": {
+        "description": "强制总结回溯天数限制",
+        "type": "int",
+        "default": 0,
+        "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
+      },
+      "summarize_model": {
+        "description": "归档记忆使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "选择一个大模型来归档记忆（建议选择低成本模型）。留空则使用当前默认模型。"
+      },
+      "summarize_prompt": {
+        "description": "归档记忆的提示词",
+        "type": "string",
+        "obvious_hint": true,
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "editor_theme": "vs-dark",
+        "default": "你是{{ai_name}}，请根据聊天记录生成【结构化 JSON 记忆摘要】，用于后续检索。\n\n【要求】\n- 只基于对话中明确出现的信息，不允许编造。\n- summary 用自然语言一句话概括，30~60字。\n- key_facts 是3~5条核心事实（短句）。\n- keywords 是5~10个关键词（实体/主题/事件/地点/数值）。\n- entities 是对话中出现的人名/物品/地点/作品等实体。\n- mood 用1~3个词描述情绪（可为空）。\n\n【输出 JSON 格式】\n{\n  \"summary\": \"...\",\n  \"key_facts\": [\"...\", \"...\"],\n  \"keywords\": [\"...\", \"...\"],\n  \"entities\": [\"...\", \"...\"],\n  \"mood\": \"...\"\n}\n\n【对话内容】\n{{chat_text}}\n\n注意：只输出 JSON，不要包含 Markdown 或其他解释。",
+        "hint": "{{ai_name}}：bot名字 {{chat_text}}：对话内容"
+      }
+    }
   },
-  "private_memory_timeout": {
-    "description": "私聊记忆归档触发时间（秒）",
-    "type": "int",
-    "default": 1800,
-    "hint": "距离最后一次对话超过此时间将触发归档"
+  "retrieval_ranking": {
+    "description": "检索与排序",
+    "type": "object",
+    "hint": "长期记忆召回、关键词增强与排序融合策略。",
+    "items": {
+      "max_recent_memories": {
+        "description": "检索时召回的最大长期记忆数量",
+        "type": "int",
+        "default": 3
+      },
+      "memory_similarity_threshold": {
+        "description": "记忆检索相关性阈值",
+        "type": "float",
+        "default": 1.5,
+        "hint": "向量搜索的距离阈值，超过此值的记忆将被过滤（距离越小相关性越高）。建议值：1.0-2.0。设置过小可能导致检索不到结果，过大会引入无关记忆"
+      },
+      "enable_keyword_boost": {
+        "description": "启用关键词匹配增强",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
+      },
+      "enable_ngram_keyword_rank": {
+        "description": "启用中英混合 n-gram 关键词排序",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，关键词打分采用英文词边界+中文 n-gram 精确匹配，并结合候选集词频进行稀有词提升（近似 IDF）。关闭后退化为原有关键词增强流程。"
+      },
+      "keyword_ngram_min": {
+        "description": "中文关键词 n-gram 最小长度",
+        "type": "int",
+        "default": 2,
+        "hint": "用于中文关键词切分的最小 n 值。建议 2，过小容易误命中。"
+      },
+      "keyword_ngram_max": {
+        "description": "中文关键词 n-gram 最大长度",
+        "type": "int",
+        "default": 4,
+        "hint": "用于中文关键词切分的最大 n 值。建议 4，过大可能降低召回。"
+      },
+      "keyword_boost_weight": {
+        "description": "RRF 融合权重（关键词 vs 向量）",
+        "type": "string",
+        "options": [
+          "0.0",
+          "0.3",
+          "0.5",
+          "0.7",
+          "1.0"
+        ],
+        "labels": [
+          "纯向量模式",
+          "向量优先",
+          "均衡融合（推荐）",
+          "关键词优先",
+          "纯关键词模式"
+        ],
+        "default": "0.5",
+        "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
+      },
+      "rank_strategy": {
+        "description": "记忆排序策略",
+        "type": "string",
+        "options": [
+          "rrf",
+          "hybrid"
+        ],
+        "labels": [
+          "RRF（可回退，兼容旧行为）",
+          "Hybrid（向量+关键词+时效+活跃度）"
+        ],
+        "default": "rrf",
+        "hint": "rrf 使用倒数排序融合（旧逻辑）；hybrid 使用统一混合分。建议先从 rrf 平滑迁移。"
+      },
+      "rank_weight_vector": {
+        "description": "Hybrid 向量分权重",
+        "type": "float",
+        "default": 0.5,
+        "hint": "仅在 rank_strategy=hybrid 时生效。由向量 distance 归一化得到 vector_score。"
+      },
+      "rank_weight_keyword": {
+        "description": "Hybrid 关键词分权重",
+        "type": "float",
+        "default": 0.5,
+        "hint": "仅在 rank_strategy=hybrid 时生效。由 BM25 风格关键词匹配归一化得到 keyword_score。"
+      },
+      "rank_weight_recency": {
+        "description": "Hybrid 时效分权重",
+        "type": "float",
+        "default": 0.08,
+        "hint": "仅在 rank_strategy=hybrid 时生效。基于 created_at 时间衰减计算 recency_score。"
+      },
+      "rank_weight_activity": {
+        "description": "Hybrid 活跃分权重",
+        "type": "float",
+        "default": 0.06,
+        "hint": "仅在 rank_strategy=hybrid 时生效。基于 active_score 归一化计算 activity_score；当 enable_memory_decay=false 时会自动降权。"
+      },
+      "rank_recency_half_life_days": {
+        "description": "Hybrid 时效半衰期（天）",
+        "type": "float",
+        "default": 30,
+        "hint": "仅在 rank_strategy=hybrid 时生效。值越小越偏向近期记忆。"
+      },
+      "show_relevance_score": {
+        "description": "显示记忆相关性评分",
+        "type": "bool",
+        "default": true,
+        "hint": "在搜索记忆结果中显示相关性百分比（🎯 85%）。关闭后仅显示记忆 ID 和时间。"
+      },
+      "enable_memory_context_hint": {
+        "description": "显示前情提要",
+        "type": "bool",
+        "default": true,
+        "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
+      },
+      "memory_context_window": {
+        "description": "前情提要上下文窗口",
+        "type": "int",
+        "default": 2,
+        "hint": "控制每条命中记忆向前追溯多少条链路用于展示前情提要。建议 2-3；设置为 0 则仅展示当前命中摘要。"
+      },
+      "memory_query_max_results": {
+        "description": "向量检索候选上限",
+        "type": "int",
+        "default": 60,
+        "hint": "控制向量检索候选集大小（n_results 上限），用于平衡召回质量与性能。建议 20-200。"
+      }
+    }
   },
-  "min_msg_count": {
-    "description": "触发归档的最少消息数",
-    "type": "int",
-    "default": 4,
-    "hint": "未保存的消息达到此数量且超时后触发归档"
+  "tool_search": {
+    "description": "工具检索与话题缓存",
+    "type": "object",
+    "hint": "工具化检索提示、证据策略与同话题缓存复用。",
+    "items": {
+      "enable_memory_search_tool": {
+        "description": "启用工具化记忆检索",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，向模型注入 mem_search_tool 的调用提示。模型在记忆不足时可主动调用工具检索，减少猜测。"
+      },
+      "memory_search_tool_max_results": {
+        "description": "工具检索最大返回条数",
+        "type": "int",
+        "default": 3,
+        "hint": "限制 mem_search_tool 单次最多返回的记忆条数，范围建议 1-10。"
+      },
+      "memory_tool_hint_mode": {
+        "description": "工具提示注入策略",
+        "type": "string",
+        "options": [
+          "on_insufficient_evidence",
+          "always",
+          "never"
+        ],
+        "labels": [
+          "证据不足时注入（推荐）",
+          "始终注入",
+          "从不注入"
+        ],
+        "default": "on_insufficient_evidence",
+        "hint": "控制 on_llm_request 注入工具提示的时机。推荐 on_insufficient_evidence，避免每轮都强提示导致行为抖动。"
+      },
+      "memory_tool_hint_min_memories": {
+        "description": "证据不足阈值（记忆条数）",
+        "type": "int",
+        "default": 1,
+        "hint": "仅在 memory_tool_hint_mode=on_insufficient_evidence 时生效。注入记忆条数少于该值时才注入工具提示。"
+      },
+      "enable_memory_topic_cache": {
+        "description": "启用话题级记忆缓存",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，同一用户在相近话题下的短时间连续追问将复用首轮检索结果，降低检索漂移。"
+      },
+      "memory_topic_cache_ttl": {
+        "description": "话题缓存 TTL（秒）",
+        "type": "int",
+        "default": 120,
+        "hint": "话题级缓存有效期。建议 60-300 秒，过短收益低，过长可能让记忆上下文过旧。"
+      },
+      "memory_topic_cache_max_topics": {
+        "description": "每用户缓存话题上限",
+        "type": "int",
+        "default": 3,
+        "hint": "控制每个用户最多缓存多少个话题，防止内存增长。"
+      },
+      "memory_topic_cache_similarity_threshold": {
+        "description": "话题缓存相似度阈值",
+        "type": "float",
+        "default": 0.25,
+        "hint": "用于近似话题复用的 Jaccard 相似度阈值。值越低越容易命中缓存，建议 0.15-0.4。"
+      }
+    }
   },
-  "max_history_days": {
-    "description": "强制总结回溯天数限制",
-    "type": "int",
-    "default": 0,
-    "hint": "执行归档时，超过此天数的旧消息将直接跳过并标记为已归档。0 表示无限制（处理所有历史）。"
+  "intent": {
+    "description": "意图判定",
+    "type": "object",
+    "hint": "控制何时触发长期记忆检索。",
+    "items": {
+      "memory_intent_mode": {
+        "description": "记忆检索意图过滤模式",
+        "type": "string",
+        "options": [
+          "disabled",
+          "keyword",
+          "llm"
+        ],
+        "labels": [
+          "禁用（每条消息都检索）",
+          "关键词匹配（零成本）",
+          "LLM 小模型判断（高精度）"
+        ],
+        "default": "keyword",
+        "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
+      },
+      "intent_llm_model": {
+        "description": "意图判断使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "仅在意图过滤模式为 llm 时生效。选择一个低成本小模型来判断是否需要检索记忆。留空则依次尝试归档模型、默认模型。"
+      },
+      "intent_min_length": {
+        "description": "意图触发最小文本长度",
+        "type": "int",
+        "default": 4,
+        "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
+      },
+      "intent_weak_triggers": {
+        "description": "意图弱触发词列表",
+        "type": "list",
+        "default": [
+          "我喜欢什么",
+          "我说过吗",
+          "你知道我"
+        ],
+        "hint": "仅在 keyword 模式下生效。弱触发词每命中一次计 1 分，通常用于补充语义较弱但可能需要回溯的问法。"
+      },
+      "intent_pattern_mode": {
+        "description": "启用意图句式匹配",
+        "type": "bool",
+        "default": true,
+        "hint": "仅在 keyword 模式下生效。开启后会额外匹配“我...喜欢/讨厌/说过/提过”等自我信息回溯句式，每命中一次计 1 分。"
+      },
+      "intent_trigger_score_threshold": {
+        "description": "意图触发分数阈值",
+        "type": "int",
+        "default": 2,
+        "hint": "仅在 keyword 模式下生效。总分达到该阈值才触发记忆检索：强触发词 +2，弱触发词 +1，句式命中 +1。"
+      }
+    }
   },
-  "summarize_model": {
-    "description": "归档记忆使用的模型",
-    "type": "string",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "选择一个大模型来归档记忆（建议选择低成本模型）。留空则使用当前默认模型。"
+  "decay": {
+    "description": "衰减与修剪",
+    "type": "object",
+    "hint": "活跃度衰减、召回增强与冷记忆修剪策略。",
+    "items": {
+      "enable_memory_decay": {
+        "description": "启用记忆衰减",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，每日凌晨自动降低所有记忆的活跃度评分。长期未被召回的记忆会逐渐被遗忘（从向量库移除但保留在数据库中）。"
+      },
+      "memory_decay_rate": {
+        "description": "每日衰减速率",
+        "type": "int",
+        "default": 1,
+        "hint": "每天从所有记忆的 active_score 中减去的分数。默认值 1 表示 100 天不被召回的记忆将被修剪。"
+      },
+      "memory_reinforce_bonus": {
+        "description": "记忆召回增强分数",
+        "type": "int",
+        "default": 20,
+        "hint": "当一条记忆被成功检索并返回给用户时，其 active_score 会增加此值。较高的值使经常被召回的记忆更难被遗忘。"
+      },
+      "enable_memory_prune": {
+        "description": "启用冷记忆修剪",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，active_score 降至阈值以下的记忆将从 ChromaDB 向量库中移除（节省存储和检索性能），但原始数据保留在 SQLite 中用于导出和考古。"
+      },
+      "memory_prune_threshold": {
+        "description": "修剪阈值",
+        "type": "int",
+        "default": 0,
+        "hint": "active_score 小于等于此值的记忆将被从向量库中修剪。默认值 0，配合衰减速率 1，意味着约 100 天未被召回的记忆会被修剪。"
+      }
+    }
   },
-  "summarize_prompt": {
-    "description": "归档记忆的提示词",
-    "type": "string",
-    "obvious_hint": true,
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "editor_theme": "vs-dark",
-    "default": "你是{{ai_name}}，请根据聊天记录生成【结构化 JSON 记忆摘要】，用于后续检索。\n\n【要求】\n- 只基于对话中明确出现的信息，不允许编造。\n- summary 用自然语言一句话概括，30~60字。\n- key_facts 是3~5条核心事实（短句）。\n- keywords 是5~10个关键词（实体/主题/事件/地点/数值）。\n- entities 是对话中出现的人名/物品/地点/作品等实体。\n- mood 用1~3个词描述情绪（可为空）。\n\n【输出 JSON 格式】\n{\n  \"summary\": \"...\",\n  \"key_facts\": [\"...\", \"...\"],\n  \"keywords\": [\"...\", \"...\"],\n  \"entities\": [\"...\", \"...\"],\n  \"mood\": \"...\"\n}\n\n【对话内容】\n{{chat_text}}\n\n注意：只输出 JSON，不要包含 Markdown 或其他解释。",
-    "hint": "{{ai_name}}：bot名字 {{chat_text}}：对话内容"
+  "folding": {
+    "description": "多级折叠总结",
+    "type": "object",
+    "hint": "周/月/年多层摘要折叠调度与提示词。",
+    "items": {
+      "enable_memory_folding": {
+        "description": "启用周总结折叠",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后每周按计划将近 N 天日级记忆折叠为一条 weekly 总结，写入向量库与索引。"
+      },
+      "weekly_folding_days": {
+        "description": "周总结折叠回溯天数",
+        "type": "int",
+        "default": 7,
+        "hint": "执行周总结时纳入最近多少天的 daily/private 记忆。"
+      },
+      "folding_min_samples": {
+        "description": "触发周总结最少样本数",
+        "type": "int",
+        "default": 3,
+        "hint": "候选日记条数不足该值时跳过周总结生成。"
+      },
+      "weekly_folding_weekday": {
+        "description": "周总结执行星期",
+        "type": "int",
+        "default": 6,
+        "hint": "0=周一 ... 6=周日。默认周日执行。"
+      },
+      "weekly_folding_hour": {
+        "description": "周总结执行小时",
+        "type": "int",
+        "default": 2,
+        "hint": "24小时制，默认凌晨 2 点。"
+      },
+      "weekly_folding_delay": {
+        "description": "周总结用户间隔延迟（秒）",
+        "type": "int",
+        "default": 1,
+        "hint": "批量用户执行时每个用户后的固定延迟。"
+      },
+      "weekly_folding_jitter": {
+        "description": "周总结用户间随机抖动（秒）",
+        "type": "int",
+        "default": 0,
+        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
+      },
+      "weekly_folding_model": {
+        "description": "周总结使用模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "留空时回退到 summarize_model 或默认模型。"
+      },
+      "weekly_folding_prompt": {
+        "description": "周总结提示词",
+        "type": "string",
+        "obvious_hint": true,
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "editor_theme": "vs-dark",
+        "default": "你是一名记忆整理助手。请根据下方【daily_summary 列表】生成一段周总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 保留关键人物/地点/事件/数值；\n3. 语言简洁，120~220字。\n\n【daily_summary 列表】\n{{memory_texts}}",
+        "hint": "{{memory_texts}}：最近多条日级总结列表"
+      },
+      "enable_monthly_folding": {
+        "description": "启用月总结折叠",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后每月按计划将近 N 天 weekly/daily 记忆折叠为一条 monthly 总结。"
+      },
+      "monthly_folding_days": {
+        "description": "月总结折叠回溯天数",
+        "type": "int",
+        "default": 30,
+        "hint": "执行月总结时纳入最近多少天的 weekly（兜底兼容 daily/private）记忆。"
+      },
+      "monthly_folding_min_samples": {
+        "description": "触发月总结最少样本数",
+        "type": "int",
+        "default": 4,
+        "hint": "候选周记条数不足该值时跳过月总结生成。"
+      },
+      "monthly_folding_day": {
+        "description": "月总结执行日期",
+        "type": "int",
+        "default": 1,
+        "hint": "每月几号执行（1-28 推荐）。超出当月天数时自动回退到月末。"
+      },
+      "monthly_folding_hour": {
+        "description": "月总结执行小时",
+        "type": "int",
+        "default": 3,
+        "hint": "24小时制，默认凌晨 3 点。"
+      },
+      "monthly_folding_delay": {
+        "description": "月总结用户间隔延迟（秒）",
+        "type": "int",
+        "default": 1,
+        "hint": "批量用户执行时每个用户后的固定延迟。"
+      },
+      "monthly_folding_jitter": {
+        "description": "月总结用户间随机抖动（秒）",
+        "type": "int",
+        "default": 0,
+        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
+      },
+      "monthly_folding_model": {
+        "description": "月总结使用模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "留空时回退到 summarize_model 或默认模型。"
+      },
+      "monthly_folding_prompt": {
+        "description": "月总结提示词",
+        "type": "string",
+        "obvious_hint": true,
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "editor_theme": "vs-dark",
+        "default": "你是一名记忆整理助手。请根据下方【weekly_summary 列表】生成一段月总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 保留关键人物/地点/事件/数值；\n3. 提炼本月主题、关键变化与持续偏好；\n4. 语言简洁，160~280字。\n\n【weekly_summary 列表】\n{{memory_texts}}",
+        "hint": "{{memory_texts}}：最近多条周级总结列表"
+      },
+      "enable_yearly_folding": {
+        "description": "启用年度总结折叠",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后每年按计划将近 N 天 monthly/weekly 记忆折叠为一条 yearly 总结。"
+      },
+      "yearly_folding_days": {
+        "description": "年度总结折叠回溯天数",
+        "type": "int",
+        "default": 365,
+        "hint": "执行年度总结时纳入最近多少天的 monthly（兜底兼容 weekly）记忆。"
+      },
+      "yearly_folding_min_samples": {
+        "description": "触发年度总结最少样本数",
+        "type": "int",
+        "default": 6,
+        "hint": "候选月记条数不足该值时跳过年度总结生成。"
+      },
+      "yearly_folding_month": {
+        "description": "年度总结执行月份",
+        "type": "int",
+        "default": 1,
+        "hint": "每年在几月执行（1-12）。默认 1 月。"
+      },
+      "yearly_folding_day": {
+        "description": "年度总结执行日期",
+        "type": "int",
+        "default": 1,
+        "hint": "每年执行月中的第几天执行（1-28 推荐）。超出当月天数时自动回退到月末。"
+      },
+      "yearly_folding_hour": {
+        "description": "年度总结执行小时",
+        "type": "int",
+        "default": 4,
+        "hint": "24小时制，默认凌晨 4 点。"
+      },
+      "yearly_folding_delay": {
+        "description": "年度总结用户间隔延迟（秒）",
+        "type": "int",
+        "default": 1,
+        "hint": "批量用户执行时每个用户后的固定延迟。"
+      },
+      "yearly_folding_jitter": {
+        "description": "年度总结用户间随机抖动（秒）",
+        "type": "int",
+        "default": 0,
+        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
+      },
+      "yearly_folding_model": {
+        "description": "年度总结使用模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "留空时回退到 summarize_model 或默认模型。"
+      },
+      "yearly_folding_prompt": {
+        "description": "年度总结提示词",
+        "type": "string",
+        "obvious_hint": true,
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "editor_theme": "vs-dark",
+        "default": "你是一名记忆整理助手。请根据下方【monthly_summary 列表】生成一段年度总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 归纳全年主线、阶段变化与稳定偏好；\n3. 保留关键人物/地点/事件/数值；\n4. 语言简洁，220~420字。\n\n【monthly_summary 列表】\n{{memory_texts}}",
+        "hint": "{{memory_texts}}：最近多条月级总结列表"
+      }
+    }
   },
-  "max_recent_memories": {
-    "description": "检索时召回的最大长期记忆数量",
-    "type": "int",
-    "default": 3
+  "persona": {
+    "description": "画像更新与保护",
+    "type": "object",
+    "hint": "用户画像更新策略、并发控制与防幻觉保护。",
+    "items": {
+      "persona_model": {
+        "description": "更新画像使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
+      },
+      "persona_update_prompt": {
+        "description": "画像更新的提示词",
+        "type": "string",
+        "obvious_hint": true,
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "editor_theme": "vs-dark",
+        "default": "你是一个严谨的【用户信息档案员】。你的任务是根据今日的新增记忆，更新用户的档案数据。\n\n【当前档案】：\n{{current_persona}}\n\n【今日新增记忆】：\n{{memory_texts}}\n\n【核心原则 - 严禁幻觉】：\n⚠️ 你只能从【今日新增记忆】的文字中提取**明确写出的**事实信息。\n⚠️ 如果记忆中没有**直接提及**某项内容，你**绝对不能**添加、推测或脑补任何信息。\n⚠️ 例如：如果记忆只写\"聊了美食\"，你不能推测用户喜欢任何具体食物。只有记忆明确写\"喜欢XX食物\"，你才能将其加入 favorite_foods。\n\n【更新规则】：\n1. **逐条对照**：检查【今日新增记忆】中的每一条，只有明确提及的信息才能更新到档案。\n2. **保持原值**：如果记忆中没有提到某字段，保持【当前档案】中的原值不变。\n3. **列表追加**：hobbies、favorite_foods、dislikes 等列表字段，只追加记忆中明确提及的新内容，并去重。\n4. **禁止推断**：不要基于上下文推断、联想或猜测任何信息。\n5. **保留原有 basic_info**：basic_info 中的 qq_id、nickname、avatar_url、signature 等字段必须保持原值不变。\n\n【标签简化规则 - 必须遵守】：\n⚠️ 所有 hobbies、favorite_activities、favorite_items、personality_tags 字段的值必须使用【2-5个字的简短词汇】。\n⚠️ 禁止使用长句子或带括号的详细描述。\n⚠️ 示例：\n  ✅ 正确：\"玩我的世界\"、\"AI绘画\"、\"听音乐\"、\"看动漫\"\n  ❌ 错误：\"使用MC指令连接服务器\"、\"AI绘画（要求特定服装和姿势）\"\n⚠️ 如果记忆中有详细描述，请提取其核心活动作为简短标签。\n\n【字段定义 - 严格分类】：\n- basic_info: gender(性别), age(年龄), location(所在地), job(职业) - 其他字段保持原值\n- attributes:\n  - hobbies: 用户的活动类爱好，使用2-5字简短词汇（如：编程、看电影、打游戏、玩我的世界）\n  - skills: 用户掌握的技能（如：Python、钢琴、绘画）\n  - personality_tags: 用户明显表现出的性格特征（如：幽默、严谨）\n- preferences（严格按类别分配，禁止混淆）：\n  - favorite_foods: 用户喜欢的【食物/饮品】，如：西瓜、奶茶、火锅、冰美式、拿铁\n  - favorite_items: 用户喜欢的【具体物品/事物】，如：猫咪、手办、机械键盘、盲盒\n  - favorite_activities: 用户喜欢的【活动/娱乐方式】，使用2-5字简短词汇（如：看电影、打游戏、逛街、听音乐、AI绘画）\n  - dislikes: 用户明确表示讨厌的事物\n- social_graph:\n  - relationship_status: 保持原值不变\n  - interaction_stats: 保持原值不变\n  - important_people: 用户提到的重要的人（家人、朋友、伴侣等）\n- dev_metadata: tech_stack(技术栈) - 只记录明确提及的技术\n- shared_secrets: 如果用户分享了心事、秘密、烦恼或深层情感，设置为 true\n\n【禁止录入以下内容到 preferences 字段】：\n❌ 情感状态词：开心、快乐、幸福、温馨、感动\n❌ 互动行为词：摸头、聊天、陪伴、夸奖、鼓励\n❌ 抽象概念词：温暖、舒适、自由、安全感\n❌ 以上词汇应该被忽略，而不是录入任何字段\n\n【输出要求】：\n请直接返回更新后的完整 JSON 数据。不要包含 Markdown 标记，不要包含其他解释。",
+        "hint": "{{current_persona}}：当前用户画像JSON {{memory_texts}}：新增记忆列表"
+      },
+      "min_persona_update_memories": {
+        "description": "触发画像更新所需的最小新增记忆数",
+        "type": "int",
+        "default": 3,
+        "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
+      },
+      "persona_update_max_concurrent": {
+        "description": "每日画像更新最大并发数",
+        "type": "int",
+        "default": 3,
+        "hint": "控制凌晨00:00画像更新时的最大并发LLM请求数，避免API限流。建议值：3-5"
+      },
+      "persona_update_delay": {
+        "description": "画像更新间隔延迟（秒）",
+        "type": "int",
+        "default": 5,
+        "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
+      },
+      "enable_profile_confidence": {
+        "description": "启用画像置信度机制",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，LLM 提取的新属性不会立即写入正式画像，而是作为提案暂存，需多次确认后转正。防止单次幻觉污染画像。"
+      },
+      "profile_confidence_threshold": {
+        "description": "提案转正阈值",
+        "type": "int",
+        "default": 2,
+        "hint": "新属性需要连续被 LLM 提取多少次才能转正写入画像。默认值 2 表示需要连续 2 次更新都提取到相同属性才确认。"
+      },
+      "enable_conflict_detection": {
+        "description": "启用偏好冲突检测",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，检测新属性与旧属性的矛盾（如喜欢猫 vs 猫毛过敏），冲突时保留旧值（保守策略）。"
+      },
+      "enable_strong_evidence_protection": {
+        "description": "启用强证据保护",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，basic_info 核心字段（性别、年龄、所在地、职业）需要记忆中有明确陈述才能修改，防止 LLM 推测性修改。"
+      }
+    }
   },
-  "memory_similarity_threshold": {
-    "description": "记忆检索相关性阈值",
-    "type": "float",
-    "default": 1.5,
-    "hint": "向量搜索的距离阈值，超过此值的记忆将被过滤（距离越小相关性越高）。建议值：1.0-2.0。设置过小可能导致检索不到结果，过大会引入无关记忆"
+  "command_filter": {
+    "description": "指令过滤",
+    "type": "object",
+    "hint": "过滤指令消息，避免污染记忆。",
+    "items": {
+      "enable_command_filter": {
+        "description": "启用指令标识过滤",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），避免将其记入长期记忆。"
+      },
+      "command_prefixes": {
+        "description": "指令前缀列表",
+        "type": "list",
+        "default": [
+          "/",
+          "!",
+          "#",
+          "~"
+        ],
+        "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
+      },
+      "enable_full_command_detection": {
+        "description": "启用完整指令字符串检测",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，会检测消息是否为完整的指令（全字符串匹配）。例如 'new' 会被识别为指令并跳过，但 'new world' 不会。"
+      },
+      "full_command_list": {
+        "description": "完整指令列表",
+        "type": "list",
+        "default": [
+          "new",
+          "help",
+          "reset",
+          "clear"
+        ],
+        "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
+      }
+    }
   },
-  "enable_keyword_boost": {
-    "description": "启用关键词匹配增强",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，搜索时会对包含查询关键词的记忆进行排名提升，提高精确匹配的准确度。适合搜索具体事件或关键词。"
-  },
-  "enable_ngram_keyword_rank": {
-    "description": "启用中英混合 n-gram 关键词排序",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，关键词打分采用英文词边界+中文 n-gram 精确匹配，并结合候选集词频进行稀有词提升（近似 IDF）。关闭后退化为原有关键词增强流程。"
-  },
-  "keyword_ngram_min": {
-    "description": "中文关键词 n-gram 最小长度",
-    "type": "int",
-    "default": 2,
-    "hint": "用于中文关键词切分的最小 n 值。建议 2，过小容易误命中。"
-  },
-  "keyword_ngram_max": {
-    "description": "中文关键词 n-gram 最大长度",
-    "type": "int",
-    "default": 4,
-    "hint": "用于中文关键词切分的最大 n 值。建议 4，过大可能降低召回。"
-  },
-  "keyword_boost_weight": {
-    "description": "RRF 融合权重（关键词 vs 向量）",
-    "type": "string",
-    "options": [
-      "0.0",
-      "0.3",
-      "0.5",
-      "0.7",
-      "1.0"
-    ],
-    "labels": [
-      "纯向量模式",
-      "向量优先",
-      "均衡融合（推荐）",
-      "关键词优先",
-      "纯关键词模式"
-    ],
-    "default": "0.5",
-    "hint": "使用 RRF (Reciprocal Rank Fusion) 算法融合向量语义和关键词排名。0.0=纯向量语义搜索；0.5=均衡融合两路信号（推荐）；1.0=纯关键词精确匹配。关键词匹配使用 BM25 风格评分（TF 饱和 + 长度归一化）。"
-  },
-  "rank_strategy": {
-    "description": "记忆排序策略",
-    "type": "string",
-    "options": [
-      "rrf",
-      "hybrid"
-    ],
-    "labels": [
-      "RRF（可回退，兼容旧行为）",
-      "Hybrid（向量+关键词+时效+活跃度）"
-    ],
-    "default": "rrf",
-    "hint": "rrf 使用倒数排序融合（旧逻辑）；hybrid 使用统一混合分。建议先从 rrf 平滑迁移。"
-  },
-  "rank_weight_vector": {
-    "description": "Hybrid 向量分权重",
-    "type": "float",
-    "default": 0.5,
-    "hint": "仅在 rank_strategy=hybrid 时生效。由向量 distance 归一化得到 vector_score。"
-  },
-  "rank_weight_keyword": {
-    "description": "Hybrid 关键词分权重",
-    "type": "float",
-    "default": 0.5,
-    "hint": "仅在 rank_strategy=hybrid 时生效。由 BM25 风格关键词匹配归一化得到 keyword_score。"
-  },
-  "rank_weight_recency": {
-    "description": "Hybrid 时效分权重",
-    "type": "float",
-    "default": 0.08,
-    "hint": "仅在 rank_strategy=hybrid 时生效。基于 created_at 时间衰减计算 recency_score。"
-  },
-  "rank_weight_activity": {
-    "description": "Hybrid 活跃分权重",
-    "type": "float",
-    "default": 0.06,
-    "hint": "仅在 rank_strategy=hybrid 时生效。基于 active_score 归一化计算 activity_score；当 enable_memory_decay=false 时会自动降权。"
-  },
-  "rank_recency_half_life_days": {
-    "description": "Hybrid 时效半衰期（天）",
-    "type": "float",
-    "default": 30,
-    "hint": "仅在 rank_strategy=hybrid 时生效。值越小越偏向近期记忆。"
-  },
-  "show_relevance_score": {
-    "description": "显示记忆相关性评分",
-    "type": "bool",
-    "default": true,
-    "hint": "在搜索记忆结果中显示相关性百分比（🎯 85%）。关闭后仅显示记忆 ID 和时间。"
-  },
-  "enable_memory_context_hint": {
-    "description": "显示前情提要",
-    "type": "bool",
-    "default": true,
-    "hint": "在记忆检索结果中显示上一条记忆的摘要（前情提要），帮助理解上下文。关闭后不再显示。"
-  },
-  "memory_context_window": {
-    "description": "前情提要上下文窗口",
-    "type": "int",
-    "default": 2,
-    "hint": "控制每条命中记忆向前追溯多少条链路用于展示前情提要。建议 2-3；设置为 0 则仅展示当前命中摘要。"
-  },
-  "memory_intent_mode": {
-    "description": "记忆检索意图过滤模式",
-    "type": "string",
-    "options": [
-      "disabled",
-      "keyword",
-      "llm"
-    ],
-    "labels": [
-      "禁用（每条消息都检索）",
-      "关键词匹配（零成本）",
-      "LLM 小模型判断（高精度）"
-    ],
-    "default": "keyword",
-    "hint": "控制何时触发长期记忆检索。disabled=每条消息都检索（向后兼容）；keyword=仅当消息包含回忆类关键词时检索（推荐，零额外成本）；llm=调用小模型判断是否需要检索（最精准，有少量Token消耗）。"
-  },
-  "intent_llm_model": {
-    "description": "意图判断使用的模型",
-    "type": "string",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "仅在意图过滤模式为 llm 时生效。选择一个低成本小模型来判断是否需要检索记忆。留空则依次尝试归档模型、默认模型。"
-  },
-  "intent_min_length": {
-    "description": "意图触发最小文本长度",
-    "type": "int",
-    "default": 4,
-    "hint": "过滤极短的无意义文本（如 啊？、嗯）。仅当消息去除标点后的字符数少于此值时，跳过意图检测。"
-  },
-  "intent_weak_triggers": {
-    "description": "意图弱触发词列表",
-    "type": "list",
-    "default": [
-      "我喜欢什么",
-      "我说过吗",
-      "你知道我"
-    ],
-    "hint": "仅在 keyword 模式下生效。弱触发词每命中一次计 1 分，通常用于补充语义较弱但可能需要回溯的问法。"
-  },
-  "intent_pattern_mode": {
-    "description": "启用意图句式匹配",
-    "type": "bool",
-    "default": true,
-    "hint": "仅在 keyword 模式下生效。开启后会额外匹配“我...喜欢/讨厌/说过/提过”等自我信息回溯句式，每命中一次计 1 分。"
-  },
-  "intent_trigger_score_threshold": {
-    "description": "意图触发分数阈值",
-    "type": "int",
-    "default": 2,
-    "hint": "仅在 keyword 模式下生效。总分达到该阈值才触发记忆检索：强触发词 +2，弱触发词 +1，句式命中 +1。"
-  },
-  "enable_memory_decay": {
-    "description": "启用记忆衰减",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，每日凌晨自动降低所有记忆的活跃度评分。长期未被召回的记忆会逐渐被遗忘（从向量库移除但保留在数据库中）。"
-  },
-  "memory_decay_rate": {
-    "description": "每日衰减速率",
-    "type": "int",
-    "default": 1,
-    "hint": "每天从所有记忆的 active_score 中减去的分数。默认值 1 表示 100 天不被召回的记忆将被修剪。"
-  },
-  "memory_reinforce_bonus": {
-    "description": "记忆召回增强分数",
-    "type": "int",
-    "default": 20,
-    "hint": "当一条记忆被成功检索并返回给用户时，其 active_score 会增加此值。较高的值使经常被召回的记忆更难被遗忘。"
-  },
-  "enable_memory_prune": {
-    "description": "启用冷记忆修剪",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，active_score 降至阈值以下的记忆将从 ChromaDB 向量库中移除（节省存储和检索性能），但原始数据保留在 SQLite 中用于导出和考古。"
-  },
-  "memory_prune_threshold": {
-    "description": "修剪阈值",
-    "type": "int",
-    "default": 0,
-    "hint": "active_score 小于等于此值的记忆将被从向量库中修剪。默认值 0，配合衰减速率 1，意味着约 100 天未被召回的记忆会被修剪。"
-  },
-  "persona_model": {
-    "description": "更新画像使用的模型",
-    "type": "string",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "选择一个大模型来分析并更新用户画像。留空则使用当前默认模型。"
-  },
-  "persona_update_prompt": {
-    "description": "画像更新的提示词",
-    "type": "string",
-    "obvious_hint": true,
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "editor_theme": "vs-dark",
-    "default": "你是一个严谨的【用户信息档案员】。你的任务是根据今日的新增记忆，更新用户的档案数据。\n\n【当前档案】：\n{{current_persona}}\n\n【今日新增记忆】：\n{{memory_texts}}\n\n【核心原则 - 严禁幻觉】：\n⚠️ 你只能从【今日新增记忆】的文字中提取**明确写出的**事实信息。\n⚠️ 如果记忆中没有**直接提及**某项内容，你**绝对不能**添加、推测或脑补任何信息。\n⚠️ 例如：如果记忆只写\"聊了美食\"，你不能推测用户喜欢任何具体食物。只有记忆明确写\"喜欢XX食物\"，你才能将其加入 favorite_foods。\n\n【更新规则】：\n1. **逐条对照**：检查【今日新增记忆】中的每一条，只有明确提及的信息才能更新到档案。\n2. **保持原值**：如果记忆中没有提到某字段，保持【当前档案】中的原值不变。\n3. **列表追加**：hobbies、favorite_foods、dislikes 等列表字段，只追加记忆中明确提及的新内容，并去重。\n4. **禁止推断**：不要基于上下文推断、联想或猜测任何信息。\n5. **保留原有 basic_info**：basic_info 中的 qq_id、nickname、avatar_url、signature 等字段必须保持原值不变。\n\n【标签简化规则 - 必须遵守】：\n⚠️ 所有 hobbies、favorite_activities、favorite_items、personality_tags 字段的值必须使用【2-5个字的简短词汇】。\n⚠️ 禁止使用长句子或带括号的详细描述。\n⚠️ 示例：\n  ✅ 正确：\"玩我的世界\"、\"AI绘画\"、\"听音乐\"、\"看动漫\"\n  ❌ 错误：\"使用MC指令连接服务器\"、\"AI绘画（要求特定服装和姿势）\"\n⚠️ 如果记忆中有详细描述，请提取其核心活动作为简短标签。\n\n【字段定义 - 严格分类】：\n- basic_info: gender(性别), age(年龄), location(所在地), job(职业) - 其他字段保持原值\n- attributes:\n  - hobbies: 用户的活动类爱好，使用2-5字简短词汇（如：编程、看电影、打游戏、玩我的世界）\n  - skills: 用户掌握的技能（如：Python、钢琴、绘画）\n  - personality_tags: 用户明显表现出的性格特征（如：幽默、严谨）\n- preferences（严格按类别分配，禁止混淆）：\n  - favorite_foods: 用户喜欢的【食物/饮品】，如：西瓜、奶茶、火锅、冰美式、拿铁\n  - favorite_items: 用户喜欢的【具体物品/事物】，如：猫咪、手办、机械键盘、盲盒\n  - favorite_activities: 用户喜欢的【活动/娱乐方式】，使用2-5字简短词汇（如：看电影、打游戏、逛街、听音乐、AI绘画）\n  - dislikes: 用户明确表示讨厌的事物\n- social_graph:\n  - relationship_status: 保持原值不变\n  - interaction_stats: 保持原值不变\n  - important_people: 用户提到的重要的人（家人、朋友、伴侣等）\n- dev_metadata: tech_stack(技术栈) - 只记录明确提及的技术\n- shared_secrets: 如果用户分享了心事、秘密、烦恼或深层情感，设置为 true\n\n【禁止录入以下内容到 preferences 字段】：\n❌ 情感状态词：开心、快乐、幸福、温馨、感动\n❌ 互动行为词：摸头、聊天、陪伴、夸奖、鼓励\n❌ 抽象概念词：温暖、舒适、自由、安全感\n❌ 以上词汇应该被忽略，而不是录入任何字段\n\n【输出要求】：\n请直接返回更新后的完整 JSON 数据。不要包含 Markdown 标记，不要包含其他解释。",
-    "hint": "{{current_persona}}：当前用户画像JSON {{memory_texts}}：新增记忆列表"
-  },
-  "min_persona_update_memories": {
-    "description": "触发画像更新所需的最小新增记忆数",
-    "type": "int",
-    "default": 3,
-    "hint": "自上次画像更新以来，新增记忆达到此数量才会在凌晨触发画像更新"
-  },
-  "persona_update_max_concurrent": {
-    "description": "每日画像更新最大并发数",
-    "type": "int",
-    "default": 3,
-    "hint": "控制凌晨00:00画像更新时的最大并发LLM请求数，避免API限流。建议值：3-5"
-  },
-  "persona_update_delay": {
-    "description": "画像更新间隔延迟（秒）",
-    "type": "int",
-    "default": 5,
-    "hint": "每个用户画像更新后的延迟时间，进一步分散请求压力。设置为0则无延迟。建议值：3-10秒"
-  },
-  "enable_memory_folding": {
-    "description": "启用周总结折叠",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后每周按计划将近 N 天日级记忆折叠为一条 weekly 总结，写入向量库与索引。"
-  },
-  "weekly_folding_days": {
-    "description": "周总结折叠回溯天数",
-    "type": "int",
-    "default": 7,
-    "hint": "执行周总结时纳入最近多少天的 daily/private 记忆。"
-  },
-  "folding_min_samples": {
-    "description": "触发周总结最少样本数",
-    "type": "int",
-    "default": 3,
-    "hint": "候选日记条数不足该值时跳过周总结生成。"
-  },
-  "weekly_folding_weekday": {
-    "description": "周总结执行星期",
-    "type": "int",
-    "default": 6,
-    "hint": "0=周一 ... 6=周日。默认周日执行。"
-  },
-  "weekly_folding_hour": {
-    "description": "周总结执行小时",
-    "type": "int",
-    "default": 2,
-    "hint": "24小时制，默认凌晨 2 点。"
-  },
-  "weekly_folding_delay": {
-    "description": "周总结用户间隔延迟（秒）",
-    "type": "int",
-    "default": 1,
-    "hint": "批量用户执行时每个用户后的固定延迟。"
-  },
-  "weekly_folding_jitter": {
-    "description": "周总结用户间随机抖动（秒）",
-    "type": "int",
-    "default": 0,
-    "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
-  },
-  "weekly_folding_model": {
-    "description": "周总结使用模型",
-    "type": "string",
-    "_special": "select_provider",
-    "default": "",
-    "hint": "留空时回退到 summarize_model 或默认模型。"
-  },
-  "weekly_folding_prompt": {
-    "description": "周总结提示词",
-    "type": "string",
-    "obvious_hint": true,
-    "editor_mode": true,
-    "editor_language": "markdown",
-    "editor_theme": "vs-dark",
-    "default": "你是一名记忆整理助手。请根据下方【daily_summary 列表】生成一段周总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 保留关键人物/地点/事件/数值；\n3. 语言简洁，120~220字。\n\n【daily_summary 列表】\n{{memory_texts}}",
-    "hint": "{{memory_texts}}：最近多条日级总结列表"
-  },
-  "enable_profile_confidence": {
-    "description": "启用画像置信度机制",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，LLM 提取的新属性不会立即写入正式画像，而是作为提案暂存，需多次确认后转正。防止单次幻觉污染画像。"
-  },
-  "profile_confidence_threshold": {
-    "description": "提案转正阈值",
-    "type": "int",
-    "default": 2,
-    "hint": "新属性需要连续被 LLM 提取多少次才能转正写入画像。默认值 2 表示需要连续 2 次更新都提取到相同属性才确认。"
-  },
-  "enable_conflict_detection": {
-    "description": "启用偏好冲突检测",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，检测新属性与旧属性的矛盾（如喜欢猫 vs 猫毛过敏），冲突时保留旧值（保守策略）。"
-  },
-  "enable_strong_evidence_protection": {
-    "description": "启用强证据保护",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，basic_info 核心字段（性别、年龄、所在地、职业）需要记忆中有明确陈述才能修改，防止 LLM 推测性修改。"
-  },
-  "enable_command_filter": {
-    "description": "启用指令标识过滤",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后，插件会忽略以指定前缀开头的消息（通常是指令消息），避免将其记入长期记忆。"
-  },
-  "command_prefixes": {
-    "description": "指令前缀列表",
-    "type": "list",
-    "default": [
-      "/",
-      "!",
-      "#",
-      "~"
-    ],
-    "hint": "需要过滤的指令前缀，如 /、!、#、~ 等。当消息以这些前缀开头时，插件会跳过处理。"
-  },
-  "enable_full_command_detection": {
-    "description": "启用完整指令字符串检测",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后，会检测消息是否为完整的指令（全字符串匹配）。例如 'new' 会被识别为指令并跳过，但 'new world' 不会。"
-  },
-  "full_command_list": {
-    "description": "完整指令列表",
-    "type": "list",
-    "default": [
-      "new",
-      "help",
-      "reset",
-      "clear"
-    ],
-    "hint": "需要检测的完整指令列表（不包含前缀符号）。当消息（去除空白符后）完全等于列表中的某个指令时，插件会跳过处理。"
-  },
-  "embedding_provider": {
-    "description": "嵌入模型提供商 ID",
-    "type": "string",
-    "default": "",
-    "hint": "用于 ChromaDB 向量检索的嵌入模型提供商 ID。留空则使用默认的 ChromaDB 内置嵌入。"
-  },
-  "pillowmd_style_path": {
-    "description": "PillowMD 样式目录路径",
-    "type": "string",
-    "default": "",
-    "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
-  },
-  "list_memory_count": {
-    "description": "查询记忆指令默认返回的数量",
-    "type": "int",
-    "default": 5,
-    "hint": "使用 /mem_list 指令时默认返回的记忆条数。可在指令中使用 /mem_list <数量> 临时覆盖此值（最多50条）"
+  "embedding_misc": {
+    "description": "向量与渲染",
+    "type": "object",
+    "hint": "嵌入模型和渲染样式等杂项配置。",
+    "items": {
+      "embedding_provider": {
+        "description": "嵌入模型提供商 ID",
+        "type": "string",
+        "default": "",
+        "hint": "用于 ChromaDB 向量检索的嵌入模型提供商 ID。未配置或不可用时将仅输出告警日志，并跳过向量写入与检索。"
+      },
+      "pillowmd_style_path": {
+        "description": "PillowMD 样式目录路径",
+        "type": "string",
+        "default": "",
+        "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
+      }
+    }
   }
 }

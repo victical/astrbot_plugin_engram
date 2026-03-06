@@ -39,6 +39,19 @@ _SELF_RECALL_PATTERNS: tuple[str, ...] = (
     r"我.*(喜欢|讨厌|说过|提过)",
 )
 
+# 偏好/事实查询模式
+_PREFERENCE_FACT_PATTERNS: tuple[str, ...] = (
+    r"(喜欢|讨厌|爱吃|不吃|口味|偏好|习惯)",
+    r"(爱好|兴趣|擅长|技术栈|职业|年龄|生日|星座|生肖|所在地|住在)",
+    r"(我是谁|我的(信息|资料|档案))",
+)
+
+# 事件/叙事回溯模式
+_EVENT_NARRATIVE_PATTERNS: tuple[str, ...] = (
+    r"(发生|经过|后来|当时|那次|上次|之前)",
+    r"(聊了什么|说了什么|提到什么|怎么回事|过程)",
+)
+
 
 class IntentClassifier:
     """
@@ -73,6 +86,12 @@ class IntentClassifier:
         self._self_recall_patterns: tuple[Pattern[str], ...] = tuple(
             re.compile(pattern) for pattern in _SELF_RECALL_PATTERNS
         )
+        self._preference_patterns: tuple[Pattern[str], ...] = tuple(
+            re.compile(pattern) for pattern in _PREFERENCE_FACT_PATTERNS
+        )
+        self._event_patterns: tuple[Pattern[str], ...] = tuple(
+            re.compile(pattern) for pattern in _EVENT_NARRATIVE_PATTERNS
+        )
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -101,12 +120,53 @@ class IntentClassifier:
         # keyword 模式（默认）
         return self._keyword_check(text)
 
+    def classify_query(self, query: str) -> tuple[str, float]:
+        """
+        对检索查询做轻量分类，返回 (intent_type, intent_score)。
+
+        intent_type 候选：
+        - skip:            明显无需检索（空文本/极短噪声）
+        - recall:          普通回溯/泛检索
+        - preference_fact: 偏好/事实类（适合更强调关键词精确性）
+        - event_narrative: 事件叙事类（适合综合语义与关键词）
+        """
+        if query is None:
+            return "skip", 0.0
+
+        text = str(query).strip()
+        if not text:
+            return "skip", 0.0
+
+        compact = re.sub(r"[\s\W]+", "", text, flags=re.UNICODE)
+        if len(compact) < self._min_length:
+            return "skip", 0.0
+
+        # 极短寒暄/语气词：直接跳过，避免无效检索
+        trivial_tokens = {
+            "你好", "在吗", "嗯", "哦", "好的", "好", "ok", "OK", "哈", "哈哈", "收到"
+        }
+        if compact in trivial_tokens:
+            return "skip", 0.0
+
+        trigger_score = float(self._compute_trigger_score(text))
+        length_score = min(1.0, len(compact) / 20.0)
+        intent_type = self._classify_intent_type(text)
+
+        # 统一得分：触发分 + 长度分（便于日志观测）
+        intent_score = round(trigger_score + length_score, 3)
+        return intent_type, intent_score
+
     # ------------------------------------------------------------------
     # 关键词匹配（零成本快速路径）
     # ------------------------------------------------------------------
 
     def _keyword_check(self, text: str) -> bool:
         """通过多信号评分判断是否触发记忆检索"""
+        score = self._compute_trigger_score(text)
+        return score >= self._trigger_score_threshold
+
+    def _compute_trigger_score(self, text: str) -> int:
+        """计算关键词/句式触发分（强词+2，弱词+1，句式+1）。"""
         score = 0
 
         for trigger in self._strong_triggers:
@@ -120,11 +180,21 @@ class IntentClassifier:
         if self._pattern_mode and self._match_self_recall_pattern(text):
             score += 1
 
-        return score >= self._trigger_score_threshold
+        return score
 
     def _match_self_recall_pattern(self, text: str) -> bool:
         """匹配自我信息回溯句式"""
         return any(pattern.search(text) for pattern in self._self_recall_patterns)
+
+    def _classify_intent_type(self, text: str) -> str:
+        """将查询归类为 recall / preference_fact / event_narrative。"""
+        if any(pattern.search(text) for pattern in self._preference_patterns):
+            return "preference_fact"
+
+        if any(pattern.search(text) for pattern in self._event_patterns):
+            return "event_narrative"
+
+        return "recall"
 
     def _parse_weak_triggers(self) -> Set[str]:
         """从配置解析弱触发词列表"""

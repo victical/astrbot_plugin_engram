@@ -7,5 +7,15 @@ from .bond_calculator import BondCalculator
 from .llm_injector import LLMContextInjector
 from .intent_classifier import IntentClassifier
 from .profile_guardian import ProfileGuardian
+from .injection_strategy import TopicMemoryCacheService, ToolHintStrategyService
+from .config_preset import ConfigPresetService
 
-__all__ = ['BondCalculator', 'LLMContextInjector', 'IntentClassifier', 'ProfileGuardian']
+__all__ = [
+    'BondCalculator',
+    'LLMContextInjector',
+    'IntentClassifier',
+    'ProfileGuardian',
+    'TopicMemoryCacheService',
+    'ToolHintStrategyService',
+    'ConfigPresetService',
+]

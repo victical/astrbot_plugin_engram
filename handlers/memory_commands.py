@@ -71,9 +71,14 @@ class MemoryCommandHandler:
         result = [f"📜 最近的 {len(memories)} 条长期记忆：\n" + "—" * 15]
         for i, m in enumerate(memories):
             created_at = self.memory._ensure_datetime(m.created_at)
-            result.append(f"{i+1}. ⏰ {created_at.strftime('%m-%d %H:%M')}\n   📝 {m.summary}\n")
-        
-        result.append("\n💡 发送 /mem_view <序号> 可查看某条记忆的完整对话原文。")
+            short_id = str(getattr(m, "index_id", "") or "")[:8] or "未知ID"
+            result.append(
+                f"{i+1}. 🆔 {short_id} | ⏰ {created_at.strftime('%m-%d %H:%M')}\n"
+                f"   📝 {m.summary}\n"
+            )
+
+        result.append("\n💡 发送 /mem_view <序号或ID> 可查看某条记忆的完整对话原文。")
+        result.append("💡 发送 /mem_delete <ID> 可按记忆 ID 删除指定记忆。")
         result.append("💡 发送 /mem_list <数量> 可自定义查询条数。")
         return "\n".join(result)
     
@@ -134,7 +139,12 @@ class MemoryCommandHandler:
         Returns:
             str: 格式化的命令结果
         """
-        memories = await self.memory.retrieve_memories(user_id, query, limit=3)
+        memories = await self.memory.retrieve_memories(
+            user_id,
+            query,
+            limit=3,
+            force_retrieve=True,
+        )
         
         if not memories:
             return f"🔍 未找到与 '{query}' 相关的记忆。"
