@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 检索降级增强：向量检索异常或结果为空时，自动回退到 SQLite 关键词检索（保留时间范围与来源类型过滤）。
 - 写入链路解耦：`_summarize_private_chat` 调整为“先落 SQLite 索引与归档，再尝试写入向量”；向量失败时仅进入待补偿队列，不阻断主链路。
 - 路由瘦身（第三阶段）：`main.py` 的 `mem_*`、`profile_*`、`engram_force_*`、`rebuild_vector` 指令逻辑下沉到 handlers，`on_private_message` 的 OneBot 同步改为委托 `OneBotSyncHandler`，新增 `MemoryToolHandler` 承接工具检索输出构建，并将时间解析/类型归一化拆分到 `TimeExpressionService`。
+- 配置一致性核对工具：新增 `tools/check_config_sync.py`，自动生成 `reports/config_sync_report.md`（schema 配置项 ↔ 代码读取点）。
 - 测试入口标准化：新增 `tests/conftest.py` 统一导入路径与工作目录，支持在仓库内直接执行 `pytest -q`。
 - 新增最小 CI：GitHub Actions 在 `beta/main` 的 push 与 PR 自动执行 pytest（Python 3.11/3.12）。
 - 版本号统一：`main.py @register`、`metadata.yaml`、`CHANGELOG.md` 统一到 `1.5.4`。

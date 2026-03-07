@@ -159,6 +159,17 @@ pytest -q
 pytest -q tests/test_memory_delete_by_id.py tests/test_memory_fallback.py tests/test_summarize_persistence.py
 ```
 
+### 配置一致性自动核对
+
+可执行脚本自动对比「schema 配置项」与「代码读取点」：
+
+```bash
+python tools/check_config_sync.py
+```
+
+输出报告：
+- `reports/config_sync_report.md`
+
 ## 🧪 功能测试指南
 
 如果您需要验证插件的所有核心功能，请按照以下步骤操作：
