@@ -3,6 +3,8 @@ import time
 import pytest
 
 from astrbot_plugin_engram.main import EngramPlugin
+from astrbot_plugin_engram.handlers.tool_commands import MemoryToolHandler
+from astrbot_plugin_engram.services.time_parser import TimeExpressionService
 
 
 class _DummyEvent:
@@ -129,3 +131,28 @@ async def test_main_mem_search_force_retrieve_true():
     assert outputs
     assert "未找到" in outputs[0]
     assert logic.called_kwargs.get("force_retrieve") is True
+
+
+@pytest.mark.asyncio
+async def test_mem_search_tool_works_with_fallback_memories():
+    """工具检索链路在向量不可用（已fallback）时仍能返回结果。"""
+    plugin = EngramPlugin.__new__(EngramPlugin)
+    plugin.config = {
+        "enable_memory_search_tool": True,
+        "memory_search_tool_max_results": 3,
+    }
+
+    class _DummyLogic:
+        async def retrieve_memories(self, user_id, query, limit=3, **kwargs):
+            # 模拟 memory_manager 在向量不可用时的 fallback 返回
+            return ["🎯 88% | 🆔 abcdef12 | ⏰ 2026-03-07 10:00\n📝 归档：用户喜欢猫"]
+
+    plugin.logic = _DummyLogic()
+    plugin._tool_handler = MemoryToolHandler(plugin.config, plugin.logic)
+    plugin._time_parser = TimeExpressionService(config=plugin.config)
+
+    event = _DummyEvent(sender_id="u1", message="你记得我喜欢什么吗")
+    output = await plugin.mem_search_tool(event, query="我喜欢什么", limit=3)
+
+    assert "工具检索结果" in output
+    assert "用户喜欢猫" in output

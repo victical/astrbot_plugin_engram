@@ -73,7 +73,7 @@
 
 **验收标准**
 - [x] 关闭/失效 `embedding_provider` 后，`/mem_search` 仍返回可用结果（已补 fallback 单测）
-- [ ] 工具检索链路（`mem_search_tool`）在无向量时也可工作
+- [x] 工具检索链路（`mem_search_tool`）在无向量时也可工作（已补 `test_mem_search_tool_works_with_fallback_memories`）
 - [x] 不产生异常中断（只降级，不崩溃）
 
 **进度记录**
