@@ -36,3 +36,8 @@ Thumbs.db
 data/
 PROFILE_SYSTEM_IMPLEMENTATION_PLAN.md
 FUNCTION_TOOL_REFACTOR_NOTES.md
+
+# 开发辅助目录（插件运行不依赖）
+tools/
+reports/
+REFACTOR_CHECKLIST.md
