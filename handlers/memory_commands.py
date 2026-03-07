@@ -335,3 +335,44 @@ class MemoryCommandHandler:
         """执行 engram_force_summarize_all，返回完成文案。"""
         total = await self.memory.summarize_all_users()
         return f"✅ 全局记忆归档完成。已处理 {total} 位用户。"
+
+    async def handle_rebuild_vectors(self, full_rebuild_flag: bool, batch_size: int = 200) -> dict:
+        """执行向量重建并返回结果字典。"""
+        return await self.memory.rebuild_vector_collection(
+            full_rebuild=bool(full_rebuild_flag),
+            batch_size=batch_size,
+        )
+
+    @staticmethod
+    def build_rebuild_vector_result_text(full_rebuild_flag: bool, result: dict) -> str:
+        """格式化向量重建结果文案。"""
+        mode_text = "全量重建" if full_rebuild_flag else "增量重建"
+
+        success = bool(result.get("success", False))
+        total = int(result.get("total", 0))
+        rebuilt = int(result.get("rebuilt", 0))
+        failed = int(result.get("failed", 0))
+        message = str(result.get("message", "重建完成"))
+        backup_dir = str(result.get("backup_dir", "") or "")
+
+        extra_backup_line = f"\n备份目录：{backup_dir}" if backup_dir else ""
+
+        if success:
+            return (
+                f"✅ {message}\n"
+                f"- 模式：{mode_text}\n"
+                f"- 总索引：{total}\n"
+                f"- 成功写入：{rebuilt}\n"
+                f"- 失败：{failed}"
+                f"{extra_backup_line}"
+            )
+
+        return (
+            f"⚠️ {message}\n"
+            f"- 模式：{mode_text}\n"
+            f"- 总索引：{total}\n"
+            f"- 成功写入：{rebuilt}\n"
+            f"- 失败：{failed}\n"
+            f"💡 若 embedding_provider 变更或出现向量维度不匹配，请执行 /mem_rebuild_vector full 重新嵌入全部记忆"
+            f"{extra_backup_line}"
+        )

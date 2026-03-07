@@ -769,51 +769,6 @@ class EngramPlugin(Star):
         await self._profile_handler.handle_force_persona(user_id=user_id, days_int=days_int)
         yield event.plain_result(done_msg)
 
-    async def _run_rebuild_vectors(self, event: AstrMessageEvent, full_rebuild_flag: bool):
-        """执行向量重建并回传统一结果。"""
-        batch = 200
-
-        mode_text = "全量重建" if full_rebuild_flag else "增量重建"
-        yield event.plain_result(f"⏳ 正在执行向量库{mode_text}，请稍候...")
-
-        try:
-            result = await self.logic.rebuild_vector_collection(
-                full_rebuild=full_rebuild_flag,
-                batch_size=batch
-            )
-
-            success = bool(result.get("success", False))
-            total = int(result.get("total", 0))
-            rebuilt = int(result.get("rebuilt", 0))
-            failed = int(result.get("failed", 0))
-            message = str(result.get("message", "重建完成"))
-            backup_dir = str(result.get("backup_dir", "") or "")
-
-            extra_backup_line = f"\n备份目录：{backup_dir}" if backup_dir else ""
-
-            if success:
-                yield event.plain_result(
-                    f"✅ {message}\n"
-                    f"- 模式：{mode_text}\n"
-                    f"- 总索引：{total}\n"
-                    f"- 成功写入：{rebuilt}\n"
-                    f"- 失败：{failed}"
-                    f"{extra_backup_line}"
-                )
-            else:
-                yield event.plain_result(
-                    f"⚠️ {message}\n"
-                    f"- 模式：{mode_text}\n"
-                    f"- 总索引：{total}\n"
-                    f"- 成功写入：{rebuilt}\n"
-                    f"- 失败：{failed}\n"
-                    f"💡 若 embedding_provider 变更或出现向量维度不匹配，请执行 /mem_rebuild_vector full 重新嵌入全部记忆"
-                    f"{extra_backup_line}"
-                )
-        except Exception as e:
-            logger.error(f"Engram：重建向量库失败：{e}")
-            yield event.plain_result(f"❌ 向量库重建失败：{e}")
-
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mem_rebuild_vector")
     async def mem_rebuild_vector(self, event: AstrMessageEvent, mode: str = ""):
@@ -824,16 +779,30 @@ class EngramPlugin(Star):
             请执行 /mem_rebuild_vector full 重新嵌入全部记忆，否则旧记忆将无法检索。
         """
         full_rebuild_flag = str(mode or "").strip().lower() == "full"
-        async for result in self._run_rebuild_vectors(event, full_rebuild_flag):
-            yield result
+        mode_text = "全量重建" if full_rebuild_flag else "增量重建"
+        yield event.plain_result(f"⏳ 正在执行向量库{mode_text}，请稍候...")
+
+        try:
+            result = await self._mem_handler.handle_rebuild_vectors(full_rebuild_flag=full_rebuild_flag, batch_size=200)
+            yield event.plain_result(self._mem_handler.build_rebuild_vector_result_text(full_rebuild_flag, result))
+        except Exception as e:
+            logger.error(f"Engram：重建向量库失败：{e}")
+            yield event.plain_result(f"❌ 向量库重建失败：{e}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_rebuild_vectors")
     async def engram_rebuild_vectors(self, event: AstrMessageEvent, full_rebuild: str = "false", batch_size: str = ""):
         """[管理员] 兼容旧指令：重建向量库（仅 full 触发全量，batch 参数已弃用）"""
         full_rebuild_flag = str(full_rebuild or "").strip().lower() == "full"
-        async for result in self._run_rebuild_vectors(event, full_rebuild_flag):
-            yield result
+        mode_text = "全量重建" if full_rebuild_flag else "增量重建"
+        yield event.plain_result(f"⏳ 正在执行向量库{mode_text}，请稍候...")
+
+        try:
+            result = await self._mem_handler.handle_rebuild_vectors(full_rebuild_flag=full_rebuild_flag, batch_size=200)
+            yield event.plain_result(self._mem_handler.build_rebuild_vector_result_text(full_rebuild_flag, result))
+        except Exception as e:
+            logger.error(f"Engram：重建向量库失败：{e}")
+            yield event.plain_result(f"❌ 向量库重建失败：{e}")
 
     @filter.command("mem_export")
     async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):

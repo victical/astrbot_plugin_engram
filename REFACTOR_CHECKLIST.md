@@ -155,7 +155,7 @@
 
 **改造任务**
 - [x] 命令实现统一改为 main 转发 handler（mem_* / profile_* / engram_force_* 已迁移）
-- [~] 删除 main 中重复业务逻辑（已移除命令与 OneBot 同步重复实现，LLM 工具链路仍在 main）
+- [~] 删除 main 中重复业务逻辑（已移除命令、向量重建指令与 OneBot 同步重复实现，LLM 工具链路仍在 main）
 - [x] handler 接口参数标准化（输入/输出）
 
 **验收标准**
@@ -166,7 +166,7 @@
 - 完成日期：
 - 负责人：
 - Commit/PR：
-- 备注：已完成第一阶段路由瘦身：命令逻辑转发至 handlers，并保留 `__new__` 测试兼容回退逻辑。
+- 备注：已完成第一阶段路由瘦身：`mem_* / profile_* / engram_force_* / rebuild_vector` 命令逻辑转发至 handlers，并保留 `__new__` 测试兼容回退逻辑。
 
 ---
 
