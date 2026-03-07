@@ -70,7 +70,7 @@ class ExportHandler:
             yield event.plain_result(stats_text)
             
         except Exception as e:
-            logger.error(f"Save export file failed: {e}")
+            logger.error(f"Engram：保存导出文件失败：{e}")
             yield event.plain_result(f"❌ 保存文件失败：{e}")
     
     async def handle_stats_command(self, event):
@@ -197,7 +197,7 @@ class ExportHandler:
             yield event.plain_result(stats_text)
             
         except Exception as e:
-            logger.error(f"Save export file failed: {e}")
+            logger.error(f"Engram：保存导出文件失败：{e}")
             yield event.plain_result(f"❌ 保存文件失败：{e}")
     
     def _build_export_all_stats(self, stats, format, export_path):

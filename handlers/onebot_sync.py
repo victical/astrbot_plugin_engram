@@ -87,23 +87,23 @@ class OneBotSyncHandler:
                     try:
                         uid_int = int(user_id)
                     except (TypeError, ValueError) as e:
-                        logger.debug(f"Engram OneBotSync: user_id cast to int failed ({user_id}), fallback raw id: {e}")
+                        logger.debug(f"Engram OneBot 同步：user_id 转 int 失败（{user_id}），已回退原始 ID：{e}")
                         uid_int = user_id
                     
                     stranger_info = await bot.get_stranger_info(user_id=uid_int)
                     if stranger_info:
                         # 解析详细信息
                         self._parse_stranger_info(stranger_info, update_payload, user_name)
-                        logger.info(f"Engram: Synced OneBot info for {user_id}: gender={update_payload['basic_info'].get('gender', 'unknown')}, age={update_payload['basic_info'].get('age', 'unknown')}")
+                        logger.info(f"Engram：已同步 OneBot 用户信息 user_id={user_id}，gender={update_payload['basic_info'].get('gender', '未知')}，age={update_payload['basic_info'].get('age', '未知')}")
             except Exception as api_err:
-                logger.debug(f"Engram: OneBot API call skipped or failed: {api_err}")
+                logger.debug(f"Engram：OneBot API 调用已跳过或失败：{api_err}")
 
             await self.profile.update_user_profile(user_id, update_payload)
             self._last_sync[user_id] = time.time()
             return True
             
         except Exception as e:
-            logger.error(f"Auto update basic info failed: {e}")
+            logger.error(f"Engram：自动更新基础信息失败：{e}")
             return False
     
     def _parse_stranger_info(self, stranger_info: dict, update_payload: dict, user_name: str):

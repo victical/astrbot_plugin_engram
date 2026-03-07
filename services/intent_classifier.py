@@ -69,7 +69,7 @@ class IntentClassifier:
         # 从配置读取模式，默认 keyword
         self._mode: str = str(self._config.get("memory_intent_mode", "keyword")).lower()
         if self._mode not in ("disabled", "keyword", "llm"):
-            logger.warning(f"Engram IntentClassifier: unknown mode '{self._mode}', falling back to 'keyword'")
+            logger.warning(f"Engram 意图分类器：未知模式 '{self._mode}'，已回退到 'keyword'")
             self._mode = "keyword"
 
         # 关键词模式参数（防御性转换：空字符串、非法值均回退默认 4）
@@ -221,7 +221,7 @@ class IntentClassifier:
     async def _llm_check(self, text: str) -> bool:
         """调用小模型判断是否需要记忆检索"""
         if not self._context:
-            logger.warning("Engram IntentClassifier: LLM mode enabled but no context, falling back to keyword")
+            logger.warning("Engram 意图分类器：LLM 模式已启用但缺少 context，已回退到 keyword")
             return self._keyword_check(text)
 
         try:
@@ -238,7 +238,7 @@ class IntentClassifier:
                 provider = self._context.get_using_provider()
 
             if not provider:
-                logger.warning("Engram IntentClassifier: no LLM provider available, falling back to keyword")
+                logger.warning("Engram 意图分类器：无可用 LLM 提供商，已回退到 keyword")
                 return self._keyword_check(text)
 
             prompt = _LLM_INTENT_PROMPT.format(query=text)
@@ -251,9 +251,9 @@ class IntentClassifier:
             else:
                 cleaned = answer.strip().replace("。", "").replace(".", "").replace("，", "").replace(",", "")
                 result = cleaned in ("是", "Yes", "yes", "Y", "y", "需要", "true", "True")
-            logger.debug(f"Engram IntentClassifier LLM: query='{text[:30]}' -> {answer[:5]} -> retrieve={result}")
+            logger.debug(f"Engram 意图分类器 LLM：query='{text[:30]}' -> {answer[:5]} -> retrieve={result}")
             return result
 
         except Exception as e:
-            logger.warning(f"Engram IntentClassifier: LLM check failed ({e}), falling back to keyword")
+            logger.warning(f"Engram 意图分类器：LLM 检查失败（{e}），已回退到 keyword")
             return self._keyword_check(text)

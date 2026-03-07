@@ -38,7 +38,7 @@ def get_zodiac(year: int, month: int, day: int) -> str:
         spring = ZhDate(year, 1, 1).to_datetime().date()
         zodiac_year = year if current >= spring else year - 1
     except Exception as e:
-        logger.debug(f"Engram utils.get_zodiac fallback to solar year={year} due to lunar parse error: {e}")
+        logger.debug(f"Engram：utils.get_zodiac 农历解析失败，已回退使用公历年份 year={year}：{e}")
         zodiac_year = year
     index = (zodiac_year - 2020) % 12
     return zodiacs[index]
