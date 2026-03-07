@@ -1512,7 +1512,7 @@ class MemoryManager:
         self,
         user_id,
         query,
-        limit=3,
+        limit=None,
         start_time=None,
         end_time=None,
         source_types=None,
@@ -1523,6 +1523,19 @@ class MemoryManager:
         await self._ensure_chroma_initialized()
 
         loop = asyncio.get_event_loop()
+
+        # limit 统一归一：默认读取配置 max_recent_memories
+        try:
+            configured_limit = int(self.config.get("max_recent_memories", 3))
+        except (TypeError, ValueError):
+            configured_limit = 3
+        configured_limit = max(1, min(50, configured_limit))
+
+        try:
+            request_limit = int(limit) if limit is not None else configured_limit
+        except (TypeError, ValueError):
+            request_limit = configured_limit
+        limit = max(1, min(50, request_limit))
 
         # 查询分类：动态阈值与权重调整
         # 兼容兜底：防止旧版 IntentClassifier 缺失 classify_query 导致崩溃
@@ -1673,13 +1686,25 @@ class MemoryManager:
         metadatas = results.get('metadatas', [[]])[0] if 'metadatas' in results else []
         memory_data = []
 
-        # 提取查询关键词（正则一次性分割：匹配所有非单词字符）
-        query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
+        # 提取查询关键词
+        # - legacy: 正则词切分
+        # - ngram: 中英混合 n-gram（配置开关）
+        enable_ngram_keyword_rank = bool(self.config.get("enable_ngram_keyword_rank", True))
+        if enable_ngram_keyword_rank:
+            query_keywords = {k.lower() for k in self._generate_query_keywords(query)}
+        else:
+            query_keywords = {k.lower() for k in re.split(r'[^\w]+', query) if k.strip()}
 
-        # BM25 参数
+        # BM25 参数（legacy 模式）
         _bm25_k1 = 1.2
         _bm25_b = 0.75
         _avg_doc_len = 80  # 摘要的典型长度估计
+
+        # ngram 模式使用轻量 corpus_stats（可逐步增强 df 统计）
+        corpus_stats = {
+            "total_docs": max(1, len(results.get('ids', [[]])[0] if results.get('ids') else [])),
+            "keyword_doc_freq": {},
+        }
 
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
@@ -1693,19 +1718,22 @@ class MemoryManager:
             summary = results['documents'][0][i]
             metadata = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
 
-            # BM25 风格关键词匹配：TF 饱和 + 文档长度归一化
-            keyword_score = 0.0
-            summary_lower = summary.lower()
-            doc_len = max(1, len(summary_lower))
+            if enable_ngram_keyword_rank:
+                keyword_score, _ = self._calc_keyword_score(query, summary, corpus_stats)
+            else:
+                # BM25 风格关键词匹配：TF 饱和 + 文档长度归一化
+                keyword_score = 0.0
+                summary_lower = summary.lower()
+                doc_len = max(1, len(summary_lower))
 
-            for keyword in query_keywords:
-                if keyword in summary_lower:
-                    tf = summary_lower.count(keyword)
-                    # BM25 TF 饱和公式：高频词收益递减
-                    norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
-                    # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
-                    keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
-                    keyword_score += norm_tf * keyword_weight
+                for keyword in query_keywords:
+                    if keyword in summary_lower:
+                        tf = summary_lower.count(keyword)
+                        # BM25 TF 饱和公式：高频词收益递减
+                        norm_tf = (tf * (_bm25_k1 + 1)) / (tf + _bm25_k1 * (1 - _bm25_b + _bm25_b * doc_len / _avg_doc_len))
+                        # 长关键词权重更高（近似 IDF），短词保底 1.0（中文单字词如"猫"也很重要）
+                        keyword_weight = max(1.0, min(3.0, len(keyword) / 2.0))
+                        keyword_score += norm_tf * keyword_weight
 
             memory_data.append({
                 'index_id': index_id,

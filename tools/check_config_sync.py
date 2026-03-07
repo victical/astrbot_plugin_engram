@@ -47,13 +47,21 @@ EXCLUDE_PARTS = {
 
 # 读取模式：尽量覆盖项目里常见写法
 CONFIG_PATTERNS = [
-    re.compile(r"\bself\.config\.get\(\s*['\"]([^'\"]+)['\"]"),
-    re.compile(r"\bconfig\.get\(\s*['\"]([^'\"]+)['\"]"),
-    re.compile(r"\bself\._config\.get\(\s*['\"]([^'\"]+)['\"]"),
-    re.compile(r"\b_config\.get\(\s*['\"]([^'\"]+)['\"]"),
-    re.compile(r"\bself\.config\[\s*['\"]([^'\"]+)['\"]\s*\]"),
-    re.compile(r"\bconfig\[\s*['\"]([^'\"]+)['\"]\s*\]"),
+    re.compile(r"\bself\.config\.get\(\s*['\"]([^'\"]+)['\"]", re.MULTILINE),
+    re.compile(r"\bconfig\.get\(\s*['\"]([^'\"]+)['\"]", re.MULTILINE),
+    re.compile(r"\bself\._config\.get\(\s*['\"]([^'\"]+)['\"]", re.MULTILINE),
+    re.compile(r"\b_config\.get\(\s*['\"]([^'\"]+)['\"]", re.MULTILINE),
+    re.compile(r"\bbase_config\.get\(\s*['\"]([^'\"]+)['\"]", re.MULTILINE),
+    re.compile(r"\bself\.config\[\s*['\"]([^'\"]+)['\"]\s*\]", re.MULTILINE),
+    re.compile(r"\bconfig\[\s*['\"]([^'\"]+)['\"]\s*\]", re.MULTILINE),
 ]
+
+# 运行时通过变量间接读取的配置项（静态正则难以直接命中）
+DYNAMIC_CONFIG_KEYS = {
+    "weekly_folding_model",
+    "monthly_folding_model",
+    "yearly_folding_model",
+}
 
 
 @dataclass
@@ -107,20 +115,28 @@ def collect_usages(files: Iterable[Path]) -> Dict[str, List[Usage]]:
     for file_path in files:
         rel = file_path.relative_to(ROOT).as_posix()
         try:
-            lines = file_path.read_text(encoding="utf-8").splitlines()
+            text = file_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
 
-        for i, line in enumerate(lines, start=1):
-            line_keys: Set[str] = set()
-            for pattern in CONFIG_PATTERNS:
-                for m in pattern.finditer(line):
-                    key = m.group(1).strip()
-                    if key:
-                        line_keys.add(key)
+        lines = text.splitlines()
 
-            for key in sorted(line_keys):
-                key_usages[key].append(Usage(key=key, file=rel, line=i, code=line.strip()))
+        seen: Set[Tuple[str, int]] = set()
+        for pattern in CONFIG_PATTERNS:
+            for m in pattern.finditer(text):
+                key = m.group(1).strip()
+                if not key:
+                    continue
+
+                # 根据 match 偏移量推导行号
+                line_no = text.count("\n", 0, m.start()) + 1
+                dedupe_key = (key, line_no)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+
+                code_line = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else ""
+                key_usages[key].append(Usage(key=key, file=rel, line=line_no, code=code_line))
 
     return key_usages
 
@@ -204,6 +220,17 @@ def main() -> int:
     schema_keys = load_schema_keys(SCHEMA_PATH)
     files = list(iter_code_files())
     code_usages = collect_usages(files)
+
+    # 注入已知动态读取项，避免被误判为 schema_only
+    for key in sorted(DYNAMIC_CONFIG_KEYS):
+        code_usages.setdefault(key, []).append(
+            Usage(
+                key=key,
+                file="core/memory_manager.py",
+                line=0,
+                code="(dynamic key usage via model_config_key)",
+            )
+        )
 
     report = build_markdown_report(schema_keys, code_usages)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)

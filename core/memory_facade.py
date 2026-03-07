@@ -134,7 +134,7 @@ class MemoryFacade:
         self,
         user_id,
         query,
-        limit=3,
+        limit=None,
         start_time=None,
         end_time=None,
         source_types=None,
