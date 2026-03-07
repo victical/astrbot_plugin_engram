@@ -143,7 +143,7 @@
 
 ### P1-1 main.py 路由瘦身（业务逻辑下沉到 handlers）
 
-- 状态：`[~] 进行中`
+- 状态：`[x] 已完成`
 - 优先级：中高
 - 目标：避免 main 与 handler 双份逻辑漂移。
 
@@ -155,18 +155,18 @@
 
 **改造任务**
 - [x] 命令实现统一改为 main 转发 handler（mem_* / profile_* / engram_force_* 已迁移）
-- [~] 删除 main 中重复业务逻辑（已移除命令、向量重建指令与 OneBot 同步重复实现；LLM 工具输出构建已下沉，时间解析等工具参数收口仍在 main）
+- [x] 删除 main 中重复业务逻辑（已移除命令、向量重建指令与 OneBot 同步重复实现；LLM 工具输出构建已下沉，时间解析与类型归一化已拆分至 `TimeExpressionService`）
 - [x] handler 接口参数标准化（输入/输出）
 
 **验收标准**
-- [~] main.py 明显缩短（仅路由+参数校验）
+- [x] main.py 明显缩短（仅路由+参数校验）
 - [x] 功能行为无回归（指令结果一致，pytest 34 passed）
 
 **进度记录**
 - 完成日期：
 - 负责人：
 - Commit/PR：
-- 备注：已完成第二阶段路由瘦身：`mem_* / profile_* / engram_force_* / rebuild_vector` 命令逻辑转发至 handlers，`_build_memory_search_output` 下沉到 `MemoryToolHandler`；并保留 `__new__` 测试兼容回退逻辑。
+- 备注：已完成第三阶段路由瘦身：`mem_* / profile_* / engram_force_* / rebuild_vector` 命令逻辑转发至 handlers，`_build_memory_search_output` 下沉到 `MemoryToolHandler`，`_parse_time_expr/_normalize_source_types` 下沉到 `TimeExpressionService`；并保留 `__new__` 测试兼容回退逻辑。
 
 ---
 

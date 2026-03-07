@@ -9,6 +9,7 @@ from .intent_classifier import IntentClassifier
 from .profile_guardian import ProfileGuardian
 from .injection_strategy import TopicMemoryCacheService, ToolHintStrategyService
 from .config_preset import ConfigPresetService
+from .time_parser import TimeExpressionService
 
 __all__ = [
     'BondCalculator',
@@ -18,4 +19,5 @@ __all__ = [
     'TopicMemoryCacheService',
     'ToolHintStrategyService',
     'ConfigPresetService',
+    'TimeExpressionService',
 ]
