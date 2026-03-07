@@ -84,7 +84,7 @@ class ProfileRenderer:
                     if os.path.isdir(sub_p):
                         font_search_paths.append(sub_p)
             except Exception as e:
-                logger.debug(f"Engram ProfileRenderer: scan custom style path failed ({custom_style_path}): {e}")
+                logger.debug(f"Engram 画像渲染器：扫描自定义样式路径失败（{custom_style_path}）：{e}")
         
         font_search_paths.extend([
             os.path.join(self.plugin_data_dir, "fonts"),
@@ -105,10 +105,10 @@ class ProfileRenderer:
                             best_match = f
                             break
                     self._font_path = os.path.join(sp, best_match)
-                    logger.info(f"Engram: Using font: {self._font_path}")
+                    logger.info(f"Engram：使用字体文件：{self._font_path}")
                     return self._font_path
             except Exception as e:
-                logger.debug(f"Engram ProfileRenderer: scan font path failed ({sp}): {e}")
+                logger.debug(f"Engram 画像渲染器：扫描字体路径失败（{sp}）：{e}")
                 continue
         return None
     
@@ -120,7 +120,7 @@ class ProfileRenderer:
                 return ImageFont.truetype(font_path, size)
             return ImageFont.load_default()
         except Exception as e:
-            logger.debug(f"Engram ProfileRenderer: load font failed(size={size}), fallback default: {e}")
+            logger.debug(f"Engram 画像渲染器：加载字体失败（size={size}），已回退默认字体：{e}")
             return ImageFont.load_default()
     
     async def _ensure_session(self):
@@ -148,12 +148,12 @@ class ProfileRenderer:
                 if os.path.getsize(cache_file) > 1024:
                     return Image.open(cache_file).convert("RGBA")
             except Exception as e:
-                logger.debug(f"Failed to load cached avatar for {user_id}: {e}")
+                logger.debug(f"Engram 画像渲染器：加载用户 {user_id} 的头像缓存失败：{e}")
                 # 缓存文件损坏，删除它
                 try:
                     os.remove(cache_file)
                 except Exception as remove_err:
-                    logger.debug(f"Engram ProfileRenderer: remove broken avatar cache failed ({cache_file}): {remove_err}")
+                    logger.debug(f"Engram 画像渲染器：删除损坏头像缓存失败（{cache_file}）：{remove_err}")
         
         # 缓存不存在或无效，下载头像
         try:
@@ -166,13 +166,13 @@ class ProfileRenderer:
                     # 保存到缓存
                     try:
                         avatar_img.save(cache_file, "PNG")
-                        logger.debug(f"Cached avatar for {user_id}")
+                        logger.debug(f"Engram 画像渲染器：已缓存用户 {user_id} 的头像")
                     except Exception as e:
-                        logger.debug(f"Failed to cache avatar for {user_id}: {e}")
+                        logger.debug(f"Engram 画像渲染器：缓存用户 {user_id} 头像失败：{e}")
                     
                     return avatar_img
         except Exception as e:
-            logger.debug(f"Failed to download avatar for {user_id}: {e}")
+            logger.debug(f"Engram 画像渲染器：下载用户 {user_id} 头像失败：{e}")
         
         return None
 
@@ -202,7 +202,7 @@ class ProfileRenderer:
         
         return tag_categories
 
-    def _calculate_required_height(self, profile, memory_count):
+    def _calculate_required_height(self, profile, memory_count, evidence_summary=None):
         """根据画像内容动态计算所需画布高度"""
         # 基础信息区域高度估算
         basic = profile.get("basic_info", {})
@@ -226,15 +226,26 @@ class ProfileRenderer:
         # 分隔线(30) + 标题(25) + 进度条(60) + 成就(60) + 提示(45) = 220
         bond_height = 220
         
+        # 证据摘要区域高度（可选）
+        evidence_height = 0
+        if self.config.get("show_profile_evidence_in_image", False) and evidence_summary:
+            try:
+                evidence_count = len(evidence_summary)
+            except Exception:
+                evidence_count = 0
+            if evidence_count > 0:
+                # 标题 + 每行证据 + 区块间距
+                evidence_height = 45 + min(evidence_count, 8) * 28 + 30
+
         # 底部边距
         margin = 80
-        
-        total = base_height + tag_height + bond_height + margin
-        
-        # 设置最小和最大高度
-        return max(1000, min(total, 2000))
 
-    def _render_sync(self, user_id, profile, memory_count, avatar_img, height=900):
+        total = base_height + tag_height + bond_height + evidence_height + margin
+
+        # 设置最小和最大高度
+        return max(1000, min(total, 2200))
+
+    def _render_sync(self, user_id, profile, memory_count, avatar_img, height=900, evidence_summary=None):
         """同步的图像渲染逻辑（CPU密集型操作，在线程池中执行）"""
         basic = profile.get("basic_info", {})
         attrs = profile.get("attributes", {})
@@ -283,7 +294,7 @@ class ProfileRenderer:
                 draw.ellipse((av_x-5, av_y-5, av_x+avatar_size+5, av_y+avatar_size+5), fill="white")
                 im.paste(avatar_img, (av_x, av_y), mask=mask)
             except Exception as e:
-                logger.debug(f"Failed to render avatar for {user_id}: {e}")
+                logger.debug(f"Engram 画像渲染器：渲染用户 {user_id} 头像失败：{e}")
         
         # 5. 文字信息
         curr_y = 220
@@ -426,13 +437,29 @@ class ProfileRenderer:
             if len(hint_text) > 35:
                 hint_text = hint_text[:34] + "..."
             draw.text((margin+35, badge_y), hint_text, fill=colors["text_dim"], font=f_tag)
-        
+
+        # 8. 证据摘要（可选）
+        if self.config.get("show_profile_evidence_in_image", False) and evidence_summary:
+            sec_y = badge_y + 45
+            draw.line([(margin+30, sec_y), (W-margin-30, sec_y)], fill=colors["grid"], width=1)
+            sec_y += 22
+            draw.text((margin+35, sec_y), "证据摘要", fill=colors["accent"], font=f_title)
+            sec_y += 38
+
+            for item in evidence_summary[:8]:
+                field = str(item.get("field", ""))
+                count = int(item.get("evidence_count", 0) or 0)
+                field_text = field if len(field) <= 34 else field[:33] + "..."
+                line = f"• {field_text} ({count})"
+                draw.text((margin+45, sec_y), line, fill=colors["text_dim"], font=f_tag)
+                sec_y += 28
+
         # 输出（CPU密集型操作）
         img_byte_arr = io.BytesIO()
         im.save(img_byte_arr, format='PNG')
         return img_byte_arr.getvalue()
     
-    async def render(self, user_id, profile, memory_count=0):
+    async def render(self, user_id, profile, memory_count=0, evidence_summary=None):
         """渲染用户画像图片（异步包装，避免阻塞事件循环）"""
         # 1. 异步获取头像（如果需要）
         basic = profile.get("basic_info", {})
@@ -442,7 +469,7 @@ class ProfileRenderer:
             avatar_img = await self._get_cached_avatar(user_id, avatar_url)
         
         # 2. 动态计算高度
-        required_height = self._calculate_required_height(profile, memory_count)
+        required_height = self._calculate_required_height(profile, memory_count, evidence_summary=evidence_summary)
         
         # 3. 在线程池中执行CPU密集型的图像渲染操作
         loop = asyncio.get_event_loop()
@@ -453,5 +480,6 @@ class ProfileRenderer:
             profile,
             memory_count,
             avatar_img,
-            required_height  # 新增参数
+            required_height,
+            evidence_summary,
         )

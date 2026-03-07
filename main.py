@@ -527,6 +527,20 @@ class EngramPlugin(Star):
         result = await self._profile_handler.handle_profile_set(user_id=user_id, key=key, value=value)
         yield event.plain_result(result)
 
+    @profile_group.command("rollback")
+    async def profile_rollback(self, event: AstrMessageEvent, steps: str = "1"):
+        """回滚用户画像到历史版本（默认回滚 1 步）"""
+        user_id = event.get_sender_id()
+        result = await self._profile_handler.handle_profile_rollback(user_id=user_id, steps=steps)
+        yield event.plain_result(result)
+
+    @profile_group.command("evidence")
+    async def profile_evidence(self, event: AstrMessageEvent, top_n: str = "8"):
+        """查看画像证据摘要"""
+        user_id = event.get_sender_id()
+        result = await self._profile_handler.handle_profile_evidence(user_id=user_id, top_n=top_n)
+        yield event.plain_result(result)
+
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize")
     async def force_summarize(self, event: AstrMessageEvent):

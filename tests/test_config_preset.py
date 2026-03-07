@@ -51,6 +51,8 @@ def test_apply_preset_from_grouped_runtime_config_values():
     assert applied["memory_query_max_results"] == 120
     assert applied["rank_strategy"] == "hybrid"
     assert applied["memory_tool_hint_mode"] == "always"
+    assert applied["enable_profile_meta"] is True
+    assert applied["profile_preference_ttl_days"] == 120
 
 
 def test_apply_preset_from_grouped_schema_like_items_shape():
@@ -84,3 +86,9 @@ def test_grouped_schema_contains_preset_field_and_sections():
     assert "retrieval_ranking" in schema
     assert "tool_search" in schema
     assert "embedding_misc" in schema
+
+    persona_items = schema["persona"]["items"]
+    assert "enable_profile_meta" in persona_items
+    assert "profile_history_limit" in persona_items
+    assert "profile_preference_ttl_days" in persona_items
+    assert "show_profile_evidence_in_image" in persona_items

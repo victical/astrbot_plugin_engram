@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- 画像系统升级：新增 `_meta` 证据元数据（`last_seen_at` / `evidence_count` / `evidence_refs`）、画像快照历史与 `/profile rollback` 回滚能力。
+- 新增画像证据查询指令 `/profile evidence [top_n]`，可查看字段证据摘要。
+- 新增测试：`tests/test_profile_meta.py`、`tests/test_profile_rollback.py`、`tests/test_profile_ttl_decay.py`、`tests/test_profile_commands.py`。
+
+### Changed
+- `ProfileGuardian.validate_update()` 返回结构化决策：`accepted_fields` / `rejected_fields` / `pending_fields` / `reasons` / `field_layers`。
+- 偏好冲突由“直接丢弃”调整为“进入 pending_proposals 等待后续证据”。
+- 画像更新流程改为“两步式”：proposal -> guardian 决策 -> snapshot -> 落盘。
+- `likes/dislikes` 增加 TTL 衰减机制（基于证据时间）。
+- `/profile show` 支持可选证据摘要渲染（`show_profile_evidence_in_image=false` 默认关闭）。
+- 配置与预设联动新增画像策略项：`enable_profile_meta`、`profile_history_limit`、`profile_preference_ttl_days`、`show_profile_evidence_in_image`。
+
 ## [1.5.4] - 2026-03-07
 
 ### Changed

@@ -14,6 +14,9 @@
 ### 2. 深度用户画像 (User Persona)
 - **多维建模**：自动维护包含基础信息、性格特征、偏好、禁忌及关系状态的结构化画像。
 - **每日深度构建**：系统会在每日凌晨自动回顾全天记忆，当信息积累达到阈值（可配置）时，触发一次深度的画像重塑。
+- **证据链元数据**：为画像字段记录 `last_seen_at / evidence_count / evidence_refs`，支持可解释追踪。
+- **画像快照回滚**：默认保留最近 5 版画像，支持 `/profile rollback` 快速回退误更新。
+- **偏好 TTL 衰减**：`likes/dislikes` 长期无新证据会自动衰减，降低陈旧偏好污染。
 - **上下文注入**：按照 `用户画像 > 长期记忆 > 当前上下文` 的优先级自动注入 System Prompt，实现极高的人格化交互。
 
 ### 3. 高性能与成本优化
@@ -49,6 +52,8 @@
 | :--- | :--- |
 | `/profile show` | 查看当前的结构化用户画像（手账风格图片） |
 | `/profile set <键> <值>` | 手动设置画像字段（如：`/profile set basic_info.job 学生`） |
+| `/profile rollback [steps]` | 回滚到历史画像版本（默认回滚 1 步） |
+| `/profile evidence [top_n]` | 查看画像证据摘要（字段证据次数与最近证据） |
 | `/profile clear` | 重置用户画像（需二次确认） |
 
 ### 管理员指令
@@ -124,6 +129,10 @@ data/plugins_data/astrbot_plugin_engram/exports/
 - **画像更新使用的模型**：用于分析并更新用户画像的大模型（留空则使用默认模型）。
 - **画像更新并发限制**：每日 00:00 批量更新时的最大并发 LLM 请求数（默认 3，避免 API 限流）。
 - **画像更新间隔延迟**：每个用户画像更新之间的延迟秒数（默认 5 秒，避免瞬间请求激增）。
+- **画像元数据开关**：`enable_profile_meta`，记录字段证据次数和时间（默认开启）。
+- **画像历史保留数**：`profile_history_limit`，控制可回滚版本数量（默认 5）。
+- **偏好 TTL**：`profile_preference_ttl_days`，控制 likes/dislikes 多久无证据后衰减（默认 90 天）。
+- **画像图片证据摘要**：`show_profile_evidence_in_image`，开启后 `/profile show` 附加证据摘要分节（默认关闭）。
 
 ### 其他配置
 - **检索召回记忆数量**：检索时召回的最大长期记忆数量（默认 3 条）。
@@ -209,6 +218,7 @@ python tools/check_config_sync.py
 - **SQLite**: `engram_memories.db` (存储原文、索引及时间链)。
 - **ChromaDB**: `engram_chroma/` (存储语义向量)。
 - **JSON Persona**: `engram_personas/{user_id}.json` (存储用户画像)。
+- **Persona History**: `engram_personas/history/{user_id}.json` (存储画像快照历史，用于回滚)。
 - **导出数据**: `exports/` (存储用户导出的微调数据文件)。
 
 ### 撤销删除数据说明

@@ -32,6 +32,11 @@ class ConfigPresetService:
             "memory_reinforce_bonus": 15,
             "enable_memory_prune": True,
             "memory_prune_threshold": 0,
+            "enable_profile_meta": True,
+            "profile_history_limit": 8,
+            "profile_preference_ttl_days": 60,
+            "profile_confidence_threshold": 3,
+            "show_profile_evidence_in_image": False,
         },
         # 均衡：默认推荐
         "balanced": {
@@ -52,6 +57,11 @@ class ConfigPresetService:
             "memory_reinforce_bonus": 20,
             "enable_memory_prune": True,
             "memory_prune_threshold": 0,
+            "enable_profile_meta": True,
+            "profile_history_limit": 5,
+            "profile_preference_ttl_days": 90,
+            "profile_confidence_threshold": 2,
+            "show_profile_evidence_in_image": False,
         },
         # 偏激进：更高召回和更强探索
         "aggressive": {
@@ -71,6 +81,11 @@ class ConfigPresetService:
             "memory_decay_rate": 1,
             "memory_reinforce_bonus": 25,
             "enable_memory_prune": False,
+            "enable_profile_meta": True,
+            "profile_history_limit": 3,
+            "profile_preference_ttl_days": 120,
+            "profile_confidence_threshold": 2,
+            "show_profile_evidence_in_image": False,
         },
     }
 
@@ -112,11 +127,11 @@ class ConfigPresetService:
             return dict(base_config)
 
         if mode not in self.PRESETS:
-            logger.warning("Engram: unknown config_preset_mode=%s, fallback to balanced", mode)
+            logger.warning("Engram：未知配置预设模式 config_preset_mode=%s，已回退到 balanced", mode)
             mode = "balanced"
 
         merged = dict(base_config)
         merged.update(self.PRESETS[mode])
 
-        logger.info("Engram: applied config preset mode=%s (%d keys)", mode, len(self.PRESETS[mode]))
+        logger.info("Engram：已应用配置预设 mode=%s（覆盖 %d 个参数）", mode, len(self.PRESETS[mode]))
         return merged

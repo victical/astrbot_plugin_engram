@@ -23,6 +23,29 @@
 
 ---
 
+## 画像系统优化（PROFILE_SYSTEM_IMPLEMENTATION_PLAN）
+
+- 状态：`[~] 进行中`
+- 优先级：高
+- 目标：提升画像系统稳定性、可解释性、可回滚能力。
+
+**Sprint A**
+- [x] `core/profile_manager.py`：snapshot + rollback + `_meta` 基础
+- [x] `services/profile_guardian.py`：结构化 `decisions` 输出
+- [x] 新增测试：`test_profile_meta.py`、`test_profile_rollback.py`
+
+**Sprint B**
+- [x] 偏好 TTL 衰减 + 测试（`test_profile_ttl_decay.py`）
+- [x] profile commands 扩展（rollback/evidence）
+- [x] main 路由新增命令（`/profile rollback`、`/profile evidence`）
+
+**Sprint C**
+- [x] renderer 证据摘要展示（可选开关）
+- [x] schema + preset 联动（新增 4 项画像配置）
+- [x] 文档更新（README / CHANGELOG / 本清单）
+
+---
+
 ## P0（必须优先）
 
 ### P0-1 删除语义统一（ID 删除与序号删除一致）

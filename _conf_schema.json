@@ -627,6 +627,30 @@
         "type": "bool",
         "default": true,
         "hint": "开启后，basic_info 核心字段（性别、年龄、所在地、职业）需要记忆中有明确陈述才能修改，防止 LLM 推测性修改。"
+      },
+      "enable_profile_meta": {
+        "description": "启用画像元数据",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后记录字段证据信息（last_seen_at、evidence_count、evidence_refs），支持证据追踪与展示。"
+      },
+      "profile_history_limit": {
+        "description": "画像历史版本保留数量",
+        "type": "int",
+        "default": 5,
+        "hint": "控制每个用户最多保留多少个画像快照，用于 /profile rollback 回滚。"
+      },
+      "profile_preference_ttl_days": {
+        "description": "偏好字段 TTL（天）",
+        "type": "int",
+        "default": 90,
+        "hint": "likes/dislikes 在超过该天数未出现新证据时会被自动衰减移除。"
+      },
+      "show_profile_evidence_in_image": {
+        "description": "在画像图片中展示证据摘要",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后 /profile show 图片底部会附加证据摘要分节。"
       }
     }
   },
