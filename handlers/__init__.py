@@ -10,5 +10,6 @@ Engram 命令处理器模块
 from .memory_commands import MemoryCommandHandler
 from .profile_commands import ProfileCommandHandler
 from .onebot_sync import OneBotSyncHandler
+from .tool_commands import MemoryToolHandler
 
-__all__ = ['MemoryCommandHandler', 'ProfileCommandHandler', 'OneBotSyncHandler']
+__all__ = ['MemoryCommandHandler', 'ProfileCommandHandler', 'OneBotSyncHandler', 'MemoryToolHandler']

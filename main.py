@@ -5,7 +5,7 @@ from astrbot.api.message_components import Image
 
 # 核心模块
 from .core import MemoryFacade, MemoryScheduler
-from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler
+from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler, MemoryToolHandler
 from .export_handler import ExportHandler
 from .profile_renderer import ProfileRenderer
 from .services import (
@@ -55,6 +55,7 @@ class EngramPlugin(Star):
             self.profile_renderer, self.logic.executor
         )
         self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager, utils_module=utils_module)
+        self._tool_handler = MemoryToolHandler(self.config, self.logic)
         self._llm_injector = LLMContextInjector()
         self._intent_classifier = IntentClassifier(config=self.config, context=context)
         self._topic_cache_service = TopicMemoryCacheService(config=self.config)
@@ -314,75 +315,19 @@ class EngramPlugin(Star):
         title: str = "🧠 工具检索结果",
         extra_hint: str = ""
     ) -> str:
-        """统一构建记忆检索工具输出。"""
-        if not self.config.get("enable_memory_search_tool", True):
-            return "记忆检索工具已关闭。"
-
-        if event.get_group_id():
-            return "当前仅支持私聊场景的记忆工具检索。"
-
-        query = str(query or "").strip()
-        if not query:
-            return "query 不能为空，请提供要检索的问题或关键词。"
-
-        # 工具安全限流：配置值与参数值双重约束，最终范围固定在 1-10
-        try:
-            max_results = int(self.config.get("memory_search_tool_max_results", 3))
-        except (TypeError, ValueError):
-            max_results = 3
-        max_results = max(1, min(10, max_results))
-
-        try:
-            request_limit = int(limit)
-        except (TypeError, ValueError):
-            request_limit = max_results
-
-        final_limit = max(1, min(10, request_limit, max_results))
-        user_id = event.get_sender_id()
-
-        # 时间过滤：仅使用显式 time_expr（由 LLM 提供），不再从 query 自动识别
-        parse_target = str(time_expr or "").strip()
-        try:
-            start_time, end_time, time_desc = self._parse_time_expr(parse_target)
-        except re.error as e:
-            logger.warning(f"Engram mem_search_tool：time_expr 正则解析失败：{e}")
-            start_time, end_time, time_desc = None, None, ""
-        except Exception as e:
-            logger.warning(f"Engram mem_search_tool：解析 time_expr 失败：{e}")
-            start_time, end_time, time_desc = None, None, ""
-
-        normalized_types = self._normalize_source_types(source_types, default_types=default_types)
-
-        try:
-            memories = await self.logic.retrieve_memories(
-                user_id,
-                query,
-                limit=final_limit,
-                start_time=start_time,
-                end_time=end_time,
-                source_types=normalized_types or None
-            )
-        except Exception as e:
-            logger.error(f"Engram mem_search_tool 异常：{e}")
-            return "工具检索失败，请稍后重试。"
-
-        if not memories:
-            return f"未检索到与“{query}”相关的长期记忆。"
-
-        result_lines = [f"{title}（共 {min(len(memories), final_limit)} 条）："]
-
-        if time_desc:
-            result_lines.append(f"⏱️ 时间筛选：{time_desc}")
-        if normalized_types:
-            result_lines.append(f"🗂️ 类型筛选：{', '.join(normalized_types)}")
-
-        for idx, memory in enumerate(memories[:final_limit], start=1):
-            result_lines.append(f"{idx}. {memory}")
-
-        if extra_hint:
-            result_lines.append(f"\n{extra_hint}")
-        result_lines.append("\n💡 如需查看某条记忆的完整原始对话，请使用 mem_get_detail_tool 并传入对应 🆔。")
-        return "\n\n".join(result_lines)
+        """统一构建记忆检索工具输出（委托给 handler）。"""
+        return await self._tool_handler.build_memory_search_output(
+            event=event,
+            query=query,
+            limit=limit,
+            time_expr=time_expr,
+            source_types=source_types,
+            default_types=default_types,
+            title=title,
+            extra_hint=extra_hint,
+            parse_time_expr=self._parse_time_expr,
+            normalize_source_types=self._normalize_source_types,
+        )
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
