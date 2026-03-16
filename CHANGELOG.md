@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-03-16
+
+### Added
+- 群聊记忆系统：支持群聊记忆独立存储（SQLite+Chroma）、好友白名单与 LLM 触发落库。
+- 群聊记忆指令：新增 `/group_mem_list`、`/group_mem_view`、`/group_mem_search`、`/group_mem_delete`、`/group_mem_delete_all`、`/group_mem_undo`、`/group_mem_force_summarize`。
+- 群聊配置项：新增 `enable_group_memory`、`group_memory_only_friends`、`group_memory_min_text_length`、`group_memory_source_type`、`group_memory_store_session_as`。
+- 群聊权限配置：新增 `group_memory_private_session_only`（群聊记忆按用户隔离）。
+- 群聊私聊融合：新增 `group_memory_allow_private_recall`（群聊检索追加私聊记忆）。
+- 好友缓存服务：新增 OneBot 好友列表缓存与 `friend_add` 通知更新。
+
+### Changed
+- 群聊 LLM 注入流程与私聊一致，支持用户画像注入与工具检索提示。
+- mem_search_tool / mem_get_detail_tool 支持群聊场景检索并回退私聊。
+- 群聊注入记忆统一为 `【长期记忆回溯】` 格式，并标记 `【群聊】/【私聊】` 来源。
+- 记忆归档中 assistant 名称仅使用 `ai_name` 配置，不再回退“助手”。
+- 群聊指令输出替换为 group_ 前缀提示，避免误删私聊记忆。
+
 ## [Unreleased]
 
 ### Added

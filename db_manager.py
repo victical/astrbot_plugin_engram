@@ -44,10 +44,10 @@ class MemoryIndex(BaseModel):
         )
 
 class DatabaseManager:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, db_path: str = None):
         # 使用传入的规范插件数据目录
         self.data_dir = data_dir
-        self.db_path = os.path.join(self.data_dir, "engram_memories.db")
+        self.db_path = db_path or os.path.join(self.data_dir, "engram_memories.db")
         os.makedirs(self.data_dir, exist_ok=True)
 
         self.db = SqliteExtDatabase(

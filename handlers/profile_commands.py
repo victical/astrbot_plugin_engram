@@ -60,6 +60,31 @@ class ProfileCommandHandler:
         return "🗑️ 您的用户画像已成功重置。"
 
     async def handle_profile_set(self, user_id: str, key: str, value: str) -> str:
+        key = str(key or "").strip()
+        value = str(value or "").strip()
+        if not key:
+            return "⚠️ 请提供字段名称。例如：/profile set 职业 程序员"
+        if not value:
+            return "⚠️ 请提供字段值。例如：/profile set 职业 程序员"
+
+        if "." not in key:
+            field_map = {
+                "职业": "basic_info.job",
+                "工作": "basic_info.job",
+                "性别": "basic_info.gender",
+                "年龄": "basic_info.age",
+                "所在地": "basic_info.location",
+                "生日": "basic_info.birthday",
+                "星座": "basic_info.constellation",
+                "生肖": "basic_info.zodiac",
+                "昵称": "basic_info.nickname",
+                "签名": "basic_info.signature",
+            }
+            mapped = field_map.get(key)
+            if not mapped:
+                return "⚠️ 未识别字段，请使用中文字段名（如：职业/年龄/所在地），或使用完整路径（如 basic_info.job）。"
+            key = mapped
+
         keys = key.split('.')
         update_data = {}
         curr = update_data
@@ -70,6 +95,38 @@ class ProfileCommandHandler:
 
         await self.profile.update_user_profile(user_id, update_data)
         return f"✅ 已更新画像：{key} = {value}"
+
+    async def handle_profile_delete(self, user_id: str, category: str, value: str) -> str:
+        category = str(category or "").strip()
+        value = str(value or "").strip()
+        if not category or not value:
+            return "⚠️ 用法：/profile delete <类别> <值>（如：/profile delete 爱好 篮球）"
+
+        if "." not in category:
+            category_map = {
+                "性格": "attributes.personality_tags",
+                "爱好": "attributes.hobbies",
+                "技能": "attributes.skills",
+                "美食": "preferences.favorite_foods",
+                "心头好": "preferences.favorite_items",
+                "休闲": "preferences.favorite_activities",
+                "喜好": "preferences.likes",
+                "禁忌": "preferences.dislikes",
+                "讨厌": "preferences.dislikes",
+            }
+            mapped = category_map.get(category)
+            if not mapped:
+                return "⚠️ 未识别类别，请使用（性格/爱好/美食/心头好/休闲/喜好/禁忌）或完整路径。"
+            category = mapped
+
+        success, message = await self.profile.remove_profile_list_item(
+            user_id=user_id,
+            field_path=category,
+            value=value,
+        )
+        if success:
+            return f"✅ 已删除画像碎片：{category} - {value}"
+        return f"⚠️ 删除失败：{message}"
 
     async def handle_profile_rollback(self, user_id: str, steps: str = "1") -> str:
         try:

@@ -29,13 +29,12 @@ class MemoryToolHandler:
         extra_hint: str = "",
         parse_time_expr,
         normalize_source_types,
+        get_logic=None,
+        resolve_user_id=None,
     ) -> str:
         """统一构建记忆检索工具输出。"""
         if not self.config.get("enable_memory_search_tool", True):
             return "记忆检索工具已关闭。"
-
-        if event.get_group_id():
-            return "当前仅支持私聊场景的记忆工具检索。"
 
         query = str(query or "").strip()
         if not query:
@@ -54,7 +53,15 @@ class MemoryToolHandler:
             request_limit = max_results
 
         final_limit = max(1, min(10, request_limit, max_results))
+        logic = self.logic
+        if callable(get_logic):
+            logic = await get_logic(event) or self.logic
+
         user_id = event.get_sender_id()
+        if callable(resolve_user_id):
+            resolved = resolve_user_id(event)
+            if resolved:
+                user_id = resolved
 
         # 时间过滤：仅使用显式 time_expr（由 LLM 提供），不再从 query 自动识别
         parse_target = str(time_expr or "").strip()
@@ -70,7 +77,7 @@ class MemoryToolHandler:
         normalized_types = normalize_source_types(source_types, default_types=default_types)
 
         try:
-            memories = await self.logic.retrieve_memories(
+            memories = await logic.retrieve_memories(
                 user_id,
                 query,
                 limit=final_limit,

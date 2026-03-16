@@ -41,6 +41,17 @@
 | `/mem_clear_archive` | 清除所有长期记忆归档（保留原始对话原文） |
 | `/mem_clear_all` | 彻底清除所有长期记忆与原始对话（需二次确认） |
 
+### 群聊记忆指令
+| 指令 | 说明 |
+| :--- | :--- |
+| `/group_mem_list [数量]` | 查看本群最近生成的长期记忆 |
+| `/group_mem_view <序号或ID>` | 查看本群指定记忆的完整对话回溯 |
+| `/group_mem_search <关键词>` | 搜索本群长期记忆 |
+| `/group_mem_delete <序号或ID>` | 删除本群指定记忆（保留原始消息） |
+| `/group_mem_delete_all <序号或ID>` | 删除本群指定记忆及原始消息 |
+| `/group_mem_undo` | 撤销本群最近一次删除操作 |
+| `/group_mem_force_summarize` | [管理员] 立即对本群未处理对话进行归档 |
+
 ### 数据导出（新功能）
 | 指令 | 说明 |
 | :--- | :--- |
@@ -51,9 +62,10 @@
 | 指令 | 说明 |
 | :--- | :--- |
 | `/profile show` | 查看当前的结构化用户画像（手账风格图片） |
-| `/profile set <键> <值>` | 手动设置画像字段（如：`/profile set basic_info.job 学生`） |
+| `/profile set <键> <值>` | 手动设置画像字段（如：`/profile set 职业 程序员`；或使用完整路径 `basic_info.job`） |
 | `/profile rollback [steps]` | 回滚到历史画像版本（默认回滚 1 步） |
 | `/profile evidence [top_n]` | 查看画像证据摘要（字段证据次数与最近证据） |
+| `/profile delete <类别> <值>` | 删除画像记忆碎片（如：`/profile delete 爱好 篮球`） |
 | `/profile clear` | 重置用户画像（需二次确认） |
 
 ### 管理员指令
@@ -137,6 +149,12 @@ data/plugins_data/astrbot_plugin_engram/exports/
 ### 其他配置
 - **检索召回记忆数量**：检索时召回的最大长期记忆数量（默认 3 条）。
 - **查询记忆默认数量**：使用 `/mem_list` 指令时默认返回的记忆条数（默认 5 条，最多 50 条）。
+- **群聊记忆开关**：`enable_group_memory` 默认关闭。
+- **群聊好友白名单**：`group_memory_only_friends` 仅记录好友消息。
+- **群聊最小字数**：`group_memory_min_text_length` 过滤噪声。
+- **群聊记忆归属**：`group_memory_store_session_as` (group_id/user_id)。
+- **群聊记忆私有化**：`group_memory_private_session_only` 启用后按 user_id 隔离。
+- **群聊检索私聊记忆**：`group_memory_allow_private_recall` 启用后群聊检索包含私聊。
 
 ## 🚀 安装
 

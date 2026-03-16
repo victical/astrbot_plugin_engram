@@ -32,19 +32,25 @@ class MemoryScheduler:
         """启动所有调度任务"""
         # 保存任务引用，以便关闭时取消
         task1 = asyncio.create_task(self.background_worker())
-        task2 = asyncio.create_task(self.daily_persona_scheduler())
-        task3 = asyncio.create_task(self.daily_memory_maintenance())
-        self._tasks.extend([task1, task2, task3])
+        self._tasks.append(task1)
 
-        if self.config.get("enable_memory_folding", True):
+        if callable(getattr(self.logic, "_update_persona_daily", None)):
+            task2 = asyncio.create_task(self.daily_persona_scheduler())
+            self._tasks.append(task2)
+
+        if callable(getattr(self.logic, "_ensure_chroma_initialized", None)):
+            task3 = asyncio.create_task(self.daily_memory_maintenance())
+            self._tasks.append(task3)
+
+        if self.config.get("enable_memory_folding", True) and callable(getattr(self.logic, "fold_weekly_summaries", None)):
             task4 = asyncio.create_task(self.weekly_folding_scheduler())
             self._tasks.append(task4)
 
-        if self.config.get("enable_monthly_folding", True):
+        if self.config.get("enable_monthly_folding", True) and callable(getattr(self.logic, "fold_monthly_summaries", None)):
             task5 = asyncio.create_task(self.monthly_folding_scheduler())
             self._tasks.append(task5)
 
-        if self.config.get("enable_yearly_folding", True):
+        if self.config.get("enable_yearly_folding", True) and callable(getattr(self.logic, "fold_yearly_summaries", None)):
             task6 = asyncio.create_task(self.yearly_folding_scheduler())
             self._tasks.append(task6)
     

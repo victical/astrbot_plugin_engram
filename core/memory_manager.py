@@ -65,7 +65,7 @@ class MemoryManager:
         "get_all_users_stats",
     )
     
-    def __init__(self, context, config, data_dir, executor, db_manager, profile_manager=None):
+    def __init__(self, context, config, data_dir, executor, db_manager, profile_manager=None, chroma_path: str = None, default_source_type: str = "private"):
         """
         初始化记忆管理器
         
@@ -76,6 +76,8 @@ class MemoryManager:
             executor: ThreadPoolExecutor 实例
             db_manager: DatabaseManager 实例
             profile_manager: ProfileManager 实例（可选，用于实时画像更新）
+            chroma_path: ChromaDB 存储路径（可选，默认使用 data_dir/engram_chroma）
+            default_source_type: 默认写入的 source_type（默认 private）
         """
         self.context = context
         self.config = config
@@ -84,12 +86,13 @@ class MemoryManager:
         self.db = db_manager
         self.profile_manager = profile_manager
         self._intent_classifier = IntentClassifier(config=self.config, context=self.context)
+        self.default_source_type = str(default_source_type or "private").strip() or "private"
 
         # 启动阶段接口自检：避免 DB 契约漂移导致运行时 AttributeError
         self._verify_db_contract(stage="MemoryManager.__init__")
         
         # ChromaDB 延迟初始化（避免构造函数阻塞）
-        self.chroma_path = os.path.join(self.data_dir, "engram_chroma")
+        self.chroma_path = chroma_path or os.path.join(self.data_dir, "engram_chroma")
         self.chroma_client = None
         self.collection = None
         self._chroma_init_lock = asyncio.Lock()
@@ -248,6 +251,17 @@ class MemoryManager:
             return False
         
         return True
+
+    def _get_allowed_source_types(self):
+        """获取允许的 source_type 列表（含默认/群聊配置）。"""
+        allowed = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        default_type = str(self.default_source_type or "").strip().lower()
+        if default_type:
+            allowed.add(default_type)
+        extra_type = str(self.config.get("group_memory_source_type", "")).strip().lower()
+        if extra_type:
+            allowed.add(extra_type)
+        return allowed
 
     def _generate_query_keywords(self, query: str):
         """生成中英混合关键词：英文按词切分，中文按 2~4 gram 切分。"""
@@ -733,6 +747,7 @@ class MemoryManager:
     async def _summarize_private_chat(self, user_id):
         """对私聊进行总结并存入长期记忆（按天分组处理）"""
         from itertools import groupby
+        source_type = str(self.default_source_type or "private").strip() or "private"
         
         # 1. 获取未归档的原始消息
         loop = asyncio.get_event_loop()
@@ -796,12 +811,12 @@ class MemoryManager:
             ref_uuids = summary_result["ref_uuids"]
 
             index_id = str(uuid.uuid4())
-            ai_name = self.config.get("ai_name", "助手")
+            ai_name = str(self.config.get("ai_name") or "").strip()
             batch_add["ids"].append(index_id)
             batch_add["documents"].append(summary)
             batch_add["metadatas"].append({
                 "user_id": user_id,
-                "source_type": "private",
+                "source_type": source_type,
                 "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "ai_name": ai_name
             })
@@ -811,7 +826,7 @@ class MemoryManager:
                 "summary": summary,
                 "ref_uuids": json.dumps(ref_uuids),
                 "prev_index_id": prev_index_id,
-                "source_type": "private",
+                "source_type": source_type,
                 "user_id": user_id,
                 "created_at": created_at
             })
@@ -917,18 +932,24 @@ class MemoryManager:
 
         # 构造对话文本
         chat_lines = [f"【日期：{date_key.strftime('%Y-%m-%d')}】"]
+        ai_name = str(self.config.get("ai_name") or "").strip()
         for m in filtered_msgs:
             # 确保时间戳是 datetime 对象
             ts = self._ensure_datetime(m.timestamp)
             time_str = ts.strftime("%H:%M")
-            name = m.user_name if m.role == "user" and m.user_name else m.role
+            if m.role == "user":
+                name = m.user_name if m.user_name else "user"
+            elif m.role == "assistant":
+                name = m.user_name if m.user_name else ai_name
+            else:
+                name = m.role
             chat_lines.append(f"[{time_str}] {name}: {m.content}")
         chat_text = "\n".join(chat_lines)
         
         # 2. 调用 LLM 总结
         # 从配置获取提示词模板并替换占位符
         custom_prompt = self.config.get("summarize_prompt")
-        ai_name = self.config.get("ai_name")
+        ai_name = str(self.config.get("ai_name") or "").strip()
         prompt = custom_prompt.replace("{{chat_text}}", chat_text).replace("{{ai_name}}", ai_name)
         
         max_retries = 3
@@ -1123,7 +1144,7 @@ class MemoryManager:
 
         created_at = datetime.datetime.now()
         index_id = str(uuid.uuid4())
-        ai_name = self.config.get("ai_name", "助手")
+        ai_name = str(self.config.get("ai_name") or "").strip()
         source_ids = [item.index_id for item in selected]
 
         # 维持时间链：新总结挂在该用户当前最新索引之后
@@ -1309,7 +1330,7 @@ class MemoryManager:
         if not candidates:
             return []
 
-        allowed_types = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        allowed_types = self._get_allowed_source_types()
         normalized_source_types = []
         if isinstance(source_types, (list, tuple, set)):
             normalized_source_types = [
@@ -1565,7 +1586,7 @@ class MemoryManager:
 
         # 构造 where 过滤：用户维度 + 可选来源类型
         # Chroma 复杂过滤统一走 $and，避免“字段 + $or”混写兼容性问题
-        allowed_types = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        allowed_types = self._get_allowed_source_types()
         normalized_source_types = []
         if isinstance(source_types, (list, tuple, set)):
             for item in source_types:
@@ -2382,7 +2403,7 @@ class MemoryManager:
                     "user_id": row["user_id"],
                     "source_type": row["source_type"],
                     "created_at": created_str,
-                    "ai_name": self.config.get("ai_name", "助手")
+                    "ai_name": str(self.config.get("ai_name") or "").strip()
                 })
 
             try:

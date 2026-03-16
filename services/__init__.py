@@ -10,6 +10,7 @@ from .profile_guardian import ProfileGuardian
 from .injection_strategy import TopicMemoryCacheService, ToolHintStrategyService
 from .config_preset import ConfigPresetService
 from .time_parser import TimeExpressionService
+from .friend_cache import FriendCacheService
 
 __all__ = [
     'BondCalculator',
@@ -20,4 +21,5 @@ __all__ = [
     'ToolHintStrategyService',
     'ConfigPresetService',
     'TimeExpressionService',
+    'FriendCacheService',
 ]

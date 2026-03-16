@@ -163,6 +163,68 @@ class ProfileManager:
 
         return await loop.run_in_executor(self.executor, _update)
 
+    async def remove_profile_list_item(self, user_id: str, field_path: str, value: str) -> tuple:
+        loop = asyncio.get_event_loop()
+        path = self._get_profile_path(user_id)
+
+        field_path = str(field_path or "").strip()
+        value = str(value or "").strip()
+
+        if not field_path or not value:
+            return False, "字段和值不能为空。"
+
+        def _remove():
+            profile = self._build_default_profile(user_id)
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        loaded = json.load(f)
+                        if isinstance(loaded, dict):
+                            profile.update(loaded)
+                except Exception as e:
+                    logger.debug(f"Engram 画像管理器：加载已有画像失败（{path}），继续使用默认画像：{e}")
+
+            keys = field_path.split(".")
+            target = profile
+            for k in keys[:-1]:
+                if not isinstance(target, dict) or k not in target:
+                    return False, "字段不存在。"
+                target = target.get(k)
+
+            last_key = keys[-1]
+            if not isinstance(target, dict) or last_key not in target:
+                return False, "字段不存在。"
+
+            lst = target.get(last_key)
+            if not isinstance(lst, list):
+                return False, "该字段不是列表类型，无法删除单项。"
+
+            if value not in lst:
+                return False, "未找到要删除的值。"
+
+            target[last_key] = [item for item in lst if str(item) != value]
+
+            proposals = profile.get("pending_proposals")
+            if isinstance(proposals, list):
+                profile["pending_proposals"] = [
+                    p for p in proposals
+                    if not (p.get("category") == last_key and str(p.get("value")) == value)
+                ]
+
+            if self._enable_profile_meta:
+                meta = profile.get("_meta", {}) if isinstance(profile.get("_meta"), dict) else {}
+                fields = meta.get("fields", {}) if isinstance(meta.get("fields"), dict) else {}
+                fields.pop(f"{field_path}.{value}", None)
+                meta["fields"] = fields
+                profile["_meta"] = meta
+
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(profile, f, ensure_ascii=False, indent=4)
+
+            return True, "删除成功"
+
+        return await loop.run_in_executor(self.executor, _remove)
+
     async def clear_user_profile(self, user_id):
         loop = asyncio.get_event_loop()
         path = self._get_profile_path(user_id)

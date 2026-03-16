@@ -4,10 +4,11 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.message_components import Image
 
 # 核心模块
-from .core import MemoryFacade, MemoryScheduler
+from .core import MemoryFacade, MemoryScheduler, MemoryManager
 from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler, MemoryToolHandler
 from .export_handler import ExportHandler
 from .profile_renderer import ProfileRenderer
+from .db_manager import DatabaseManager, StableDatabaseInterface
 from .services import (
     LLMContextInjector,
     IntentClassifier,
@@ -15,14 +16,26 @@ from .services import (
     ToolHintStrategyService,
     ConfigPresetService,
     TimeExpressionService,
+    FriendCacheService,
 )
 from . import utils as utils_module
 
 import asyncio
 import re
+import os
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.5.4")
+class FriendAddNoticeFilter(filter.CustomFilter):
+    """过滤 OneBot friend_add notice 事件。"""
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if not isinstance(raw, dict):
+            return False
+        return raw.get("post_type") == "notice" and raw.get("notice_type") == "friend_add"
+
+
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.6.0")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -61,6 +74,12 @@ class EngramPlugin(Star):
         self._topic_cache_service = TopicMemoryCacheService(config=self.config)
         self._tool_hint_strategy = ToolHintStrategyService(config=self.config)
         self._time_parser = TimeExpressionService(config=self.config)
+        self._friend_cache = FriendCacheService(config=self.config)
+        self._group_memory_manager = None
+        self._group_scheduler = None
+        self._group_mem_handler = None
+        self._group_db = None
+        self._group_memory_init_lock = asyncio.Lock()
 
         # 初始化调度器
         self._scheduler = MemoryScheduler(self.logic, self.config)
@@ -117,6 +136,95 @@ class EngramPlugin(Star):
             self._tool_hint_strategy = service
         return service
 
+    async def _ensure_group_memory_manager(self):
+        """确保群聊记忆管理器已初始化（延迟创建）。"""
+        if self._group_memory_manager is not None:
+            return self._group_memory_manager
+
+        if not self.config.get("enable_group_memory", False):
+            return None
+
+        async with self._group_memory_init_lock:
+            if self._group_memory_manager is not None:
+                return self._group_memory_manager
+
+            group_db_path = os.path.join(self.plugin_data_dir, "engram_memories_group.db")
+            raw_db = DatabaseManager(self.plugin_data_dir, db_path=group_db_path)
+            group_db = StableDatabaseInterface(raw_db)
+            group_db.verify_contract(stage="GroupMemoryManager.__init__")
+            self._group_db = group_db
+
+            group_chroma_path = os.path.join(self.plugin_data_dir, "engram_chroma_group")
+            group_source_type = str(self.config.get("group_memory_source_type", "group")).strip() or "group"
+
+            self._group_memory_manager = MemoryManager(
+                context=self.context,
+                config=self.config,
+                data_dir=self.plugin_data_dir,
+                executor=self.logic.executor,
+                db_manager=group_db,
+                profile_manager=None,
+                chroma_path=group_chroma_path,
+                default_source_type=group_source_type,
+            )
+            self._group_mem_handler = MemoryCommandHandler(
+                self.config,
+                self._group_memory_manager,
+                self._group_db,
+                self.logic.executor,
+            )
+
+            group_scheduler_config = dict(self.config)
+            group_scheduler_config["enable_memory_folding"] = False
+            group_scheduler_config["enable_monthly_folding"] = False
+            group_scheduler_config["enable_yearly_folding"] = False
+
+            self._group_scheduler = MemoryScheduler(self._group_memory_manager, group_scheduler_config)
+            asyncio.create_task(self._group_scheduler.start())
+
+        return self._group_memory_manager
+
+    def _resolve_group_storage_id(self, group_id: str, sender_id: str) -> str:
+        """根据配置决定群聊记忆的 session/user 绑定方式。"""
+        if self.config.get("group_memory_private_session_only", False):
+            return sender_id or group_id
+        mode = str(self.config.get("group_memory_store_session_as", "group_id")).strip().lower()
+        if mode == "user_id":
+            return sender_id or group_id
+        return group_id
+
+    async def _group_memory_friend_allowed(self, event: AstrMessageEvent) -> bool:
+        """群聊好友白名单判断。"""
+        if not self.config.get("group_memory_only_friends", True):
+            return True
+        bot = getattr(event, "bot", None)
+        return await self._friend_cache.is_friend(event.get_sender_id(), bot=bot)
+
+    async def _get_group_mem_handler(self):
+        """获取群聊记忆命令处理器。"""
+        if not self.config.get("enable_group_memory", False):
+            return None
+        if self._group_mem_handler is not None:
+            return self._group_mem_handler
+        await self._ensure_group_memory_manager()
+        return self._group_mem_handler
+
+    @staticmethod
+    def _rewrite_group_command_hints(text: str) -> str:
+        """将私聊指令提示替换为群聊指令提示。"""
+        if not text:
+            return text
+        replacements = {
+            "/mem_view": "/group_mem_view",
+            "/mem_delete_all": "/group_mem_delete_all",
+            "/mem_delete": "/group_mem_delete",
+            "/mem_list": "/group_mem_list",
+            "/mem_undo": "/group_mem_undo",
+        }
+        for src, dst in replacements.items():
+            text = text.replace(src, dst)
+        return text
+
     # 兼容保留：以下方法由 main 转发到 services.injection_strategy
     def _extract_topic_tokens(self, query: str):
         return self._get_topic_cache_service().extract_topic_tokens(query)
@@ -163,6 +271,25 @@ class EngramPlugin(Star):
         extra_hint: str = ""
     ) -> str:
         """统一构建记忆检索工具输出（委托给 handler）。"""
+        async def _get_logic(evt: AstrMessageEvent):
+            if not evt.get_group_id():
+                return self.logic
+            if not self.config.get("enable_group_memory", False):
+                return self.logic
+            return await self._ensure_group_memory_manager()
+
+        def _resolve_user_id(evt: AstrMessageEvent):
+            if not evt.get_group_id():
+                return evt.get_sender_id()
+            storage_id = self._resolve_group_storage_id(evt.get_group_id(), evt.get_sender_id())
+            return storage_id or evt.get_sender_id()
+
+        if event.get_group_id() and default_types is None:
+            group_source_type = str(self.config.get("group_memory_source_type", "group")).strip() or "group"
+            default_types = [group_source_type]
+            if self.config.get("group_memory_allow_private_recall", False):
+                default_types = [group_source_type, "private"]
+
         return await self._tool_handler.build_memory_search_output(
             event=event,
             query=query,
@@ -174,12 +301,16 @@ class EngramPlugin(Star):
             extra_hint=extra_hint,
             parse_time_expr=self._parse_time_expr,
             normalize_source_types=self._normalize_source_types,
+            get_logic=_get_logic,
+            resolve_user_id=_resolve_user_id,
         )
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """在调用 LLM 前注入长期记忆和用户画像"""
-        if event.get_group_id(): return
+        if event.get_group_id():
+            await self._handle_group_llm_request(event, req)
+            return
         user_id = event.get_sender_id()
         query = event.message_str
         profile = await self.logic.get_user_profile(user_id)
@@ -242,6 +373,208 @@ class EngramPlugin(Star):
                     logger.info(f"🛠️ 注入的工具提示:\n{tool_hint_block}")
                 logger.info(f"=== Engram 调试结束 ===")
 
+    async def _handle_group_llm_request(self, event: AstrMessageEvent, req):
+        """群聊记忆注入与缓存（仅 LLM 触发时）。"""
+        if not self.config.get("enable_group_memory", False):
+            return
+
+        if not await self._group_memory_friend_allowed(event):
+            return
+
+        content = event.message_str or ""
+        if self._is_command_message(content):
+            return
+
+        try:
+            min_len = int(self.config.get("group_memory_min_text_length", 6))
+        except (TypeError, ValueError):
+            min_len = 6
+
+        if len(content.strip()) < max(1, min_len):
+            return
+
+        group_manager = await self._ensure_group_memory_manager()
+        if group_manager is None:
+            return
+
+        group_id = event.get_group_id()
+        sender_id = event.get_sender_id()
+        user_name = event.get_sender_name()
+        storage_id = self._resolve_group_storage_id(group_id, sender_id)
+        group_source_type = str(self.config.get("group_memory_source_type", "group")).strip() or "group"
+
+        event.set_extra("group_memory_pending", {
+            "storage_id": storage_id,
+            "group_id": group_id,
+            "sender_id": sender_id,
+            "user_name": user_name,
+            "content": content,
+            "source_type": group_source_type,
+        })
+
+        memory_block = ""
+        memories = []
+        try:
+            should_retrieve = await self._intent_classifier.should_retrieve_memory(content)
+        except Exception as e:
+            logger.warning(f"Engram：群聊意图检查失败，已回退为跳过检索：{e}")
+            should_retrieve = False
+
+        if should_retrieve:
+            cache_hit = False
+            topic_key = ""
+            group_memories = []
+            private_memories = []
+            try:
+                cache_hit, memories, topic_key = self._get_cached_topic_memories(storage_id, content)
+            except Exception as e:
+                logger.debug(f"Engram：群聊话题缓存读取失败，已回退为直接检索：{e}")
+                cache_hit, memories, topic_key = False, [], ""
+
+            if cache_hit and self.config.get("group_memory_allow_private_recall", False):
+                cache_hit = False
+
+            if not cache_hit:
+                try:
+                    group_memories = await group_manager.retrieve_memories(
+                        storage_id,
+                        content,
+                        source_types=[group_source_type]
+                    )
+                    memories = list(group_memories or [])
+                    private_memories = []
+                    if self.config.get("group_memory_allow_private_recall", False):
+                        private_memories = await self.logic.retrieve_memories(
+                            sender_id,
+                            content,
+                            source_types=["private"]
+                        )
+                        memories.extend([m for m in private_memories if m not in memories])
+                except Exception as e:
+                    logger.error(f"Engram：群聊 retrieve_memories 调用失败：{e}")
+                    memories = []
+                    group_memories = []
+                    private_memories = []
+
+                try:
+                    self._set_cached_topic_memories(storage_id, content, topic_key, memories)
+                except Exception as e:
+                    logger.debug(f"Engram：群聊话题缓存写入失败，已忽略：{e}")
+            else:
+                group_memories = list(memories or [])
+                logger.debug(f"Engram：群聊话题缓存命中，storage_id={storage_id}，query={content[:30]}")
+
+            if memories:
+                tagged_memories = []
+                for item in memories:
+                    if item in (group_memories or []):
+                        tagged_memories.append(f"【群聊】{item}")
+                    elif item in (private_memories or []):
+                        tagged_memories.append(f"【私聊】{item}")
+                    else:
+                        tagged_memories.append(item)
+                memory_prompt = "\n".join(tagged_memories)
+                memory_block = f"【长期记忆回溯】：\n{memory_prompt}\n"
+        else:
+            logger.debug(f"Engram：群聊查询较弱，已跳过记忆检索：{content[:30]}")
+
+        tool_hint_block = self._build_tool_hint_block(
+            memory_count=len(memories),
+            should_retrieve=should_retrieve
+        )
+
+        profile_block = ""
+        try:
+            profile = await self.logic.get_user_profile(sender_id)
+            profile_block = self._llm_injector.build_profile_block(profile)
+        except Exception as e:
+            logger.debug(f"Engram：群聊画像读取失败，已跳过：{e}")
+
+        combined_memory_block = f"{memory_block}{tool_hint_block}"
+        if profile_block or combined_memory_block:
+            self._llm_injector.inject_context(req, profile_block, combined_memory_block)
+
+            if self.config.get("debug_injection", False):
+                logger.info(f"=== Engram 群聊调试模式 [群: {group_id}] ===")
+                if profile_block:
+                    logger.info(f"📋 注入的用户画像:\n{profile_block}")
+                if memory_block:
+                    logger.info(f"🧠 注入的群聊记忆:\n{memory_block}")
+                if tool_hint_block:
+                    logger.info(f"🛠️ 注入的工具提示:\n{tool_hint_block}")
+                logger.info("=== Engram 群聊调试结束 ===")
+
+    async def _handle_group_after_message_sent(self, event: AstrMessageEvent):
+        """群聊 LLM 回复后记录记忆。"""
+        if not self.config.get("enable_group_memory", False):
+            return
+
+        pending = event.get_extra("group_memory_pending")
+        if not pending:
+            return
+
+        result = event.get_result()
+        if not result or not result.is_llm_result():
+            return
+
+        content = "".join([c.text for c in result.chain if hasattr(c, "text")])
+        if not content:
+            return
+
+        group_manager = await self._ensure_group_memory_manager()
+        if group_manager is None:
+            return
+
+        storage_id = pending.get("storage_id")
+        sender_id = pending.get("sender_id")
+        user_name = pending.get("user_name")
+        user_content = pending.get("content")
+        group_id = pending.get("group_id")
+
+        if not storage_id or not user_content:
+            return
+
+        try:
+            await group_manager.record_message(
+                user_id=storage_id,
+                session_id=storage_id,
+                role="user",
+                content=user_content,
+                user_name=f"{user_name}({sender_id})" if user_name else str(sender_id or "")
+            )
+            await group_manager.record_message(
+                user_id=storage_id,
+                session_id=storage_id,
+                role="assistant",
+                content=content,
+                user_name=str(self.config.get("ai_name") or "").strip()
+            )
+            logger.debug(
+                "Engram：群聊记忆已记录 group_id=%s storage_id=%s",
+                group_id,
+                storage_id
+            )
+        except Exception as e:
+            logger.error(f"Engram：群聊记忆记录失败：{e}")
+
+    @filter.custom_filter(FriendAddNoticeFilter)
+    async def on_friend_add_notice(self, event: AstrMessageEvent):
+        """OneBot 好友添加通知：更新好友缓存。"""
+        if not self.config.get("enable_group_memory", False):
+            return
+
+        user_id = event.get_sender_id()
+        if not user_id:
+            raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+            if isinstance(raw, dict):
+                user_id = raw.get("user_id")
+
+        if not user_id:
+            return
+
+        self._friend_cache.add_friend(user_id)
+        logger.debug("Engram：好友缓存新增 user_id=%s", user_id)
+
     @filter.llm_tool(name="mem_search_tool")
     async def mem_search_tool(
         self,
@@ -251,7 +584,14 @@ class EngramPlugin(Star):
         time_expr: str = "",
         source_types: list = None
     ) -> str:
-        '''检索长期记忆（通用），仅返回给 LLM，不直接发送给用户。'''
+        '''检索长期记忆（通用），仅返回给 LLM，不直接发送给用户。
+
+        Args:
+            query(string): 检索关键词或问题
+            limit(number): 返回条数上限
+            time_expr(string): 时间范围表达式
+            source_types(array[string]): source_type 过滤
+        '''
         output = await self._build_memory_search_output(
             event=event,
             query=query,
@@ -272,7 +612,14 @@ class EngramPlugin(Star):
         time_expr: str = "",
         source_types: list = None
     ) -> str:
-        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
+        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。
+
+        Args:
+            query(string): 检索关键词或问题
+            limit(number): 返回条数上限
+            time_expr(string): 时间范围表达式
+            source_types(array[string]): source_type 过滤
+        '''
         output = await self._build_memory_search_output(
             event=event,
             query=query,
@@ -293,7 +640,14 @@ class EngramPlugin(Star):
         time_expr: str = "",
         source_types: list = None
     ) -> str:
-        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
+        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。
+
+        Args:
+            query(string): 检索关键词或问题
+            limit(number): 返回条数上限
+            time_expr(string): 时间范围表达式
+            source_types(array[string]): source_type 过滤
+        '''
         output = await self._build_memory_search_output(
             event=event,
             query=query,
@@ -316,8 +670,7 @@ class EngramPlugin(Star):
         if not self.config.get("enable_memory_search_tool", True):
             return "记忆检索工具已关闭。"
 
-        if event.get_group_id():
-            return "当前仅支持私聊场景的记忆工具检索。"
+        # 群聊工具检索将自动路由到群聊记忆库
 
         memory_id = str(memory_id or "").strip()
         if len(memory_id) < 8:
@@ -329,10 +682,18 @@ class EngramPlugin(Star):
             max_messages = 20
         max_messages = max(1, min(100, max_messages))
 
-        user_id = event.get_sender_id()
+        if event.get_group_id() and self.config.get("enable_group_memory", False):
+            group_manager = await self._ensure_group_memory_manager()
+            user_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+            logic = group_manager or self.logic
+        else:
+            user_id = event.get_sender_id()
+            logic = self.logic
 
         try:
-            memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(user_id, memory_id)
+            memory_index, raw_msgs = await logic.get_memory_detail_by_id(user_id, memory_id)
+            if (not memory_index) and event.get_group_id() and self.config.get("group_memory_allow_private_recall", False):
+                memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(event.get_sender_id(), memory_id)
         except Exception as e:
             logger.error(f"Engram mem_get_detail_tool 异常：{e}")
             return "工具检索失败，请稍后重试。"
@@ -375,8 +736,9 @@ class EngramPlugin(Star):
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
         """在消息发送后记录 AI 的回复到原始记忆，并更新互动统计"""
-        # 只处理私聊
-        if event.get_group_id(): return
+        if event.get_group_id():
+            await self._handle_group_after_message_sent(event)
+            return
         
         # 检查用户原始消息是否为指令，是则跳过记录 AI 回复
         user_message = event.message_str
@@ -522,7 +884,7 @@ class EngramPlugin(Star):
 
     @profile_group.command("set")
     async def profile_set(self, event: AstrMessageEvent, key: str, value: str):
-        """手动设置画像字段的值 (如: profile set basic_info.job 学生)"""
+        """手动设置画像字段的值 (如: /profile set 职业 程序员)"""
         user_id = event.get_sender_id()
         result = await self._profile_handler.handle_profile_set(user_id=user_id, key=key, value=value)
         yield event.plain_result(result)
@@ -532,6 +894,13 @@ class EngramPlugin(Star):
         """回滚用户画像到历史版本（默认回滚 1 步）"""
         user_id = event.get_sender_id()
         result = await self._profile_handler.handle_profile_rollback(user_id=user_id, steps=steps)
+        yield event.plain_result(result)
+
+    @profile_group.command("delete")
+    async def profile_delete(self, event: AstrMessageEvent, category: str, value: str):
+        """删除画像记忆碎片 (如: /profile delete 爱好 篮球)"""
+        user_id = event.get_sender_id()
+        result = await self._profile_handler.handle_profile_delete(user_id=user_id, category=category, value=value)
         yield event.plain_result(result)
 
     @profile_group.command("evidence")
@@ -610,6 +979,107 @@ class EngramPlugin(Star):
             logger.error(f"Engram：重建向量库失败：{e}")
             yield event.plain_result(f"❌ 向量库重建失败：{e}")
 
+    @filter.command("group_mem_list")
+    async def group_mem_list(self, event: AstrMessageEvent, count: str = ""):
+        """查看本群最近生成的长期记忆归档"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        result = await handler.handle_mem_list(user_id=storage_id, count=count)
+        yield event.plain_result(self._rewrite_group_command_hints(result))
+
+    @filter.command("group_mem_view")
+    async def group_mem_view(self, event: AstrMessageEvent, index: str):
+        """查看本群指定序号或 ID 的记忆详情"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        result = await handler.handle_mem_view(user_id=storage_id, index=index)
+        yield event.plain_result(self._rewrite_group_command_hints(result))
+
+    @filter.command("group_mem_search")
+    async def group_mem_search(self, event: AstrMessageEvent, query: str):
+        """搜索本群的长期记忆"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        result = await handler.handle_mem_search(user_id=storage_id, query=query)
+        yield event.plain_result(self._rewrite_group_command_hints(result))
+
+    @filter.command("group_mem_delete")
+    async def group_mem_delete(self, event: AstrMessageEvent, index: str):
+        """删除本群指定序号或 ID 的总结记忆"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        result = await handler.handle_mem_delete(user_id=storage_id, index=index, delete_raw=False)
+        yield event.plain_result(self._rewrite_group_command_hints(result))
+
+    @filter.command("group_mem_delete_all")
+    async def group_mem_delete_all(self, event: AstrMessageEvent, index: str):
+        """删除本群指定序号或 ID 的总结记忆及原始消息"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        result = await handler.handle_mem_delete(user_id=storage_id, index=index, delete_raw=True)
+        yield event.plain_result(self._rewrite_group_command_hints(result))
+
+    @filter.command("group_mem_undo")
+    async def group_mem_undo(self, event: AstrMessageEvent):
+        """撤销本群最近一次删除操作"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        result = await handler.handle_mem_undo(user_id=storage_id)
+        yield event.plain_result(self._rewrite_group_command_hints(result))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("group_mem_force_summarize")
+    async def group_mem_force_summarize(self, event: AstrMessageEvent):
+        """[管理员] 强制归档本群未处理对话"""
+        if not event.get_group_id():
+            yield event.plain_result("仅群聊可用。")
+            return
+        handler = await self._get_group_mem_handler()
+        if handler is None:
+            yield event.plain_result("群聊记忆未开启或未初始化。")
+            return
+        storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
+        start_msg, done_msg = handler.get_force_summarize_messages()
+        yield event.plain_result(self._rewrite_group_command_hints(start_msg))
+        await handler.handle_force_summarize(user_id=storage_id)
+        yield event.plain_result(self._rewrite_group_command_hints(done_msg))
+
     @filter.command("mem_export")
     async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
         """导出原始消息数据用于模型微调"""
@@ -654,7 +1124,26 @@ class EngramPlugin(Star):
             except Exception as e:
                 logger.debug(f"Engram：等待调度任务结束时发生异常：{e}")
         
+        if getattr(self, "_group_scheduler", None):
+            self._group_scheduler._is_shutdown = True
+            for task in self._group_scheduler._tasks:
+                if not task.done():
+                    task.cancel()
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._group_scheduler._tasks, return_exceptions=True),
+                    timeout=0.5
+                )
+                logger.debug("Engram：群聊调度任务已优雅停止")
+            except asyncio.TimeoutError:
+                logger.debug("Engram：群聊调度任务未在限定时间内完成")
+            except Exception as e:
+                logger.debug(f"Engram：等待群聊调度任务结束时发生异常：{e}")
+
         # 步骤3：最后关闭线程池和其他资源
         self.logic._memory_manager.shutdown()
+        if getattr(self, "_group_memory_manager", None):
+            self._group_memory_manager.shutdown()
         self.logic.executor.shutdown(wait=False)
         await self.profile_renderer.close()

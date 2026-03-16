@@ -84,6 +84,63 @@
       }
     }
   },
+  "group_memory": {
+    "description": "群聊记忆",
+    "type": "object",
+    "hint": "群聊记忆功能（默认关闭）。",
+    "items": {
+      "enable_group_memory": {
+        "description": "启用群聊记忆",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭。开启后群聊触发 LLM 回复时会记录记忆。"
+      },
+      "group_memory_only_friends": {
+        "description": "仅记录好友消息",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后仅记录已加好友的群成员消息。"
+      },
+      "group_memory_min_text_length": {
+        "description": "群聊记忆最小字数",
+        "type": "int",
+        "default": 6,
+        "hint": "过滤过短的群聊消息，避免噪声。"
+      },
+      "group_memory_source_type": {
+        "description": "群聊记忆 source_type",
+        "type": "string",
+        "default": "group",
+        "hint": "群聊记忆归档时的 source_type 标记，用于检索过滤。"
+      },
+      "group_memory_store_session_as": {
+        "description": "群聊记忆会话绑定方式",
+        "type": "string",
+        "default": "group_id",
+        "options": [
+          "group_id",
+          "user_id"
+        ],
+        "labels": [
+          "按群ID",
+          "按用户ID"
+        ],
+        "hint": "默认按群ID存储（推荐）。"
+      },
+      "group_memory_private_session_only": {
+        "description": "群聊仅检索自己的记忆",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后群聊记忆按用户隔离（强制使用 user_id 作为 session）。"
+      },
+      "group_memory_allow_private_recall": {
+        "description": "群聊检索私聊记忆",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后群聊检索会额外包含该用户的私聊记忆。默认关闭。"
+      }
+    }
+  },
   "retrieval_ranking": {
     "description": "检索与排序",
     "type": "object",
