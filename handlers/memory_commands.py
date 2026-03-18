@@ -243,7 +243,7 @@ class MemoryCommandHandler:
         
         loop = asyncio.get_event_loop()
         try:
-            from ..db_manager import RawMemory
+            RawMemory = self.db.RawMemory
             def _clear_raw():
                 with self.db.db.connection_context():
                     RawMemory.delete().where((RawMemory.user_id == user_id) & (RawMemory.is_archived == False)).execute()
@@ -275,7 +275,8 @@ class MemoryCommandHandler:
             # 确保 ChromaDB 已初始化
             await self.memory._ensure_chroma_initialized()
             
-            from ..db_manager import MemoryIndex, RawMemory
+            MemoryIndex = self.db.MemoryIndex
+            RawMemory = self.db.RawMemory
             def _clear_archive():
                 with self.db.db.connection_context():
                     MemoryIndex.delete().where(MemoryIndex.user_id == user_id).execute()

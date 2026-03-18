@@ -27,6 +27,11 @@ class MemoryScheduler:
         self._is_shutdown = False
         self._tasks = []  # 追踪后台任务
         self._task_metrics = {}  # 任务可观测指标：耗时/成功率/失败率/跳过原因
+
+    def _push_activity(self, title: str, *, category: str = "task", source: str = "private", meta: dict | None = None):
+        manager = getattr(self.logic, "_memory_manager", None)
+        if manager and hasattr(manager, "add_activity"):
+            manager.add_activity(title=title, category=category, source=source, meta=meta)
     
     async def start(self):
         """启动所有调度任务"""
@@ -320,8 +325,16 @@ class MemoryScheduler:
             logger.info(f"Engram：每日画像更新完成，处理用户数={len(user_ids)}")
             if had_error:
                 self._observe_run(task_name, started_at, False, RuntimeError("daily_persona_partial_failure"))
+                self._push_activity(
+                    title=f"每日画像更新部分失败（{len(user_ids)} 用户）",
+                    meta={"users": len(user_ids)},
+                )
             else:
                 self._observe_run(task_name, started_at, True)
+                self._push_activity(
+                    title=f"每日画像更新完成（{len(user_ids)} 用户）",
+                    meta={"users": len(user_ids)},
+                )
         else:
             self._observe_skip(task_name, "no_active_users")
 
@@ -551,8 +564,16 @@ class MemoryScheduler:
 
         if had_error:
             self._observe_run(task_name, started_at, False, RuntimeError("weekly_folding_partial_failure"))
+            self._push_activity(
+                title=f"周折叠部分失败（{len(user_ids)} 用户）",
+                meta={"users": len(user_ids)},
+            )
         else:
             self._observe_run(task_name, started_at, True)
+            self._push_activity(
+                title=f"周折叠完成（{len(user_ids)} 用户）",
+                meta={"users": len(user_ids)},
+            )
 
     async def _execute_monthly_folding(self):
         """执行所有用户的月总结折叠。"""
@@ -602,8 +623,16 @@ class MemoryScheduler:
 
         if had_error:
             self._observe_run(task_name, started_at, False, RuntimeError("monthly_folding_partial_failure"))
+            self._push_activity(
+                title=f"月折叠部分失败（{len(user_ids)} 用户）",
+                meta={"users": len(user_ids)},
+            )
         else:
             self._observe_run(task_name, started_at, True)
+            self._push_activity(
+                title=f"月折叠完成（{len(user_ids)} 用户）",
+                meta={"users": len(user_ids)},
+            )
 
     async def _execute_yearly_folding(self):
         """执行所有用户的年度总结折叠。"""
@@ -653,8 +682,16 @@ class MemoryScheduler:
 
         if had_error:
             self._observe_run(task_name, started_at, False, RuntimeError("yearly_folding_partial_failure"))
+            self._push_activity(
+                title=f"年折叠部分失败（{len(user_ids)} 用户）",
+                meta={"users": len(user_ids)},
+            )
         else:
             self._observe_run(task_name, started_at, True)
+            self._push_activity(
+                title=f"年折叠完成（{len(user_ids)} 用户）",
+                meta={"users": len(user_ids)},
+            )
 
     # ========== 记忆衰减与修剪 ==========
 
@@ -771,5 +808,13 @@ class MemoryScheduler:
 
         if had_error:
             self._observe_run(task_name, started_at, False, RuntimeError("memory_maintenance_partial_failure"))
+            self._push_activity(
+                title="记忆维护部分失败",
+                meta={"decay": enable_decay, "prune": enable_prune},
+            )
         else:
             self._observe_run(task_name, started_at, True)
+            self._push_activity(
+                title="记忆维护完成",
+                meta={"decay": enable_decay, "prune": enable_prune},
+            )

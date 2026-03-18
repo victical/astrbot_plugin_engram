@@ -770,5 +770,60 @@
         "hint": "用于存放 Markdown 转图片的 CSS 样式文件或模板目录。留空则自动使用插件数据目录下的 styles 文件夹。"
       }
     }
+  },
+  "webui_server": {
+    "description": "WebUI 服务端",
+    "type": "object",
+    "hint": "内置 WebUI 服务配置。",
+    "items": {
+      "enable_webui_server": {
+        "description": "启用 WebUI 服务",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后插件会在指定端口启动 WebUI 服务。"
+      },
+      "enable_webui_auth": {
+        "description": "启用 WebUI 登录鉴权",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后访问 WebUI 需要先登录。若未设置密码，插件会在日志中生成一次随机密码。"
+      },
+      "webui_access_password": {
+        "description": "WebUI 访问密码",
+        "type": "string",
+        "default": "",
+        "hint": "留空则首次启动时自动生成随机密码，并写入日志与密码文件。"
+      },
+      "webui_host": {
+        "description": "WebUI 监听地址",
+        "type": "string",
+        "default": "0.0.0.0",
+        "hint": "WebUI 服务监听地址。"
+      },
+      "webui_port": {
+        "description": "WebUI 监听端口",
+        "type": "int",
+        "default": 8080,
+        "hint": "WebUI 服务端口，默认 8080。"
+      },
+      "webui_login_max_attempts": {
+        "description": "登录失败次数限制",
+        "type": "int",
+        "default": 5,
+        "hint": "在时间窗口内的最大失败登录次数。"
+      },
+      "webui_login_window_seconds": {
+        "description": "登录失败时间窗口（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "统计登录失败次数的窗口时长。"
+      },
+      "webui_cors_origin": {
+        "description": "允许的跨域来源",
+        "type": "string",
+        "default": "",
+        "hint": "为空表示不设置 CORS；设置为具体来源例如 http://localhost:3000。"
+      }
+    }
   }
 }

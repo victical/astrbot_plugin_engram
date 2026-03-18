@@ -38,6 +38,7 @@ class MemoryFacade:
         self.config = config
         self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
+        logger.info("Engram：MemoryFacade data_dir=%s", os.path.abspath(self.data_dir))
         
         # 共享的线程池
         self.executor = ThreadPoolExecutor(max_workers=4)

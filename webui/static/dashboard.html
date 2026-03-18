@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Engram WebUI · 主页</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script>
+    // Polyfill for crypto.randomUUID in non-secure contexts (HTTP)
+    if (!window.crypto || !window.crypto.randomUUID) {
+      window.crypto = window.crypto || {};
+      window.crypto.randomUUID = function () {
+        return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
+          (c ^ (crypto.getRandomValues ? crypto.getRandomValues(new Uint8Array(1))[0] : Math.floor(Math.random() * 256)) & 15 >> c / 4).toString(16)
+        );
+      };
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="badge">Engram</span>
+        <div>
+          <h1 class="brand-title">记忆控制台</h1>
+          <p class="brand-subtitle">长期记忆 · 画像 · 统计概览</p>
+        </div>
+      </div>
+      <nav class="topbar-actions">
+        <a class="nav-link active" href="/static/dashboard.html">主页</a>
+        <a class="nav-link" href="/static/memories.html">记忆</a>
+        <a class="nav-link" href="/static/profile.html">画像</a>
+        <button class="btn btn-primary" id="logout">退出</button>
+      </nav>
+    </header>
+
+    <main class="content">
+      <section>
+        <div class="stat-grid">
+          <div class="card stat-card">
+            <!-- <h3 class="section-title">私聊统计概览</h3> -->
+            <p class="stat-label">私聊总消息</p>
+            <h2 class="stat-value" id="stat-total">--</h2>
+            <p class="stat-meta">全量私聊记录</p>
+          </div>
+          <div class="card stat-card">
+            <p class="stat-label">活跃用户数</p>
+            <h2 class="stat-value" id="stat-users">--</h2>
+            <p class="stat-meta">已识别对话主体</p>
+          </div>
+          <div class="card stat-card">
+            <p class="stat-label">已归档记忆</p>
+            <h2 class="stat-value" id="stat-archived">--</h2>
+            <p class="stat-meta" id="stat-unarchived">待归档 --</p>
+          </div>
+          <div class="card stat-card">
+            <p class="stat-label">记忆索引量</p>
+            <h2 class="stat-value" id="stat-index">--</h2>
+            <p class="stat-meta db-path" id="stat-db">系统数据库</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="stat-grid">
+          <div class="card stat-card">
+            <!-- <h3 class="section-title">群聊统计概览</h3> -->
+            <p class="stat-label">群聊总消息</p>
+            <h2 class="stat-value" id="group-stat-total">--</h2>
+            <p class="stat-meta">全量群聊记录</p>
+          </div>
+          <div class="card stat-card">
+            <p class="stat-label">活跃群组数</p>
+            <h2 class="stat-value" id="group-stat-users">--</h2>
+            <p class="stat-meta">已覆盖群聊空间</p>
+          </div>
+          <div class="card stat-card">
+            <p class="stat-label">群记忆归档</p>
+            <h2 class="stat-value" id="group-stat-archived">--</h2>
+            <p class="stat-meta" id="group-stat-unarchived">待归档 --</p>
+          </div>
+          <div class="card stat-card">
+            <p class="stat-label">群记忆索引</p>
+            <h2 class="stat-value" id="group-stat-index">--</h2>
+            <p class="stat-meta db-path" id="group-stat-db">群组数据库</p>
+          </div>
+        </div>
+      </section>
+
+      <p class="form-hint" id="dashboard-hint"></p>
+
+      <section class="split-grid">
+        <div class="card">
+          <header class="section-header">
+            <h3 class="section-title">趋势统计</h3>
+            <span class="section-muted">近 7 日消息增量</span>
+          </header>
+          <div style="height: 220px; position: relative;">
+            <canvas id="statsChart"></canvas>
+          </div>
+        </div>
+        <div class="card">
+          <header class="section-header">
+            <h3 class="section-title">近期动态</h3>
+            <span class="section-muted">系统任务与事件</span>
+          </header>
+          <ul class="activity-list" id="activity-list"></ul>
+          <p class="form-hint" id="activity-hint">加载中...</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <header class="section-header">
+          <h3 class="section-title">系统状态</h3>
+          <span class="section-muted">关键指标</span>
+        </header>
+        <div class="status-grid">
+          <div>
+            <p class="status-label">运行模式</p>
+            <p class="status-value">Balanced</p>
+          </div>
+          <div>
+            <p class="status-label">向量服务</p>
+            <p class="status-value">在线</p>
+          </div>
+          <div>
+            <p class="status-label">任务队列</p>
+            <p class="status-value">空闲</p>
+          </div>
+          <div>
+            <p class="status-label">最近清理</p>
+            <p class="status-value">3 天前</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/auth.js?v=2"></script>
+  <script src="/static/dashboard.js?v=2"></script>
+</body>
+
+</html>

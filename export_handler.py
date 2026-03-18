@@ -94,12 +94,12 @@ class ExportHandler:
 
         # 长期记忆索引统计
         def _count_user_indexes(uid):
-            from .db_manager import MemoryIndex
+            MemoryIndex = self.logic.db.MemoryIndex
             with self.logic.db.db.connection_context():
                 return MemoryIndex.select().where(MemoryIndex.user_id == uid).count()
 
         def _count_all_indexes():
-            from .db_manager import MemoryIndex
+            MemoryIndex = self.logic.db.MemoryIndex
             with self.logic.db.db.connection_context():
                 return MemoryIndex.select().count()
 

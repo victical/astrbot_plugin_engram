@@ -100,7 +100,7 @@ class ConfigPresetService:
         grouped_markers = {
             "preset_and_basic", "archive", "group_memory", "retrieval_ranking", "tool_search",
             "intent", "decay", "folding", "persona", "command_filter",
-            "embedding_misc"
+            "embedding_misc", "webui_server"
         }
         if not any(k in config for k in grouped_markers):
             return dict(config)

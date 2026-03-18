@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Engram WebUI · 用户画像</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="badge">Engram</span>
+          <div>
+            <h1 class="brand-title">用户画像</h1>
+            <p class="brand-subtitle">深度洞察与手账预览</p>
+          </div>
+        </div>
+        <nav class="topbar-actions">
+          <a class="nav-link" href="/static/dashboard.html">主页</a>
+          <a class="nav-link" href="/static/memories.html">记忆</a>
+          <a class="nav-link active" href="/static/profile.html">画像</a>
+          <button class="btn btn-primary" id="logout">退出</button>
+        </nav>
+      </header>
+
+      <main class="content">
+        <section class="card">
+          <header class="section-header">
+            <h3 class="section-title">用户选择</h3>
+            <span class="section-muted">输入 user_id 以查看深度画像</span>
+          </header>
+          <div class="filter-grid">
+            <div class="autocomplete profile-autocomplete">
+              <input id="profile-user" class="form-input" placeholder="输入 user_id..." autocomplete="off" />
+              <div id="profile-user-suggest" class="suggest-list profile-suggest-list hidden"></div>
+            </div>
+            <button class="btn btn-primary" id="profile-load">加载画像</button>
+          </div>
+          <p class="form-hint" id="profile-hint"></p>
+        </section>
+
+        <div class="profile-layout">
+          <!-- 左侧：基础信息 -->
+          <section class="card profile-info-card">
+            <header class="section-header">
+              <h3 class="section-title">基础资料</h3>
+              <span class="section-muted">BASIC INFO</span>
+            </header>
+            <div id="info-display" class="info-list">
+              <div class="placeholder">请加载画像...</div>
+            </div>
+          </section>
+
+          <!-- 中间：偏好与标签 -->
+          <section class="card profile-tags-card">
+            <header class="section-header">
+              <h3 class="section-title">偏好与标签</h3>
+              <span class="section-muted">TAGS & PREFERENCES</span>
+            </header>
+            <div id="tags-container" class="tags-group-wrapper">
+              <div class="placeholder">请加载画像以查看标签</div>
+            </div>
+          </section>
+
+          <!-- 右侧：画像渲染 -->
+          <section class="card profile-render-card">
+            <header class="section-header">
+              <h3 class="section-title">画像渲染</h3>
+            </header>
+            <div class="render-canvas" id="profile-canvas">
+              <div class="placeholder">无预览图</div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script src="/static/auth.js"></script>
+    <script src="/static/profile.js"></script>
+  </body>
+</html>

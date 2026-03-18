@@ -18,6 +18,7 @@ from .services import (
     TimeExpressionService,
     FriendCacheService,
 )
+from .webui_server import EngramWebServer
 from . import utils as utils_module
 
 import asyncio
@@ -35,7 +36,7 @@ class FriendAddNoticeFilter(filter.CustomFilter):
         return raw.get("post_type") == "notice" and raw.get("notice_type") == "friend_add"
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.6.0")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.6.5")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -84,6 +85,24 @@ class EngramPlugin(Star):
         # 初始化调度器
         self._scheduler = MemoryScheduler(self.logic, self.config)
         asyncio.create_task(self._scheduler.start())
+
+        # WebUI 服务端
+        self.enable_webui_server = self.config.get("enable_webui_server", False)
+        self.webui_host = self.config.get("webui_host", "0.0.0.0")
+        self.webui_port = int(self.config.get("webui_port", 8080))
+        self._webui_server = None
+        if self.enable_webui_server:
+            try:
+                logger.info(
+                    "Engram：准备启动 WebUI 服务 host=%s port=%s",
+                    self.webui_host,
+                    self.webui_port
+                )
+                self._webui_server = EngramWebServer(self, host=self.webui_host, port=self.webui_port)
+                asyncio.create_task(self._webui_server.start())
+            except Exception as e:
+                logger.error(f"Engram：WebUI 服务启动失败：{e}")
+                self._webui_server = None
         
 
     def _is_command_message(self, content: str) -> bool:
@@ -187,11 +206,27 @@ class EngramPlugin(Star):
     def _resolve_group_storage_id(self, group_id: str, sender_id: str) -> str:
         """根据配置决定群聊记忆的 session/user 绑定方式。"""
         if self.config.get("group_memory_private_session_only", False):
-            return sender_id or group_id
+            storage_id = sender_id or group_id
+            logger.debug(
+                "Engram：resolve_group_storage_id private_only=True group_id=%s sender_id=%s storage_id=%s",
+                group_id,
+                sender_id,
+                storage_id,
+            )
+            return storage_id
         mode = str(self.config.get("group_memory_store_session_as", "group_id")).strip().lower()
         if mode == "user_id":
-            return sender_id or group_id
-        return group_id
+            storage_id = sender_id or group_id
+        else:
+            storage_id = group_id
+        logger.debug(
+            "Engram：resolve_group_storage_id mode=%s group_id=%s sender_id=%s storage_id=%s",
+            mode,
+            group_id,
+            sender_id,
+            storage_id,
+        )
+        return storage_id
 
     async def _group_memory_friend_allowed(self, event: AstrMessageEvent) -> bool:
         """群聊好友白名单判断。"""
@@ -1089,6 +1124,32 @@ class EngramPlugin(Star):
     @filter.command("mem_stats")
     async def mem_stats(self, event: AstrMessageEvent):
         """查看消息统计信息"""
+        user_id = event.get_sender_id()
+        group_id = event.get_group_id()
+        storage_id = None
+        if group_id:
+            storage_id = self._resolve_group_storage_id(group_id, user_id)
+        db_path = getattr(self.logic.db, "db_path", None) or getattr(
+            getattr(self.logic.db, "_backend", None), "db_path", None
+        )
+        inode = None
+        db_size = None
+        try:
+            if db_path:
+                stat = os.stat(db_path)
+                inode = getattr(stat, "st_ino", None)
+                db_size = getattr(stat, "st_size", None)
+        except Exception as e:
+            logger.debug("Engram：mem_stats 读取 db_path 失败：%s", e)
+        logger.info(
+            "Engram：mem_stats user_id=%s group_id=%s storage_id=%s db_path=%s inode=%s size=%s",
+            user_id,
+            group_id,
+            storage_id,
+            db_path,
+            inode,
+            db_size,
+        )
         async for result in self.export_handler.handle_stats_command(event):
             yield result
     
@@ -1141,7 +1202,14 @@ class EngramPlugin(Star):
             except Exception as e:
                 logger.debug(f"Engram：等待群聊调度任务结束时发生异常：{e}")
 
-        # 步骤3：最后关闭线程池和其他资源
+        # 步骤3：关闭 WebUI 服务
+        if getattr(self, "_webui_server", None):
+            try:
+                await self._webui_server.stop()
+            except Exception as e:
+                logger.error(f"Engram：停止 WebUI 服务失败：{e}")
+
+        # 步骤4：最后关闭线程池和其他资源
         self.logic._memory_manager.shutdown()
         if getattr(self, "_group_memory_manager", None):
             self._group_memory_manager.shutdown()

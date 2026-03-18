@@ -131,6 +131,28 @@ class ProfileManager:
         loop = asyncio.get_event_loop()
         path = self._get_profile_path(user_id)
 
+        def _merge_value(old_value, new_value):
+            if isinstance(new_value, dict):
+                base = old_value if isinstance(old_value, dict) else {}
+                merged = dict(base)
+                for k, v in new_value.items():
+                    merged[k] = _merge_value(merged.get(k), v)
+                return merged
+
+            if isinstance(new_value, list):
+                base = old_value if isinstance(old_value, list) else ([] if old_value in (None, "") else [old_value])
+                merged = []
+                seen = set()
+                for item in list(base) + list(new_value):
+                    marker = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, (dict, list)) else repr(item)
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    merged.append(item)
+                return merged
+
+            return new_value
+
         def _update():
             profile = self._build_default_profile(user_id)
             if os.path.exists(path):
@@ -138,24 +160,11 @@ class ProfileManager:
                     with open(path, 'r', encoding='utf-8') as f:
                         loaded = json.load(f)
                         if isinstance(loaded, dict):
-                            profile.update(loaded)
+                            profile = _merge_value(profile, loaded)
                 except Exception as e:
                     logger.debug(f"Engram 画像管理器：加载已有画像失败（{path}），继续使用默认画像：{e}")
 
-            for key, value in update_data.items():
-                if isinstance(value, list):
-                    old_list = profile.get(key, [])
-                    if not isinstance(old_list, list):
-                        old_list = [old_list]
-                    profile[key] = list(set(old_list + value))
-                elif isinstance(value, dict):
-                    old_dict = profile.get(key, {})
-                    if not isinstance(old_dict, dict):
-                        old_dict = {}
-                    old_dict.update(value)
-                    profile[key] = old_dict
-                else:
-                    profile[key] = value
+            profile = _merge_value(profile, update_data)
 
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(profile, f, ensure_ascii=False, indent=4)

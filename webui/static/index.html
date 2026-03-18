@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Engram WebUI 登录</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <main class="login-card" role="main">
+        <header class="login-header">
+          <span class="badge">Engram WebUI</span>
+          <h1>进入控制台</h1>
+          <p>请输入插件配置中设置的 WebUI 密码。</p>
+        </header>
+
+        <form class="login-form" id="login-form">
+          <label class="form-label" for="login-password">访问密码</label>
+          <input id="login-password" class="form-input" type="password" placeholder="输入密码" autocomplete="current-password" />
+          <button class="btn btn-primary" type="submit">登录</button>
+          <p class="form-hint" id="login-hint"></p>
+        </form>
+
+        <div class="login-footer">
+          <span>请在插件配置的 webui_access_password 中设置密码，修改后重启插件生效。</span>
+        </div>
+      </main>
+    </div>
+    <script>
+      const form = document.getElementById('login-form');
+      const input = document.getElementById('login-password');
+      const hint = document.getElementById('login-hint');
+
+      form?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const password = input?.value.trim() || '';
+        if (!password) {
+          hint.textContent = '请输入密码';
+          hint.classList.add('error');
+          return;
+        }
+
+        hint.textContent = '登录中...';
+        hint.classList.remove('error');
+
+        try {
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+          });
+
+          const raw = await res.text();
+          let payload = {};
+          try {
+            payload = JSON.parse(raw || '{}');
+          } catch (e) {
+            payload = {};
+          }
+
+          if (!res.ok || !payload.token) {
+            hint.textContent = payload.detail || payload.error || raw || `登录失败 (${res.status})`;
+            hint.classList.add('error');
+            return;
+          }
+
+          localStorage.setItem('engram_token', payload.token);
+          localStorage.removeItem('engram_force_change');
+          window.location.href = '/static/dashboard.html';
+        } catch (e) {
+          hint.textContent = '网络请求失败';
+          hint.classList.add('error');
+        }
+      });
+    </script>
+  </body>
+</html>
