@@ -8,8 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.6.5] - 2026-03-19
 
 ### Added
-- 明确支持 **群聊记忆**：群聊记忆独立存储、检索、删除、撤销与归档。
-- 明确支持 **WebUI 控制台**：支持登录访问、主页统计、记忆详情、用户画像与基础管理。
+- 支持 **WebUI 控制台**：支持登录访问、主页统计、记忆详情、用户画像与基础管理。
 
 ### Changed
 - 统一版本号到 `1.6.5`。
