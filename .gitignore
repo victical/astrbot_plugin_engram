@@ -41,3 +41,5 @@ FUNCTION_TOOL_REFACTOR_NOTES.md
 tools/
 reports/
 REFACTOR_CHECKLIST.md
+dev-docs
+sync_engram.sh
