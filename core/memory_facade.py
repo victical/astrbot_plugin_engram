@@ -112,7 +112,7 @@ class MemoryFacade:
         """确保 ChromaDB 已初始化"""
         return await self._memory_manager._ensure_chroma_initialized()
     
-    async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
+    async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None, **extra_fields):
         """记录原始消息"""
         return await self._memory_manager.record_message(
             user_id=user_id,
@@ -120,7 +120,8 @@ class MemoryFacade:
             role=role,
             content=content,
             msg_type=msg_type,
-            user_name=user_name
+            user_name=user_name,
+            **extra_fields,
         )
     
     async def check_and_summarize(self):

@@ -14,6 +14,8 @@ class RawMemory(BaseModel):
     uuid = CharField(primary_key=True)
     session_id = CharField(index=True)  # 添加索引：按会话查询
     user_id = CharField(index=True)     # 添加索引：按用户查询
+    group_id = CharField(null=True, index=True)
+    member_id = CharField(null=True, index=True)
     user_name = CharField(null=True)
     role = CharField()
     content = TextField()
@@ -95,6 +97,7 @@ class DatabaseManager:
         # 为每个 DatabaseManager 生成独立模型，避免多 DB 互相覆盖
         self.RawMemory = self._bind_model(RawMemory, self.db)
         self.MemoryIndex = self._bind_model(MemoryIndex, self.db)
+        self._table_columns_cache = {}
 
         self.init_db()
 
@@ -102,6 +105,17 @@ class DatabaseManager:
         self.db.connect(reuse_if_open=True)
         self.db.create_tables([self.RawMemory, self.MemoryIndex])
         self.db.close()
+
+    def _get_table_columns(self, model):
+        table_name = model._meta.table_name
+        cached = self._table_columns_cache.get(table_name)
+        if cached is not None:
+            return cached
+        with self.db.connection_context():
+            rows = self.db.execute_sql(f"PRAGMA table_info({table_name})").fetchall()
+        columns = {str(row[1]) for row in rows if len(row) > 1}
+        self._table_columns_cache[table_name] = columns
+        return columns
 
     def save_raw_memory(self, **kwargs):
         with self.db.connection_context():
@@ -120,7 +134,27 @@ class DatabaseManager:
 
     def get_memories_by_uuids(self, uuids):
         with self.db.connection_context():
-            return list(self.RawMemory.select().where(self.RawMemory.uuid << uuids).order_by(self.RawMemory.timestamp.asc()))
+            available_columns = self._get_table_columns(self.RawMemory)
+            fields = [
+                self.RawMemory.uuid,
+                self.RawMemory.session_id,
+                self.RawMemory.user_id,
+                self.RawMemory.user_name,
+                self.RawMemory.role,
+                self.RawMemory.content,
+                self.RawMemory.msg_type,
+                self.RawMemory.is_archived,
+                self.RawMemory.timestamp,
+            ]
+            if "group_id" in available_columns and hasattr(self.RawMemory, "group_id"):
+                fields.append(self.RawMemory.group_id)
+            if "member_id" in available_columns and hasattr(self.RawMemory, "member_id"):
+                fields.append(self.RawMemory.member_id)
+            return list(
+                self.RawMemory.select(*fields)
+                .where(self.RawMemory.uuid << uuids)
+                .order_by(self.RawMemory.timestamp.asc())
+            )
 
     def save_memory_index(self, **kwargs):
         with self.db.connection_context():
@@ -332,6 +366,20 @@ class DatabaseManager:
         """获取所有出现过的用户ID"""
         with self.db.connection_context():
             return [row.user_id for row in self.RawMemory.select(self.RawMemory.user_id).distinct()]
+
+    def get_all_group_ids(self):
+        """获取所有出现过的群组ID。"""
+        available_columns = self._get_table_columns(self.RawMemory)
+        if "group_id" not in available_columns or not hasattr(self.RawMemory, "group_id"):
+            return []
+        with self.db.connection_context():
+            return [
+                row.group_id
+                for row in self.RawMemory.select(self.RawMemory.group_id)
+                .where(self.RawMemory.group_id.is_null(False))
+                .distinct()
+                if str(row.group_id or "").strip()
+            ]
     
     def get_all_users_stats(self):
         """获取所有用户的统计信息"""
@@ -390,6 +438,7 @@ class StableDatabaseInterface:
         "get_message_stats",
         "get_all_users_messages",
         "get_all_user_ids",
+        "get_all_group_ids",
         "get_all_users_stats",
     )
 

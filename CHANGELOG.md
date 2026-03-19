@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.7] - 2026-03-20
+
+### Added
+- 群聊记忆 WebUI：新增群聊记忆列表页与详情页，支持浏览、搜索、删除与 Dashboard 跳转入口。
+- 群聊 WebUI 兼容逻辑：兼容旧数据库表结构缺少 `group_id/member_id` 列的场景，避免旧数据环境直接报错。
+- `chromadb` 可选降级：未安装 `chromadb` 时自动回退为 SQLite 关键词检索模式。
+
+### Changed
+- 群聊记忆页面默认展示全部群聊记忆，不再强制先输入群组 ID。
+- 群聊记忆列表界面简化：移除“成员”列与成员筛选输入框，成员缺失时统一文案为“多人”。
+- 群组统计优先显示真实群组数量，并补充群聊记忆 WebUI 导航入口。
+- 统一版本号到 `1.6.7`。
+
 ## [1.6.5] - 2026-03-19
 
 ### Added

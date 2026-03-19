@@ -19,7 +19,11 @@
 - profile_manager: 用户画像管理器（用于实时更新画像）
 """
 
-import chromadb
+try:
+    import chromadb
+except ImportError:
+    chromadb = None
+
 import os
 import shutil
 import uuid
@@ -710,7 +714,7 @@ class MemoryManager:
 
     # ========== 消息记录 ==========
 
-    async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None):
+    async def record_message(self, user_id, session_id, role, content, msg_type="text", user_name=None, **extra_fields):
         """记录原始消息"""
         normalized_content = str(content or "").strip()
         if not self._is_valid_message_content(normalized_content):
@@ -1226,6 +1230,7 @@ class MemoryManager:
         }
 
         # 先落索引，向量失败不阻断折叠主流程
+        scope_fields = self._derive_scope_fields(selected)
         index_params = {
             "index_id": index_id,
             "summary": summary_text,
@@ -1233,6 +1238,8 @@ class MemoryManager:
             "prev_index_id": prev_index_id,
             "source_type": output_source_type,
             "user_id": user_id,
+            "group_id": scope_fields.get("group_id"),
+            "member_id": scope_fields.get("member_id"),
             "created_at": created_at
         }
         await loop.run_in_executor(self.executor, lambda: self.db.save_memory_index(**index_params))
@@ -1857,9 +1864,8 @@ class MemoryManager:
 
             # 过滤后重建索引映射
             index_ids = [item['index_id'] for item in memory_data]
-            index_map = {idx: index_map[idx] for idx in index_ids if idx in index_map}
+            index_map = await loop.run_in_executor(self.executor, self.db.get_memory_indexes_by_ids, index_ids)
 
-        now_ts = time.time()
         # 30天半衰期：越近的记忆 recency 越高
         recency_half_life_days = float(self.config.get("rank_recency_half_life_days", 30))
         recency_half_life_days = max(1.0, recency_half_life_days)
@@ -2127,7 +2133,6 @@ class MemoryManager:
     async def _find_memory_by_short_id(self, user_id, short_id):
         """按短 ID（8位）或完整 ID 查询记忆索引。"""
         loop = asyncio.get_event_loop()
-        short_id = str(short_id or "").strip()
 
         def _find_memory():
             with self.db.db.connection_context():
@@ -2301,6 +2306,8 @@ class MemoryManager:
                 'prev_index_id': delete_record['prev_index_id'],
                 'source_type': delete_record['source_type'],
                 'user_id': delete_record['user_id'],
+                'group_id': delete_record.get('group_id'),
+                'member_id': delete_record.get('member_id'),
                 'created_at': delete_record['created_at'],
                 'active_score': delete_record.get('active_score', 100)
             }
@@ -2416,6 +2423,8 @@ class MemoryManager:
                         "index_id": item.index_id,
                         "summary": summary,
                         "user_id": item.user_id,
+                        "group_id": getattr(item, "group_id", None),
+                        "member_id": getattr(item, "member_id", None),
                         "source_type": item.source_type,
                         "created_at": created_at
                     })
@@ -2468,12 +2477,17 @@ class MemoryManager:
             for row in batch:
                 created_at = row["created_at"]
                 created_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at, "strftime") else str(created_at)
-                metadatas.append({
+                metadata = {
                     "user_id": row["user_id"],
                     "source_type": row["source_type"],
                     "created_at": created_str,
                     "ai_name": str(self.config.get("ai_name") or "").strip()
-                })
+                }
+                if row.get("group_id"):
+                    metadata["group_id"] = row["group_id"]
+                if row.get("member_id"):
+                    metadata["member_id"] = row["member_id"]
+                metadatas.append(metadata)
 
             try:
                 ok = await self._collection_add_texts(ids=ids, documents=documents, metadatas=metadatas)
@@ -2588,7 +2602,7 @@ class MemoryManager:
             )
 
             if not raw_msgs:
-                return False, "没有找到可导出的消息", {}
+                return self._format_export_output(format, [], {})
 
             # 获取统计信息
             stats = await loop.run_in_executor(self.executor, self.db.get_all_users_stats)

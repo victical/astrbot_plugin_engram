@@ -36,7 +36,7 @@ class FriendAddNoticeFilter(filter.CustomFilter):
         return raw.get("post_type") == "notice" and raw.get("notice_type") == "friend_add"
 
 
-@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.6.5")
+@register("astrbot_plugin_engram", "victical", "仿生双轨记忆系统", "1.6.7")
 class EngramPlugin(Star):
     """
     Engram 仿生双轨记忆系统插件
@@ -575,14 +575,18 @@ class EngramPlugin(Star):
                 session_id=storage_id,
                 role="user",
                 content=user_content,
-                user_name=f"{user_name}({sender_id})" if user_name else str(sender_id or "")
+                user_name=f"{user_name}({sender_id})" if user_name else str(sender_id or ""),
+                group_id=group_id,
+                member_id=sender_id,
             )
             await group_manager.record_message(
                 user_id=storage_id,
                 session_id=storage_id,
                 role="assistant",
                 content=content,
-                user_name=str(self.config.get("ai_name") or "").strip()
+                user_name=str(self.config.get("ai_name") or "").strip(),
+                group_id=group_id,
+                member_id=sender_id,
             )
             logger.debug(
                 "Engram：群聊记忆已记录 group_id=%s storage_id=%s",

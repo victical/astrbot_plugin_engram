@@ -6,6 +6,7 @@ Engram WebUI Server
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import time
 from pathlib import Path
@@ -239,6 +240,12 @@ class EngramWebServer:
         memory_index_count = await self._run_in_executor(_count_indexes)
         stats = dict(stats or {})
         stats["memory_index_count"] = memory_index_count
+        if hasattr(db, "get_all_group_ids"):
+            try:
+                group_ids = await self._run_in_executor(db.get_all_group_ids)
+                stats["group_count"] = len(group_ids or [])
+            except Exception:
+                pass
         stats["db_path"] = getattr(db, "db_path", None) or getattr(
             getattr(db, "_backend", None), "db_path", None
         )
@@ -283,6 +290,112 @@ class EngramWebServer:
         except Exception as exc:
             logger.warning("Engram WebUI 初始化群聊记忆失败: %s", exc)
         return getattr(self.plugin, "_group_db", None)
+
+    @staticmethod
+    def _parse_group_member_snapshot(user_name: str | None) -> tuple[str | None, str | None]:
+        text = str(user_name or "").strip()
+        if not text:
+            return None, None
+        if text.endswith(")") and "(" in text:
+            left, right = text.rsplit("(", 1)
+            member_id = right[:-1].strip()
+            if member_id:
+                member_name = left.strip() or member_id
+                return member_id, member_name
+        return None, text
+
+    def _load_group_memory_raw_messages(self, group_db, memory_index):
+        if not memory_index or not getattr(memory_index, "ref_uuids", None):
+            return []
+        try:
+            uuids = json.loads(memory_index.ref_uuids)
+        except Exception:
+            return []
+        if not isinstance(uuids, list) or not uuids:
+            return []
+        return group_db.get_memories_by_uuids(uuids)
+
+    def _extract_group_memory_meta(self, memory_index, raw_msgs=None, fallback_group_id: str = ""):
+        group_id = str(
+            getattr(memory_index, "group_id", "")
+            or fallback_group_id
+            or getattr(memory_index, "user_id", "")
+            or ""
+        )
+        member_id = str(getattr(memory_index, "member_id", "") or "")
+        member_name = member_id
+        participants = []
+        seen = set()
+
+        for msg in raw_msgs or []:
+            if getattr(msg, "role", "") != "user":
+                continue
+            current_member_id = str(getattr(msg, "member_id", "") or "")
+            current_member_name = None
+            if not current_member_id:
+                current_member_id, current_member_name = self._parse_group_member_snapshot(
+                    getattr(msg, "user_name", None)
+                )
+            if current_member_id:
+                current_member_name = current_member_name or getattr(msg, "user_name", None) or current_member_id
+                if not member_id:
+                    member_id = current_member_id
+                    member_name = current_member_name or current_member_id
+                if current_member_id not in seen:
+                    participants.append(
+                        {
+                            "member_id": current_member_id,
+                            "member_name": current_member_name or current_member_id,
+                        }
+                    )
+                    seen.add(current_member_id)
+
+        return {
+            "group_id": group_id,
+            "member_id": member_id,
+            "member_name": member_name,
+            "participants": participants,
+        }
+
+    def _serialize_group_memory_item(self, memory_index, raw_msgs=None, fallback_group_id: str = ""):
+        meta = self._extract_group_memory_meta(
+            memory_index, raw_msgs=raw_msgs, fallback_group_id=fallback_group_id
+        )
+        created_at = self.logic._ensure_datetime(memory_index.created_at)
+        return {
+            "id": memory_index.index_id,
+            "group_id": meta["group_id"],
+            "member_id": meta["member_id"],
+            "member_name": meta["member_name"],
+            "summary": memory_index.summary,
+            "source_type": memory_index.source_type,
+            "active_score": getattr(memory_index, "active_score", 100),
+            "created_at": created_at.isoformat(),
+        }
+
+    def _group_memory_matches_member(self, member_id: str, raw_msgs) -> bool:
+        normalized_member_id = str(member_id or "").strip()
+        if not normalized_member_id:
+            return True
+        for msg in raw_msgs or []:
+            if getattr(msg, "role", "") != "user":
+                continue
+            current_member_id = str(getattr(msg, "member_id", "") or "").strip()
+            if not current_member_id:
+                current_member_id, _ = self._parse_group_member_snapshot(getattr(msg, "user_name", None))
+            if current_member_id == normalized_member_id:
+                return True
+        return False
+
+    def _model_has_table_column(self, db, model, column_name: str) -> bool:
+        backend = getattr(db, "_backend", db)
+        getter = getattr(backend, "_get_table_columns", None)
+        if callable(getter):
+            try:
+                return str(column_name) in getter(model)
+            except Exception:
+                return hasattr(model, column_name)
+        return hasattr(model, column_name)
 
     def _setup_routes(self):
         static_dir = Path(__file__).resolve().parent / "webui" / "static"
@@ -392,6 +505,34 @@ class EngramWebServer:
                 }
             except Exception as exc:
                 logger.error("Engram WebUI 获取用户列表失败: %s", exc, exc_info=True)
+                return {"success": False, "error": str(exc)}
+
+        @self._app.get("/api/groups")
+        async def list_groups(token: str = Depends(self._auth_dependency())):
+            del token
+            try:
+                group_db = await self._get_group_db()
+                if group_db is None:
+                    return {"success": True, "data": {"items": [], "total": 0}}
+
+                def _fetch_groups():
+                    MemoryIndex = group_db.MemoryIndex
+                    with group_db.db.connection_context():
+                        rows = (
+                            MemoryIndex.select(MemoryIndex.user_id)
+                            .where(MemoryIndex.user_id.is_null(False))
+                            .distinct()
+                            .order_by(MemoryIndex.user_id.asc())
+                        )
+                        return [str(row.user_id) for row in rows if str(row.user_id or "").strip()]
+
+                items = await self._run_in_executor(_fetch_groups)
+                return {
+                    "success": True,
+                    "data": {"items": items, "total": len(items)},
+                }
+            except Exception as exc:
+                logger.error("Engram WebUI 获取群组列表失败: %s", exc, exc_info=True)
                 return {"success": False, "error": str(exc)}
 
         @self._app.get("/api/memories")
@@ -647,10 +788,289 @@ class EngramWebServer:
                 logger.error("Engram WebUI 撤销删除失败: %s", exc, exc_info=True)
                 return {"success": False, "error": str(exc)}
 
+        @self._app.get("/api/group-memories")
+        async def list_group_memories(
+            request: Request,
+            token: str = Depends(self._auth_dependency()),
+        ):
+            del token
+            group_id = str(request.query_params.get("group_id", "") or "").strip()
+            member_id = str(request.query_params.get("member_id", "") or "").strip()
+            page = max(1, int(request.query_params.get("page", 1)))
+            page_size = min(200, max(1, int(request.query_params.get("page_size", 20))))
+            offset = (page - 1) * page_size
+
+            try:
+                group_db = await self._get_group_db()
+                if group_db is None:
+                    return {"success": False, "error": "群聊记忆未启用或未初始化"}
+
+                def _fetch():
+                    MemoryIndex = group_db.MemoryIndex
+                    with group_db.db.connection_context():
+                        query = MemoryIndex.select()
+                        if group_id and self._model_has_table_column(group_db, MemoryIndex, "group_id"):
+                            query = query.where(
+                                (MemoryIndex.group_id == group_id)
+                                | ((MemoryIndex.group_id.is_null(True)) & (MemoryIndex.user_id == group_id))
+                            )
+                        elif group_id:
+                            query = query.where(MemoryIndex.user_id == group_id)
+                        query = query.order_by(MemoryIndex.created_at.desc())
+
+                        if not member_id:
+                            total = query.count()
+                            items = list(query.limit(page_size).offset(offset))
+                            return total, [self._serialize_group_memory_item(item, fallback_group_id=group_id or getattr(item, "user_id", "")) for item in items]
+
+                        matched_items = []
+                        for item in query:
+                            raw_msgs = self._load_group_memory_raw_messages(group_db, item)
+                            if self._group_memory_matches_member(member_id, raw_msgs):
+                                matched_items.append(
+                                    self._serialize_group_memory_item(
+                                        item,
+                                        raw_msgs=raw_msgs,
+                                        fallback_group_id=group_id or getattr(item, "user_id", ""),
+                                    )
+                                )
+                        total = len(matched_items)
+                        return total, matched_items[offset: offset + page_size]
+
+                total, items = await self._run_in_executor(_fetch)
+                return {
+                    "success": True,
+                    "data": {
+                        "items": items,
+                        "total": total,
+                        "page": page,
+                        "page_size": page_size,
+                        "has_more": (offset + page_size) < total,
+                    },
+                }
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Engram WebUI 获取群聊记忆列表失败: %s", exc, exc_info=True)
+                return {"success": False, "error": str(exc)}
+
+        @self._app.post("/api/group-memories/search")
+        async def search_group_memories(
+            payload: dict[str, Any], token: str = Depends(self._auth_dependency())
+        ):
+            del token
+            query = str(payload.get("query", "") or "").strip()
+            group_id = str(payload.get("group_id", "") or "").strip()
+            member_id = str(payload.get("member_id", "") or "").strip()
+            if not query:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail="需要提供 query",
+                )
+
+            limit = min(200, max(1, int(payload.get("limit", 50))))
+
+            try:
+                group_db = await self._get_group_db()
+                if group_db is None:
+                    return {"success": False, "error": "群聊记忆未启用或未初始化"}
+
+                def _search():
+                    MemoryIndex = group_db.MemoryIndex
+                    with group_db.db.connection_context():
+                        rows = MemoryIndex.select()
+                        if group_id and self._model_has_table_column(group_db, MemoryIndex, "group_id"):
+                            rows = rows.where(
+                                ((MemoryIndex.group_id == group_id)
+                                 | ((MemoryIndex.group_id.is_null(True)) & (MemoryIndex.user_id == group_id)))
+                                & MemoryIndex.summary.contains(query)
+                            )
+                        elif group_id:
+                            rows = rows.where(
+                                (MemoryIndex.user_id == group_id) & MemoryIndex.summary.contains(query)
+                            )
+                        else:
+                            rows = rows.where(MemoryIndex.summary.contains(query))
+                        rows = rows.order_by(MemoryIndex.created_at.desc()).limit(limit)
+                        items = []
+                        for item in rows:
+                            raw_msgs = None
+                            if member_id:
+                                raw_msgs = self._load_group_memory_raw_messages(group_db, item)
+                                if not self._group_memory_matches_member(member_id, raw_msgs):
+                                    continue
+                            items.append(
+                                self._serialize_group_memory_item(
+                                    item,
+                                    raw_msgs=raw_msgs,
+                                    fallback_group_id=group_id or getattr(item, "user_id", ""),
+                                )
+                            )
+                        return items
+
+                items = await self._run_in_executor(_search)
+                return {
+                    "success": True,
+                    "data": {
+                        "items": items,
+                        "total": len(items),
+                        "has_more": False,
+                    },
+                }
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Engram WebUI 搜索群聊记忆失败: %s", exc, exc_info=True)
+                return {"success": False, "error": str(exc)}
+
+        @self._app.get("/api/group-memories/{memory_id}")
+        async def get_group_memory_detail(
+            memory_id: str,
+            request: Request,
+            token: str = Depends(self._auth_dependency()),
+        ):
+            del token
+            group_id = str(request.query_params.get("group_id", "") or "").strip()
+            if not group_id:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail="需要提供 group_id",
+                )
+
+            try:
+                group_db = await self._get_group_db()
+                if group_db is None:
+                    await self.plugin._ensure_group_memory_manager()
+                    group_db = await self._get_group_db()
+                if group_db is None:
+                    return {"success": False, "error": "群聊记忆未启用或未初始化"}
+
+                def _fetch_detail():
+                    MemoryIndex = group_db.MemoryIndex
+                    with group_db.db.connection_context():
+                        query = MemoryIndex.select().where(MemoryIndex.index_id == memory_id)
+                        if self._model_has_table_column(group_db, MemoryIndex, "group_id"):
+                            query = query.where(
+                                (MemoryIndex.group_id == group_id)
+                                | ((MemoryIndex.user_id == group_id) & MemoryIndex.group_id.is_null(True))
+                            )
+                        else:
+                            query = query.where(MemoryIndex.user_id == group_id)
+                        memory_index = query.first()
+                    raw_msgs = self._load_group_memory_raw_messages(group_db, memory_index)
+                    return memory_index, raw_msgs
+
+                memory_index, raw_msgs = await self._run_in_executor(_fetch_detail)
+                if not memory_index:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, detail="记忆不存在")
+
+                meta = self._extract_group_memory_meta(memory_index, raw_msgs=raw_msgs, fallback_group_id=group_id)
+                created_at = self.logic._ensure_datetime(memory_index.created_at)
+                payload = {
+                    "index_id": memory_index.index_id,
+                    "group_id": meta["group_id"],
+                    "member_id": meta["member_id"],
+                    "summary": memory_index.summary,
+                    "source_type": memory_index.source_type,
+                    "active_score": memory_index.active_score,
+                    "created_at": created_at.isoformat(),
+                    "participants": meta["participants"],
+                }
+
+                messages = []
+                for msg in raw_msgs or []:
+                    ts = self.logic._ensure_datetime(msg.timestamp)
+                    current_member_id, current_member_name = self._parse_group_member_snapshot(
+                        getattr(msg, "user_name", None)
+                    )
+                    messages.append(
+                        {
+                            "uuid": msg.uuid,
+                            "role": msg.role,
+                            "user_name": current_member_name or msg.user_name,
+                            "member_id": current_member_id,
+                            "content": msg.content,
+                            "timestamp": ts.isoformat(),
+                        }
+                    )
+
+                return {
+                    "success": True,
+                    "data": {
+                        "memory": payload,
+                        "messages": messages,
+                        "ai_name": str(self.config.get("ai_name") or "助手").strip() or "助手",
+                    },
+                }
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Engram WebUI 获取群聊记忆详情失败: %s", exc, exc_info=True)
+                return {"success": False, "error": str(exc)}
+
+        @self._app.delete("/api/group-memories/{memory_id}")
+        async def delete_group_memory(
+            memory_id: str,
+            request: Request,
+            token: str = Depends(self._auth_dependency()),
+        ):
+            del token
+            group_id = str(request.query_params.get("group_id", "") or "").strip()
+            delete_raw = request.query_params.get("delete_raw", "false").lower() == "true"
+            if not group_id:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail="需要提供 group_id",
+                )
+
+            try:
+                group_db = await self._get_group_db()
+                group_manager = getattr(self.plugin, "_group_memory_manager", None)
+                if group_db is None or group_manager is None:
+                    await self.plugin._ensure_group_memory_manager()
+                    group_db = await self._get_group_db()
+                    group_manager = getattr(self.plugin, "_group_memory_manager", None)
+                if group_db is None or group_manager is None:
+                    return {"success": False, "error": "群聊记忆未启用或未初始化"}
+
+                def _find_owner_user_id():
+                    MemoryIndex = group_db.MemoryIndex
+                    with group_db.db.connection_context():
+                        query = MemoryIndex.select().where(MemoryIndex.index_id == memory_id)
+                        if self._model_has_table_column(group_db, MemoryIndex, "group_id"):
+                            query = query.where(
+                                (MemoryIndex.group_id == group_id)
+                                | ((MemoryIndex.user_id == group_id) & MemoryIndex.group_id.is_null(True))
+                            )
+                        else:
+                            query = query.where(MemoryIndex.user_id == group_id)
+                        item = query.first()
+                        return item.user_id if item else ""
+
+                owner_user_id = await self._run_in_executor(_find_owner_user_id)
+                if not owner_user_id:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, detail="记忆不存在")
+
+                success, message, summary = await group_manager.delete_memory_by_id(
+                    owner_user_id, memory_id, delete_raw=delete_raw
+                )
+                if not success:
+                    raise HTTPException(status.HTTP_404_NOT_FOUND, detail=message)
+
+                return {
+                    "success": True,
+                    "data": {"message": message, "summary": summary},
+                }
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Engram WebUI 删除群聊记忆失败: %s", exc, exc_info=True)
+                return {"success": False, "error": str(exc)}
+
         @self._app.get("/api/stats")
         async def get_stats(request: Request, token: str = Depends(self._auth_dependency())):
             del token
-            user_id = request.query_params.get("user_id")
+            usry_params.get("user_id")
             try:
                 stats = await self._collect_stats(self.db, user_id=user_id)
                 return {"success": True, "data": stats}

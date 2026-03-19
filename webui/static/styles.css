@@ -222,6 +222,15 @@ body {
   gap: 10px;
 }
 
+.clickable-card {
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.clickable-card:hover {
+  transform: translateY(-2px);
+}
+
 .stat-label {
   font-size: 13px;
   color: var(--muted);

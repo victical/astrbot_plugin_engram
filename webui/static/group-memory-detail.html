@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Engram WebUI · 记忆详情</title>
+    <title>Engram WebUI · 群聊记忆详情</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -12,14 +12,14 @@
         <div class="brand">
           <span class="badge">Engram</span>
           <div>
-            <h1 class="brand-title">记忆详情</h1>
-            <p class="brand-subtitle">原文回放与元信息</p>
+            <h1 class="brand-title">群聊记忆详情</h1>
+            <p class="brand-subtitle">摘要、参与成员与原始对话回放</p>
           </div>
         </div>
         <nav class="topbar-actions">
           <a class="nav-link" href="/static/dashboard.html">主页</a>
-          <a class="nav-link active" href="/static/memories.html">私聊记忆</a>
-          <a class="nav-link" href="/static/group-memories.html">群聊记忆</a>
+          <a class="nav-link" href="/static/memories.html">私聊记忆</a>
+          <a class="nav-link active" href="/static/group-memories.html">群聊记忆</a>
           <a class="nav-link" href="/static/profile.html">画像</a>
           <button class="btn btn-primary" id="logout">退出</button>
         </nav>
@@ -37,8 +37,12 @@
                 <p class="status-value" id="detail-id">--</p>
               </div>
               <div>
-                <p class="status-label">用户</p>
-                <p class="status-value" id="detail-user">--</p>
+                <p class="status-label">群组</p>
+                <p class="status-value" id="detail-group">--</p>
+              </div>
+              <div>
+                <p class="status-label">成员</p>
+                <p class="status-value" id="detail-member">--</p>
               </div>
               <div>
                 <p class="status-label">来源</p>
@@ -59,6 +63,7 @@
           <div class="card">
             <header class="section-header">
               <h3 class="section-title">原始对话</h3>
+              <span class="section-muted" id="detail-participants"></span>
             </header>
             <div class="chat-stream" id="detail-stream"></div>
             <p class="form-hint" id="detail-hint"></p>
@@ -68,6 +73,6 @@
     </div>
 
     <script src="/static/auth.js"></script>
-    <script src="/static/memory-detail.js"></script>
+    <script src="/static/group-memory-detail.js"></script>
   </body>
 </html>

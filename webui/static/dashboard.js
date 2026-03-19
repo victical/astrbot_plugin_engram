@@ -63,7 +63,7 @@ async function loadDashboard() {
     const groupTotal = document.getElementById('group-stat-total');
     if (groupTotal) groupTotal.textContent = groupEnabled ? (groupStats.total ?? 0).toLocaleString() : '--';
     const groupUsers = document.getElementById('group-stat-users');
-    if (groupUsers) groupUsers.textContent = groupEnabled ? (groupStats.user_count ?? 0).toLocaleString() : '--';
+    if (groupUsers) groupUsers.textContent = groupEnabled ? ((groupStats.group_count ?? groupStats.user_count ?? 0)).toLocaleString() : '--';
     const groupArchived = document.getElementById('group-stat-archived');
     if (groupArchived) groupArchived.textContent = groupEnabled ? (groupStats.archived ?? 0).toLocaleString() : '--';
     const groupUnarchivedEl = document.getElementById('group-stat-unarchived');
@@ -80,6 +80,10 @@ async function loadDashboard() {
     }
 
     if (hint) hint.textContent = '';
+
+    document.getElementById('stat-group-memories')?.addEventListener('click', () => {
+      window.location.href = '/static/group-memories.html';
+    }, { once: true });
 
     // 初始化图表
     if (window.Chart && data.history) {
