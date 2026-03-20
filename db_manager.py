@@ -104,7 +104,82 @@ class DatabaseManager:
     def init_db(self):
         self.db.connect(reuse_if_open=True)
         self.db.create_tables([self.RawMemory, self.MemoryIndex])
+        self._migrate_schema_if_needed()
         self.db.close()
+
+    def _migrate_schema_if_needed(self):
+        """自动迁移旧版 SQLite 表结构，避免升级后缺列报错。"""
+        migration_plan = {
+            self.RawMemory: {
+                "group_id": "TEXT",
+                "member_id": "TEXT",
+            },
+        }
+
+        for model, columns in migration_plan.items():
+            table_name = model._meta.table_name
+            existing_columns = self._get_table_columns(model)
+
+            for column_name, column_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                try:
+                    self.db.execute_sql(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    )
+                    logger.info(
+                        "Engram：数据库自动迁移成功，表 %s 已新增字段 %s（%s）",
+                        table_name,
+                        column_name,
+                        column_type,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Engram：数据库自动迁移失败，表 %s 新增字段 %s 时出错：%s",
+                        table_name,
+                        column_name,
+                        e,
+                    )
+                    raise
+
+            if model is self.RawMemory:
+                self._ensure_index_exists(
+                    table_name,
+                    "rawmemory_group_id_idx",
+                    "group_id",
+                    existing_columns | set(columns.keys()),
+                )
+                self._ensure_index_exists(
+                    table_name,
+                    "rawmemory_member_id_idx",
+                    "member_id",
+                    existing_columns | set(columns.keys()),
+                )
+
+        self._table_columns_cache.clear()
+
+    def _ensure_index_exists(self, table_name: str, index_name: str, column_name: str, available_columns=None):
+        available_columns = available_columns or set()
+        if column_name not in available_columns:
+            return
+        try:
+            self.db.execute_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({column_name})"
+            )
+            logger.debug(
+                "Engram：数据库索引检查完成，表 %s 字段 %s 索引=%s",
+                table_name,
+                column_name,
+                index_name,
+            )
+        except Exception as e:
+            logger.warning(
+                "Engram：创建索引失败，表 %s 字段 %s 索引=%s：%s",
+                table_name,
+                column_name,
+                index_name,
+                e,
+            )
 
     def _get_table_columns(self, model):
         table_name = model._meta.table_name
