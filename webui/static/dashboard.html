@@ -40,60 +40,110 @@
     </header>
 
     <main class="content">
-      <section>
-        <div class="stat-grid">
-          <div class="card stat-card">
-            <!-- <h3 class="section-title">私聊统计概览</h3> -->
-            <p class="stat-label">私聊总消息</p>
-            <h2 class="stat-value" id="stat-total">--</h2>
-            <p class="stat-meta">全量私聊记录</p>
-          </div>
-          <div class="card stat-card">
-            <p class="stat-label">活跃用户数</p>
-            <h2 class="stat-value" id="stat-users">--</h2>
-            <p class="stat-meta">已识别对话主体</p>
-          </div>
-          <div class="card stat-card">
-            <p class="stat-label">已归档记忆</p>
-            <h2 class="stat-value" id="stat-archived">--</h2>
-            <p class="stat-meta" id="stat-unarchived">待归档 --</p>
-          </div>
-          <div class="card stat-card">
-            <p class="stat-label">记忆索引量</p>
-            <h2 class="stat-value" id="stat-index">--</h2>
-            <p class="stat-meta db-path" id="stat-db">系统数据库</p>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div class="stat-grid">
-          <div class="card stat-card">
-            <!-- <h3 class="section-title">群聊统计概览</h3> -->
-            <p class="stat-label">群聊总消息</p>
-            <h2 class="stat-value" id="group-stat-total">--</h2>
-            <p class="stat-meta">全量群聊记录</p>
-          </div>
-          <div class="card stat-card">
-            <p class="stat-label">活跃群组数</p>
-            <h2 class="stat-value" id="group-stat-users">--</h2>
-            <p class="stat-meta">已覆盖群聊空间</p>
-          </div>
-          <div class="card stat-card">
-            <p class="stat-label">群记忆归档</p>
-            <h2 class="stat-value" id="group-stat-archived">--</h2>
-            <p class="stat-meta" id="group-stat-unarchived">待归档 --</p>
-          </div>
-          <div class="card stat-card">
-            <p class="stat-label">群记忆索引</p>
-            <h2 class="stat-value" id="group-stat-index">--</h2>
-            <p class="stat-meta db-path" id="group-stat-db">群组数据库</p>
-          </div>
-        </div>
-      </section>
-
       <p class="form-hint" id="dashboard-hint"></p>
 
+      <!-- 私聊 + 群聊 宽面板 -->
+      <section class="overview-panels">
+        <!-- 私聊面板 -->
+        <div class="card overview-panel">
+          <div class="overview-panel-header">
+            <span class="overview-tag private-tag">私聊</span>
+            <span class="section-muted" id="stat-db"></span>
+          </div>
+          <div class="overview-nums">
+            <div class="overview-num-item">
+              <span class="overview-num" id="stat-total">--</span>
+              <span class="overview-num-label">总消息</span>
+            </div>
+            <div class="overview-num-divider"></div>
+            <div class="overview-num-item">
+              <span class="overview-num" id="stat-users">--</span>
+              <span class="overview-num-label">用户数</span>
+            </div>
+            <div class="overview-num-divider"></div>
+            <div class="overview-num-item">
+              <span class="overview-num" id="stat-archived">--</span>
+              <span class="overview-num-label">已归档</span>
+            </div>
+            <div class="overview-num-divider"></div>
+            <div class="overview-num-item">
+              <span class="overview-num" id="stat-index">--</span>
+              <span class="overview-num-label">记忆索引</span>
+            </div>
+          </div>
+          <p class="overview-sub" id="stat-unarchived">未归档 --</p>
+        </div>
+
+        <!-- 群聊面板 -->
+        <div class="card overview-panel">
+          <div class="overview-panel-header">
+            <span class="overview-tag group-tag">群聊</span>
+            <span class="section-muted" id="group-stat-db"></span>
+          </div>
+          <div class="overview-nums">
+            <div class="overview-num-item">
+              <span class="overview-num" id="group-stat-total">--</span>
+              <span class="overview-num-label">总消息</span>
+            </div>
+            <div class="overview-num-divider"></div>
+            <div class="overview-num-item">
+              <span class="overview-num" id="group-stat-users">--</span>
+              <span class="overview-num-label">群组数</span>
+            </div>
+            <div class="overview-num-divider"></div>
+            <div class="overview-num-item">
+              <span class="overview-num" id="group-stat-archived">--</span>
+              <span class="overview-num-label">已归档</span>
+            </div>
+            <div class="overview-num-divider"></div>
+            <div class="overview-num-item">
+              <span class="overview-num" id="group-stat-index">--</span>
+              <span class="overview-num-label">记忆索引</span>
+            </div>
+          </div>
+          <p class="overview-sub" id="group-stat-unarchived">未归档 --</p>
+        </div>
+      </section>
+
+      <!-- 折叠摘要进度条区 -->
+      <section class="card">
+        <header class="section-header">
+          <h3 class="section-title">记忆折叠层级</h3>
+          <span class="section-muted">日 → 周 → 月 → 年</span>
+        </header>
+        <div class="fold-bars">
+          <div class="fold-bar-row">
+            <span class="fold-bar-label">日总结</span>
+            <div class="fold-bar-track">
+              <div class="fold-bar-fill daily-fill" id="bar-daily" style="width:0%"></div>
+            </div>
+            <span class="fold-bar-count" id="stat-daily">--</span>
+          </div>
+          <div class="fold-bar-row">
+            <span class="fold-bar-label">周总结</span>
+            <div class="fold-bar-track">
+              <div class="fold-bar-fill weekly-fill" id="bar-weekly" style="width:0%"></div>
+            </div>
+            <span class="fold-bar-count" id="stat-weekly">--</span>
+          </div>
+          <div class="fold-bar-row">
+            <span class="fold-bar-label">月总结</span>
+            <div class="fold-bar-track">
+              <div class="fold-bar-fill monthly-fill" id="bar-monthly" style="width:0%"></div>
+            </div>
+            <span class="fold-bar-count" id="stat-monthly">--</span>
+          </div>
+          <div class="fold-bar-row">
+            <span class="fold-bar-label">年总结</span>
+            <div class="fold-bar-track">
+              <div class="fold-bar-fill yearly-fill" id="bar-yearly" style="width:0%"></div>
+            </div>
+            <span class="fold-bar-count" id="stat-yearly">--</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 趋势图 + 近期动态 -->
       <section class="split-grid">
         <div class="card">
           <header class="section-header">
@@ -114,6 +164,7 @@
         </div>
       </section>
 
+      <!-- 系统状态 -->
       <section class="card">
         <header class="section-header">
           <h3 class="section-title">系统状态</h3>
@@ -144,7 +195,5 @@
   <script src="/static/auth.js?v=2"></script>
   <script src="/static/dashboard.js?v=2"></script>
 </body>
-
-</html>
 
 </html>

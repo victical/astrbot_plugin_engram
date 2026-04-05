@@ -98,6 +98,38 @@ body {
   box-shadow: 0 0 0 3px rgba(55, 66, 61, 0.08);
 }
 
+/* date picker 主题适配 */
+input[type="date"].form-input {
+  color-scheme: light;
+  -webkit-color-scheme: light;
+}
+
+
+/* 覆盖浏览器 date picker 弹出面板颜色（Chromium） */
+::-webkit-datetime-edit-fields-wrapper {
+  color: var(--text);
+}
+
+::-webkit-datetime-edit-text {
+  color: var(--muted);
+}
+
+::-webkit-datetime-edit-year-field,
+::-webkit-datetime-edit-month-field,
+::-webkit-datetime-edit-day-field {
+  color: var(--text);
+  border-radius: 3px;
+  padding: 1px 2px;
+}
+
+::-webkit-datetime-edit-year-field:focus,
+::-webkit-datetime-edit-month-field:focus,
+::-webkit-datetime-edit-day-field:focus {
+  background: rgba(55, 66, 61, 0.12);
+  color: var(--accent);
+  outline: none;
+}
+
 .btn {
   height: 44px;
   border-radius: 999px;
@@ -789,4 +821,151 @@ body {
   justify-content: center;
   color: var(--muted);
   font-size: 12px;
+}
+
+/* ── Dashboard 概览面板 ── */
+.overview-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 800px) {
+  .overview-panels {
+    grid-template-columns: 1fr;
+  }
+}
+
+.overview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.overview-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overview-tag {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+.private-tag {
+  background: rgba(55, 66, 61, 0.12);
+  color: var(--accent);
+}
+
+.group-tag {
+  background: rgba(168, 102, 102, 0.12);
+  color: var(--warn);
+}
+
+.overview-nums {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.overview-num-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.overview-num-divider {
+  width: 1px;
+  height: 40px;
+  background: rgba(47, 52, 49, 0.08);
+  flex: 0 0 auto;
+}
+
+.overview-num {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.overview-num-label {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.overview-sub {
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 4px;
+  border-top: 1px solid rgba(47, 52, 49, 0.06);
+}
+
+/* ── 折叠摘要进度条 ── */
+.fold-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fold-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fold-bar-label {
+  font-size: 12px;
+  color: var(--muted);
+  width: 48px;
+  flex: 0 0 auto;
+}
+
+.fold-bar-track {
+  flex: 1;
+  height: 6px;
+  background: rgba(47, 52, 49, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.fold-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.daily-fill {
+  background: var(--accent);
+}
+
+.weekly-fill {
+  background: #5a7a6e;
+}
+
+.monthly-fill {
+  background: var(--warn);
+}
+
+.yearly-fill {
+  background: #c49a6c;
+}
+
+.fold-bar-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  width: 36px;
+  text-align: right;
+  flex: 0 0 auto;
 }

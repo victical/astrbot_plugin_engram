@@ -51,7 +51,6 @@ WebUI 静态资源位于：
 - `webui/static/memories.html`
 - `webui/static/memory-detail.html`
 - `webui/static/profile.html`
-- `webui/static/password.html`
 
 ---
 
@@ -198,8 +197,7 @@ GET /api/health
 ```json
 {
   "token": "xxxxx",
-  "expires_in": 3600,
-  "force_change": false
+  "expires_in": 3600
 }
 ```
 
@@ -209,7 +207,6 @@ GET /api/health
 |---|---|---|
 | `token` | string | 会话 token |
 | `expires_in` | int | 空闲超时秒数 |
-| `force_change` | bool | 是否强制修改密码；当前通常为 `false` |
 
 #### 失败场景
 
@@ -248,25 +245,6 @@ Authorization: Bearer <token>
 ```json
 {
   "detail": "已退出登录"
-}
-```
-
----
-
-## 6.4 修改密码
-
-### `POST /api/password`
-
-#### 说明
-
-当前接口为占位接口，并不真正修改密码。
-
-#### 响应示例
-
-```json
-{
-  "success": false,
-  "error": "当前为配置文件密码模式，请在插件配置中修改 webui_access_password 并重启插件。"
 }
 ```
 
@@ -969,7 +947,7 @@ Authorization: `Bearer ${token}`
 
 ## 14.2 限制
 
-- `/api/password` 目前只是占位接口
+- WebUI 密码修改不支持在线操作，需直接修改配置项 `webui_access_password` 并重启插件
 - 记忆搜索为 SQLite 关键词搜索，不是完整语义搜索 API
 - 活动数据与撤销历史均为内存态，重启后丢失
 - 目前没有 OpenAPI 风格的正式 schema 文档输出文件

@@ -79,6 +79,31 @@ async function loadDashboard() {
       groupDbEl.textContent = groupEnabled && groupStats.db_path ? `数据库 ${groupStats.db_path}` : '数据库 --';
     }
 
+    // 折叠摘要统计 + 进度条
+    const dailyCount = privateStats.daily_summary_count ?? 0;
+    const weeklyCount = privateStats.weekly_count ?? 0;
+    const monthlyCount = privateStats.monthly_count ?? 0;
+    const yearlyCount = privateStats.yearly_count ?? 0;
+    const foldMax = Math.max(dailyCount, weeklyCount, monthlyCount, yearlyCount, 1);
+
+    const dailyEl = document.getElementById('stat-daily');
+    if (dailyEl) dailyEl.textContent = dailyCount.toLocaleString();
+    const weeklyEl = document.getElementById('stat-weekly');
+    if (weeklyEl) weeklyEl.textContent = weeklyCount.toLocaleString();
+    const monthlyEl = document.getElementById('stat-monthly');
+    if (monthlyEl) monthlyEl.textContent = monthlyCount.toLocaleString();
+    const yearlyEl = document.getElementById('stat-yearly');
+    if (yearlyEl) yearlyEl.textContent = yearlyCount.toLocaleString();
+
+    const barDaily = document.getElementById('bar-daily');
+    if (barDaily) barDaily.style.width = `${Math.round(dailyCount / foldMax * 100)}%`;
+    const barWeekly = document.getElementById('bar-weekly');
+    if (barWeekly) barWeekly.style.width = `${Math.round(weeklyCount / foldMax * 100)}%`;
+    const barMonthly = document.getElementById('bar-monthly');
+    if (barMonthly) barMonthly.style.width = `${Math.round(monthlyCount / foldMax * 100)}%`;
+    const barYearly = document.getElementById('bar-yearly');
+    if (barYearly) barYearly.style.width = `${Math.round(yearlyCount / foldMax * 100)}%`;
+
     if (hint) hint.textContent = '';
 
     document.getElementById('stat-group-memories')?.addEventListener('click', () => {

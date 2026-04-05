@@ -92,7 +92,7 @@
 | 指令 | 说明 |
 | :--- | :--- |
 | `/engram_force_summarize` | 立即对当前所有未处理对话进行记忆归档 |
-| `/engram_force_summarize_all` | 立即对所有用户未处理对话进行记忆归档 |
+| `/engram_force_summarize_all` | 立即对所有用户未处理对话进行记忆归档；若已启用群聊记忆，也会一并处理群聊记忆 |
 | `/engram_force_persona` | 立即基于今日记忆强制深度更新画像 |
 
 ## 📤 数据导出功能
@@ -152,6 +152,8 @@ data/plugins_data/astrbot_plugin_engram/exports/
 ### 记忆归档相关
 - **私聊记忆总结触发时间**：距离最后一次对话超过此时间触发总结（默认 1800 秒）。
 - **触发总结最少消息数**：未总结消息达到此数量才触发总结（默认 4 条）。
+- **群聊记忆归档触发时间**：`group_memory_timeout`，距离最后一次群聊对话超过此时间触发总结（默认 600 秒）。未配置时回退到私聊归档时间。
+- **群聊触发归档最少消息数**：`group_min_msg_count`，群聊未总结消息达到此数量才触发总结（默认 6 条）。未配置时回退到私聊的最少消息数。
 - **强制总结回溯天数限制**：控制记忆回溯的深度。设置为 7 表示仅总结最近 7 天的消息，更早的消息将被直接跳过（节省 Token）。默认为 0（无限制）。
 - **总结记忆使用的模型**：支持下拉选择已配置的 LLM 提供商（建议使用低成本模型）。
 - **自定义总结提示词**：支持自定义记忆提取逻辑。
@@ -172,9 +174,12 @@ data/plugins_data/astrbot_plugin_engram/exports/
 - **群聊记忆开关**：`enable_group_memory` 默认关闭。
 - **群聊好友白名单**：`group_memory_only_friends` 仅记录好友消息。
 - **群聊最小字数**：`group_memory_min_text_length` 过滤噪声。
+- **群聊归档时间**：`group_memory_timeout`，用于控制群聊消息在静默多久后触发归档。
+- **群聊归档最少消息数**：`group_min_msg_count`，用于控制群聊至少积累多少条未归档消息才触发归档。
 - **群聊记忆归属**：`group_memory_store_session_as` (group_id/user_id)。
 - **群聊记忆私有化**：`group_memory_private_session_only` 启用后按 user_id 隔离。
 - **群聊检索私聊记忆**：`group_memory_allow_private_recall` 启用后群聊检索包含私聊。
+- **WebUI 访问密码**：`webui_access_password`。如需修改 WebUI 登录密码，请直接修改该配置项并重启插件；当前不支持在线改密码。
 
 ## 🚀 安装
 
@@ -234,9 +239,17 @@ python tools/check_config_sync.py
   - `我最近在准备考研，压力好大。`
   - `我超级喜欢吃冰美式，但是不喜欢香菜。`
   - `我的猫叫奥利奥。`
-- **第二步：触发归档**。根据您的配置（默认 30 分钟且 > 4 条消息），您可以等待超时，或者在测试时临时调小配置项中的 `private_memory_timeout` 为 `60`。
+- **第二步：触发归档**。根据您的配置（默认私聊 30 分钟且 > 4 条消息），您可以等待超时，或者在测试时临时调小配置项中的 `private_memory_timeout` 为 `60`。
 - **第三步：验证召回**。过一会后问 AI：`我刚才提到了什么？` 或者 `你知道我的猫叫什么吗？`
   - **预期结果**：AI 应该能在回复中正确回溯上述信息，并显示 `【长期记忆回溯】`。
+
+#### 群聊归档补充测试
+- 开启 `enable_group_memory` 后，可单独设置：
+  - `group_memory_timeout`
+  - `group_min_msg_count`
+- 例如设置为：`group_memory_timeout=60`、`group_min_msg_count=3`
+- 然后在群里连续发送几条有效消息，等待静默超时，或直接使用 `/group_mem_force_summarize`。
+- **预期结果**：使用 `/group_mem_list` 可以看到当前群生成的长期记忆。
 
 ### 2. 用户画像（全息侧写）测试
 - **第一步：产生足够记忆**。确保今天有至少 3 条（由 `min_persona_update_memories` 决定）长期记忆生成。

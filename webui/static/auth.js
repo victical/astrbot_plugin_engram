@@ -33,7 +33,6 @@ async function bindLogout() {
       }
     }
     localStorage.removeItem('engram_token');
-    localStorage.removeItem('engram_force_change');
     window.location.href = '/';
   });
 }

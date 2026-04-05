@@ -170,7 +170,8 @@ class MemoryScheduler:
     def _calculate_next_check_time(self) -> int:
         """计算下一次检测的休眠时间（秒）"""
         now_ts = time.time()
-        timeout = self.config.get("private_memory_timeout", 1800)
+        timeout = self.logic._get_archive_timeout() if hasattr(self.logic, "_get_archive_timeout") else self.config.get("private_memory_timeout", 1800)
+        min_count = self.logic._get_archive_min_msg_count() if hasattr(self.logic, "_get_archive_min_msg_count") else self.config.get("min_msg_count", 3)
         
         # 如果没有活跃用户，休眠较长时间（5分钟）
         if not self.logic.last_chat_time:
@@ -179,7 +180,7 @@ class MemoryScheduler:
         # 找出最早需要触发归档的时间
         earliest_trigger = float('inf')
         for user_id, last_time in self.logic.last_chat_time.items():
-            if self.logic.unsaved_msg_count.get(user_id, 0) >= self.config.get("min_msg_count", 3):
+            if self.logic.unsaved_msg_count.get(user_id, 0) >= min_count:
                 trigger_time = last_time + timeout
                 earliest_trigger = min(earliest_trigger, trigger_time)
         

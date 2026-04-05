@@ -778,12 +778,42 @@ class MemoryManager:
         )
 
     # ========== 记忆归档与总结 ==========
+
+    def _get_archive_timeout(self) -> int:
+        """根据记忆类型获取归档超时时间。群聊优先使用 group_memory_timeout，未配置时回退私聊配置。"""
+        source_type = str(self.default_source_type or "private").strip().lower()
+        if source_type == "group":
+            timeout = self.config.get("group_memory_timeout", None)
+            if timeout in (None, ""):
+                timeout = self.config.get("private_memory_timeout", 1800)
+        else:
+            timeout = self.config.get("private_memory_timeout", 1800)
+        try:
+            timeout = int(timeout)
+        except (TypeError, ValueError):
+            timeout = 1800
+        return max(1, timeout)
+
+    def _get_archive_min_msg_count(self) -> int:
+        """根据记忆类型获取触发归档的最少消息数。群聊优先使用 group_min_msg_count，未配置时回退私聊配置。"""
+        source_type = str(self.default_source_type or "private").strip().lower()
+        if source_type == "group":
+            min_count = self.config.get("group_min_msg_count", None)
+            if min_count in (None, ""):
+                min_count = self.config.get("min_msg_count", 3)
+        else:
+            min_count = self.config.get("min_msg_count", 3)
+        try:
+            min_count = int(min_count)
+        except (TypeError, ValueError):
+            min_count = 3
+        return max(1, min_count)
     
     async def check_and_summarize(self):
-        """检查是否需要进行私聊归档（画像更新由独立调度器处理）"""
+        """检查是否需要进行记忆归档（画像更新由独立调度器处理）"""
         now_ts = datetime.datetime.now().timestamp()
-        timeout = self.config.get("private_memory_timeout", 1800)
-        min_count = self.config.get("min_msg_count", 3)
+        timeout = self._get_archive_timeout()
+        min_count = self._get_archive_min_msg_count()
 
         for user_id, last_time in list(self.last_chat_time.items()):
             if now_ts - last_time > timeout and self.unsaved_msg_count.get(user_id, 0) >= min_count:

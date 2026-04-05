@@ -1,6 +1,48 @@
 let currentPage = 1;
 let cachedUsers = [];
 
+const SOURCE_OPTIONS = [
+  { value: '', label: '全部来源' },
+  { value: 'private', label: '私聊对话' },
+  { value: 'daily_summary', label: '日总结' },
+  { value: 'weekly', label: '周总结' },
+  { value: 'monthly', label: '月总结' },
+  { value: 'yearly', label: '年总结' },
+];
+
+function initSourcePicker() {
+  const display = document.getElementById('memory-source-display');
+  const hidden = document.getElementById('memory-source');
+  const list = document.getElementById('source-suggest');
+  if (!display || !hidden || !list) return;
+
+  function renderOptions() {
+    list.innerHTML = '';
+    SOURCE_OPTIONS.forEach(opt => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'suggest-item';
+      btn.textContent = opt.label;
+      if (opt.value === hidden.value) btn.style.fontWeight = '600';
+      btn.addEventListener('mousedown', () => {
+        hidden.value = opt.value;
+        display.value = opt.label;
+        list.classList.add('hidden');
+      });
+      list.appendChild(btn);
+    });
+  }
+
+  display.addEventListener('focus', () => {
+    renderOptions();
+    list.classList.remove('hidden');
+  });
+
+  display.addEventListener('blur', () => {
+    setTimeout(() => list.classList.add('hidden'), 150);
+  });
+}
+
 async function loadUserOptions() {
   const headers = await getAuthHeaders();
   if (!headers) return;
@@ -66,9 +108,11 @@ async function loadMemories() {
   const userId = userInput?.value.trim();
   const keyword = keywordInput?.value.trim();
   const date = dateInput?.value;
+  const sourceType = document.getElementById('memory-source')?.value;
 
   const params = new URLSearchParams();
   if (userId) params.set('user_id', userId);
+  if (sourceType) params.set('source_type', sourceType);
   params.set('page', String(currentPage));
   params.set('page_size', pageSize?.value || '20');
 
@@ -83,17 +127,19 @@ async function loadMemories() {
         hint.classList.add('error');
         return;
       }
+      const searchBody = {
+        user_id: userId,
+        query: keyword,
+        limit: 200
+      };
+      if (sourceType) searchBody.source_types = [sourceType];
       const res = await fetch('/api/memories/search', {
         method: 'POST',
         headers: {
           ...headers,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          user_id: userId,
-          query: keyword,
-          limit: 200
-        })
+        body: JSON.stringify(searchBody)
       });
       payload = await res.json();
     } else {
@@ -279,6 +325,7 @@ document.getElementById('check-all')?.addEventListener('change', (e) => {
 
 document.getElementById('batch-delete')?.addEventListener('click', handleBatchDelete);
 
+initSourcePicker();
 loadUserOptions();
 loadMemories();
 bindLogout();

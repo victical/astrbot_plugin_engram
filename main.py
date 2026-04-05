@@ -962,10 +962,40 @@ class EngramPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize_all")
     async def force_summarize_all(self, event: AstrMessageEvent):
-        """[管理员] 立即对所有用户未处理对话进行记忆归档"""
-        yield event.plain_result(self._mem_handler.get_force_summarize_all_start_message())
-        done_msg = await self._mem_handler.handle_force_summarize_all()
-        yield event.plain_result(done_msg)
+        """[管理员] 立即对所有用户未处理对话进行记忆归档（含群聊记忆）"""
+        yield event.plain_result("⏳ 正在强制执行全局记忆归档，请稍候...")
+
+        private_total = 0
+        group_total = 0
+        group_enabled = bool(self.config.get("enable_group_memory", False))
+
+        try:
+            private_total = await self.logic.summarize_all_users()
+        except Exception as e:
+            logger.error(f"Engram：强制归档全部私聊记忆失败：{e}")
+            yield event.plain_result(f"❌ 私聊记忆归档失败：{e}")
+            return
+
+        if group_enabled:
+            try:
+                group_manager = await self._ensure_group_memory_manager()
+                if group_manager is not None:
+                    group_total = await group_manager.summarize_all_users()
+            except Exception as e:
+                logger.error(f"Engram：强制归档全部群聊记忆失败：{e}")
+                yield event.plain_result(
+                    f"⚠️ 私聊记忆归档已完成（{private_total}），但群聊记忆归档失败：{e}"
+                )
+                return
+
+        if group_enabled:
+            yield event.plain_result(
+                f"✅ 全局记忆归档完成。\n- 私聊已处理：{private_total}\n- 群聊已处理：{group_total}"
+            )
+        else:
+            yield event.plain_result(
+                f"✅ 全局记忆归档完成。\n- 私聊已处理：{private_total}\n- 群聊记忆未启用，未执行"
+            )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_persona")

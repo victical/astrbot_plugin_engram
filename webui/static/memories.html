@@ -40,6 +40,11 @@
           </div>
           <input id="memory-keyword" class="form-input" placeholder="关键词" />
           <input id="memory-date" class="form-input" type="date" />
+          <div class="autocomplete" id="source-autocomplete">
+            <input id="memory-source-display" class="form-input" placeholder="全部来源" readonly autocomplete="off" />
+            <input type="hidden" id="memory-source" value="" />
+            <div id="source-suggest" class="suggest-list hidden"></div>
+          </div>
           <button class="btn btn-primary" id="memory-search">检索</button>
         </div>
         <p class="form-hint" id="memory-hint"></p>

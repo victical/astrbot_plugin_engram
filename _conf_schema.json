@@ -107,6 +107,18 @@
         "default": 6,
         "hint": "过滤过短的群聊消息，避免噪声。"
       },
+      "group_memory_timeout": {
+        "description": "群聊记忆归档触发时间（秒）",
+        "type": "int",
+        "default": 600,
+        "hint": "距离最后一次群聊对话超过此时间将触发归档。未配置时可回退到私聊归档时间。"
+      },
+      "group_min_msg_count": {
+        "description": "群聊触发归档的最少消息数",
+        "type": "int",
+        "default": 6,
+        "hint": "群聊未保存消息达到此数量且超时后触发归档。未配置时可回退到私聊的最少消息数。"
+      },
       "group_memory_source_type": {
         "description": "群聊记忆 source_type",
         "type": "string",

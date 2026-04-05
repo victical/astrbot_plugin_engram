@@ -66,7 +66,6 @@
           }
 
           localStorage.setItem('engram_token', payload.token);
-          localStorage.removeItem('engram_force_change');
           window.location.href = '/static/dashboard.html';
         } catch (e) {
           hint.textContent = '网络请求失败';

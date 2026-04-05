@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.8] - 2026-04-05
+
+### Added
+- WebUI Dashboard：重新设计主页布局，将顶部 12 个独立卡片替换为"私聊/群聊"双宽面板（大数字 + 分组面板），并新增记忆折叠层级进度条（日/周/月/年）。
+- 记忆来源筛选：私聊记忆列表新增"来源"筛选下拉框，支持按 `私聊对话 / 日总结 / 周总结 / 月总结 / 年总结` 过滤，UI 样式与用户 ID 自动补全框保持一致。
+- 统计接口：`/api/stats/overview` 新增各来源类型数量字段（`daily_summary_count`、`weekly_count`、`monthly_count`、`yearly_count`）。
+- WebUI 样式增强：日期输入框增加 `color-scheme: light` 适配，避免系统深色模式下弹出白色日历。
+- Dashboard 趋势图：保留 Chart.js 7 日消息增量折线图，私聊/群聊双数据集，颜色与主题一致。
+
+### Changed
+- Dashboard 页面结构全面重写，统计数据区域更简洁直观。
+- `styles.css` 新增 `overview-panels`、`fold-bars`、进度条颜色变体等样式类。
+
 ## [1.6.7] - 2026-03-20
 
 ### Added

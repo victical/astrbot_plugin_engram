@@ -46,8 +46,6 @@ class EngramWebServer:
         self._access_password = str(
             self.config.get("webui_access_password", "")
         ).strip()
-        self._password_generated = False
-        self._force_password_change = False
 
         if not self._auth_disabled and not self._access_password:
             logger.warning("Engram WebUI 已启用登录鉴权，但未配置 webui_access_password")
@@ -240,6 +238,24 @@ class EngramWebServer:
         memory_index_count = await self._run_in_executor(_count_indexes)
         stats = dict(stats or {})
         stats["memory_index_count"] = memory_index_count
+
+        # Count per source_type for folding summaries
+        for src_type in ("daily_summary", "weekly", "monthly", "yearly"):
+            _st = src_type  # capture loop variable
+
+            if user_id:
+                def _count_by_type(st=_st):
+                    with db.db.connection_context():
+                        return MemoryIndex.select().where(
+                            (MemoryIndex.user_id == user_id) & (MemoryIndex.source_type == st)
+                        ).count()
+            else:
+                def _count_by_type(st=_st):
+                    with db.db.connection_context():
+                        return MemoryIndex.select().where(MemoryIndex.source_type == st).count()
+
+            stats[f"{src_type}_count"] = await self._run_in_executor(_count_by_type)
+
         if hasattr(db, "get_all_group_ids"):
             try:
                 group_ids = await self._run_in_executor(db.get_all_group_ids)
@@ -437,7 +453,7 @@ class EngramWebServer:
         @self._app.post("/api/login")
         async def login(request: Request, payload: dict[str, Any]):
             if self._auth_disabled:
-                return {"token": "public", "expires_in": 0, "force_change": False}
+                return {"token": "public", "expires_in": 0}
 
             password = str(payload.get("password", "")).strip()
             if not password:
@@ -473,7 +489,6 @@ class EngramWebServer:
             return {
                 "token": token,
                 "expires_in": self.session_timeout,
-                "force_change": self._force_password_change,
             }
 
         @self._app.post("/api/logout")
@@ -482,17 +497,6 @@ class EngramWebServer:
                 async with self._token_lock:
                     self._tokens.pop(token, None)
             return {"detail": "已退出登录"}
-
-        @self._app.post("/api/password")
-        async def update_password(
-            payload: dict[str, Any], token: str = Depends(self._auth_dependency())
-        ):
-            del payload
-            del token
-            return {
-                "success": False,
-                "error": "当前为配置文件密码模式，请在插件配置中修改 webui_access_password 并重启插件。",
-            }
 
         @self._app.get("/api/users")
         async def list_users(token: str = Depends(self._auth_dependency())):
