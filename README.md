@@ -8,7 +8,7 @@
 - **群聊记忆**：群聊长期记忆独立存储、检索、删除与归档。
 - **群聊记忆 WebUI**：支持群聊记忆列表、详情、搜索、删除，并可默认展示全部群聊记忆。
 - **WebUI 控制台**：支持登录访问、主页统计、记忆浏览、画像查看与基础管理。
-- **降级兼容**：在未安装 `chromadb` 的环境下，可自动降级为 SQLite 关键词检索模式。
+- **降级兼容**：在未安装 `chromadb` 的环境下，可自动降级为 SQLite FTS5 BM25 关键词检索（不可用时再回退 LIKE）。
 
 ## 📚 项目文档
 
@@ -40,9 +40,9 @@
 - **全异步执行**：基于 `ThreadPoolExecutor` 和 `asyncio`，所有数据库 (SQLite) 和向量库 (ChromaDB) 操作均不阻塞主线程。
 - **归档机制**：消息总结后自动标记为"已归档"，防止重复计算，最大限度节省 Token。
 - **语义搜索**：基于向量检索 (ChromaDB)，支持模糊语义查询，而不仅仅是关键词匹配。
-- **关键词检索降级**：当 `chromadb` 不可用时，自动回退到 SQLite 关键词检索，确保插件仍可用。
+- **关键词检索降级**：当 `chromadb` 不可用时，优先回退到 SQLite FTS5 BM25 关键词检索，并保留 LIKE 兜底，确保插件仍可用。
 - **并发控制**：每日画像更新采用信号量机制限制并发 LLM 请求，避免 API 限流和 Token 消耗激增。
-- **撤销删除**：内置删除历史缓存（每用户保留最近 3 次），支持误删恢复，含向量数据完整备份。
+- **撤销删除**：删除历史持久化到 SQLite（每个作用域保留最近 3 次），支持跨重启误删恢复，含向量数据完整备份。
 
 ## 🛠️ 指令说明
 
@@ -179,6 +179,7 @@ data/plugins_data/astrbot_plugin_engram/exports/
 - **群聊记忆归属**：`group_memory_store_session_as` (group_id/user_id)。
 - **群聊记忆私有化**：`group_memory_private_session_only` 启用后按 user_id 隔离。
 - **群聊检索私聊记忆**：`group_memory_allow_private_recall` 启用后群聊检索包含私聊。
+- **SQLite BM25 兜底开关**：`enable_sqlite_bm25_fallback`，默认开启。向量检索不可用/为空时优先使用 FTS5 BM25 候选召回；关闭后使用旧 LIKE contains。
 - **WebUI 访问密码**：`webui_access_password`。如需修改 WebUI 登录密码，请直接修改该配置项并重启插件；当前不支持在线改密码。
 
 ## 🚀 安装
@@ -197,7 +198,7 @@ data/plugins_data/astrbot_plugin_engram/exports/
 当前版本已做兼容处理：
 
 - 若成功安装 `chromadb`：启用向量检索。
-- 若未安装 `chromadb`：自动降级为 SQLite 关键词检索，不影响插件基本使用与 WebUI 管理。
+- 若未安装 `chromadb`：自动降级为 SQLite FTS5 BM25 关键词检索（失败时再回退 LIKE），不影响插件基本使用与 WebUI 管理。
 
 ## 💡 致谢
 
@@ -216,7 +217,7 @@ pytest -q
 - 若需只跑新增回归测试：
 
 ```bash
-pytest -q tests/test_memory_delete_by_id.py tests/test_memory_fallback.py tests/test_summarize_persistence.py
+pytest -q tests/test_memory_delete_by_id.py tests/test_memory_fallback.py tests/test_summarize_persistence.py tests/test_persistence_features.py
 ```
 
 ### 配置一致性自动核对
@@ -281,9 +282,8 @@ python tools/check_config_sync.py
 - **导出数据**: `exports/` (存储用户导出的微调数据文件)。
 
 ### 撤销删除数据说明
-- **存储位置**：内存缓存（非持久化）
-- **备份范围**：仅备份被删除的单条记忆（含向量数据、元数据、文档内容）
-- **历史数量**：每用户保留最近 3 次删除记录
-- **内存占用**：约 7 KB/条，每用户最多 21 KB，100 用户约 2 MB
-- **自动清理**：第 4 次删除时，最早的删除记录会被自动清除
-- **重启行为**：撤销历史在插件重启后会清空（仅保留运行期间的删除记录）
+- **存储位置**：SQLite 持久化（`deletehistory` 表）+ 运行时热缓存。
+- **备份范围**：备份被删除记忆的索引信息（可选含原文删除 UUID、向量数据等恢复所需字段）。
+- **历史数量**：每个作用域（私聊用户 / 群聊会话）保留最近 3 次删除记录。
+- **自动清理**：写入新删除记录时自动裁剪超额历史。
+- **重启行为**：撤销历史可跨重启保留，`/mem_undo` 与 `/group_mem_undo` 指令行为不变。

@@ -948,8 +948,8 @@ Authorization: `Bearer ${token}`
 ## 14.2 限制
 
 - WebUI 密码修改不支持在线操作，需直接修改配置项 `webui_access_password` 并重启插件
-- 记忆搜索为 SQLite 关键词搜索，不是完整语义搜索 API
-- 活动数据与撤销历史均为内存态，重启后丢失
+- 记忆搜索接口走 SQLite 关键词链路（优先 FTS5 BM25，失败时回退 LIKE），不等价于完整语义向量搜索 API
+- 活动数据为内存态；撤销历史已持久化到 SQLite，可跨重启恢复
 - 目前没有 OpenAPI 风格的正式 schema 文档输出文件
 
 ---

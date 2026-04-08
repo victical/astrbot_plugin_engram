@@ -280,6 +280,12 @@
         "type": "int",
         "default": 60,
         "hint": "控制向量检索候选集大小（n_results 上限），用于平衡召回质量与性能。建议 20-200。"
+      },
+      "enable_sqlite_bm25_fallback": {
+        "description": "启用 SQLite FTS5 BM25 兜底召回",
+        "type": "bool",
+        "default": true,
+        "hint": "当向量检索不可用或结果为空时，优先使用 SQLite FTS5 + BM25 候选召回，再由本地混合重排输出。关闭后回退旧版 LIKE contains 候选检索。"
       }
     }
   },

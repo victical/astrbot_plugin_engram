@@ -68,6 +68,12 @@ class MemoryManager:
         "get_message_stats",
         "get_all_users_messages",
         "get_all_users_stats",
+        "save_delete_history",
+        "get_last_delete_history",
+        "mark_delete_history_restored",
+        "enqueue_pending_vector_jobs",
+        "get_pending_vector_jobs",
+        "delete_pending_vector_jobs",
     )
 
     def __init__(self, context, config, data_dir, executor, db_manager, profile_manager=None, chroma_path: str = None, default_source_type: str = "private"):
@@ -114,17 +120,19 @@ class MemoryManager:
         self._max_inactive_users = 100  # 最大缓存用户数
         self._inactive_threshold = 7 * 24 * 3600  # 7天无活动则清理
 
-        # 撤销删除缓存：{user_id: [最近删除的记忆列表]}
-        self._delete_history = {}  # 每个用户保留最近3次删除
+        # 撤销删除缓存（热缓存，真相源为 DB）
+        self._delete_history = {}
         self._max_undo_history = 3
 
         self._is_shutdown = False
         self._embedding_provider_id = str(self.config.get("embedding_provider", "")).strip()
         self._embedding_unavailable_logged = False
 
-        # 向量写入失败补偿队列（内存态）：用于后续重建/告警
+        # 向量写入失败补偿队列（热缓存，真相源为 DB）
         self._pending_vector_jobs = []
         self._max_pending_vector_jobs = 5000
+        self._pending_retry_lock = asyncio.Lock()
+        self._pending_retry_started = False
 
     def shutdown(self):
         """关闭记忆管理器"""
@@ -459,39 +467,201 @@ class MemoryManager:
             logger.debug(f"Engram：{message}")
 
     def _enqueue_pending_vector_jobs(self, rows, reason: str = ""):
-        """记录向量写入失败的索引，便于后续重建补偿。"""
+        """记录向量写入失败索引（DB 持久化为真相源，内存列表仅热缓存）。"""
         if not rows:
             return
 
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.datetime.now()
+        payload = []
         for row in rows:
             idx = str(row.get("index_id", "")).strip()
             if not idx:
                 continue
-            self._pending_vector_jobs.append({
+
+            metadata = row.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {
+                    "created_at": str(row.get("created_at", "") or ""),
+                }
+
+            payload.append({
                 "index_id": idx,
-                "user_id": str(row.get("user_id", "")),
-                "source_type": str(row.get("source_type", "")),
-                "created_at": str(row.get("created_at", "")),
-                "reason": str(reason or "embedding_unavailable"),
+                "user_id": str(row.get("user_id", "") or ""),
+                "source_type": str(row.get("source_type", "") or "private"),
+                "summary": str(row.get("summary", "") or ""),
+                "metadata": metadata,
+                "reason": str(reason or row.get("reason") or "embedding_unavailable"),
+                "retry_count": int(row.get("retry_count", 0) or 0),
                 "queued_at": now,
             })
 
-        # 防止队列无限增长
+        if not payload:
+            return
+
+        self.db.enqueue_pending_vector_jobs(payload)
+
+        # 热缓存仅用于观测/调试
+        self._pending_vector_jobs.extend(payload)
         if len(self._pending_vector_jobs) > self._max_pending_vector_jobs:
             self._pending_vector_jobs = self._pending_vector_jobs[-self._max_pending_vector_jobs:]
 
     def _clear_pending_vector_jobs(self, index_ids):
-        """在向量补齐成功后清除补偿队列记录。"""
-        if not index_ids or not self._pending_vector_jobs:
+        """在向量补齐成功后清除补偿队列（DB + 热缓存）。"""
+        if not index_ids:
             return
-        id_set = {str(i) for i in index_ids if str(i)}
+        id_set = {str(i).strip() for i in index_ids if str(i).strip()}
         if not id_set:
             return
-        self._pending_vector_jobs = [
-            item for item in self._pending_vector_jobs
-            if str(item.get("index_id", "")) not in id_set
-        ]
+
+        self.db.delete_pending_vector_jobs(list(id_set))
+        if self._pending_vector_jobs:
+            self._pending_vector_jobs = [
+                item for item in self._pending_vector_jobs
+                if str(item.get("index_id", "")) not in id_set
+            ]
+
+    async def retry_pending_vector_jobs(self, *, batch_size: int = 50, max_retry: int = 6):
+        """从 DB 加载并重试向量补偿队列（批处理，避免阻塞主链路）。"""
+        if self._is_shutdown:
+            return {"loaded": 0, "success": 0, "failed": 0}
+
+        async with self._pending_retry_lock:
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(
+                self.executor,
+                lambda: self.db.get_pending_vector_jobs(limit=max(1, int(batch_size))),
+            )
+            if not rows:
+                return {"loaded": 0, "success": 0, "failed": 0}
+
+            loaded = len(rows)
+            success_ids = []
+            failed_payload = []
+
+            try:
+                await self._ensure_chroma_initialized()
+            except Exception as e:
+                logger.warning(f"Engram：补偿任务跳过，Chroma 初始化失败：{e}")
+                return {"loaded": loaded, "success": 0, "failed": loaded}
+
+            for row in rows:
+                index_id = str(getattr(row, "index_id", "") or "").strip()
+                summary = str(getattr(row, "summary", "") or "").strip()
+                if not index_id or not summary:
+                    success_ids.append(index_id)
+                    continue
+
+                metadata = getattr(row, "metadata", None) or {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+
+                try:
+                    added = await self._collection_add_texts(
+                        ids=[index_id],
+                        documents=[summary],
+                        metadatas=[metadata],
+                    )
+                    if added:
+                        success_ids.append(index_id)
+                    else:
+                        retry_count = int(getattr(row, "retry_count", 0) or 0) + 1
+                        if retry_count < max_retry:
+                            failed_payload.append({
+                                "index_id": index_id,
+                                "user_id": str(getattr(row, "user_id", "") or ""),
+                                "source_type": str(getattr(row, "source_type", "private") or "private"),
+                                "summary": summary,
+                                "metadata": metadata,
+                                "reason": str(getattr(row, "reason", "") or "embedding_retry_failed"),
+                                "retry_count": retry_count,
+                            })
+                        success_ids.append(index_id)
+                except Exception as e:
+                    retry_count = int(getattr(row, "retry_count", 0) or 0) + 1
+                    if retry_count < max_retry:
+                        failed_payload.append({
+                            "index_id": index_id,
+                            "user_id": str(getattr(row, "user_id", "") or ""),
+                            "source_type": str(getattr(row, "source_type", "private") or "private"),
+                            "summary": summary,
+                            "metadata": metadata,
+                            "reason": str(e),
+                            "retry_count": retry_count,
+                        })
+                    success_ids.append(index_id)
+
+            if success_ids:
+                await loop.run_in_executor(self.executor, self.db.delete_pending_vector_jobs, success_ids)
+            if failed_payload:
+                await loop.run_in_executor(self.executor, self.db.enqueue_pending_vector_jobs, failed_payload)
+
+            success_count = loaded - len(failed_payload)
+            failed_count = len(failed_payload)
+            if loaded > 0:
+                logger.info(
+                    "Engram：向量补偿重试完成 loaded=%d success=%d retry_left=%d",
+                    loaded,
+                    success_count,
+                    failed_count,
+                )
+            return {"loaded": loaded, "success": success_count, "failed": failed_count}
+
+    async def ensure_pending_vector_retry_started(self):
+        """启动期触发补偿重试（幂等，分批 drain 队列，避免阻塞主链路）。"""
+        if self._pending_retry_started:
+            return
+        self._pending_retry_started = True
+
+        try:
+            batch_size = int(self.config.get("pending_vector_retry_batch_size", 50))
+        except (TypeError, ValueError):
+            batch_size = 50
+        batch_size = max(1, batch_size)
+
+        try:
+            max_retry = int(self.config.get("pending_vector_retry_max", 6))
+        except (TypeError, ValueError):
+            max_retry = 6
+        max_retry = max(1, max_retry)
+
+        try:
+            # 启动期最多处理若干批，防止首次加载时长阻塞。
+            startup_max_batches = int(self.config.get("pending_vector_retry_startup_max_batches", 8))
+        except (TypeError, ValueError):
+            startup_max_batches = 8
+        startup_max_batches = max(1, startup_max_batches)
+
+        loaded_total = 0
+        success_total = 0
+        failed_total = 0
+
+        try:
+            for _ in range(startup_max_batches):
+                result = await self.retry_pending_vector_jobs(
+                    batch_size=batch_size,
+                    max_retry=max_retry,
+                )
+                loaded = int(result.get("loaded", 0) or 0)
+                if loaded <= 0:
+                    break
+                loaded_total += loaded
+                success_total += int(result.get("success", 0) or 0)
+                failed_total += int(result.get("failed", 0) or 0)
+
+                # 若本批次已无可重试残留，提前结束。
+                if int(result.get("failed", 0) or 0) == 0:
+                    continue
+
+            if loaded_total > 0:
+                logger.info(
+                    "Engram：启动补偿队列处理完成 loaded=%d success=%d retry_left=%d batches<=%d",
+                    loaded_total,
+                    success_total,
+                    failed_total,
+                    startup_max_batches,
+                )
+        except Exception as e:
+            logger.warning(f"Engram：启动补偿队列重试失败（已忽略）：{e}")
 
     @staticmethod
     def _is_dimension_mismatch_error(error: Exception) -> bool:
@@ -995,6 +1165,13 @@ class MemoryManager:
                     "index_id": idx,
                     "user_id": user_id,
                     "source_type": index_params.get("source_type", "private"),
+                    "summary": index_params.get("summary", ""),
+                    "metadata": {
+                        "user_id": user_id,
+                        "source_type": index_params.get("source_type", "private"),
+                        "created_at": created_str,
+                        "ai_name": str(self.config.get("ai_name") or "").strip(),
+                    },
                     "created_at": created_str,
                 })
 
@@ -1302,6 +1479,13 @@ class MemoryManager:
                     "index_id": index_id,
                     "user_id": user_id,
                     "source_type": output_source_type,
+                    "summary": summary_text,
+                    "metadata": {
+                        "user_id": user_id,
+                        "source_type": output_source_type,
+                        "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        "ai_name": str(self.config.get("ai_name") or "").strip(),
+                    },
                     "created_at": created_at.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             ], reason=vector_fail_reason)
@@ -1424,6 +1608,7 @@ class MemoryManager:
                 start_time,
                 end_time,
                 source_types,
+                bool(self.config.get("enable_sqlite_bm25_fallback", True)),
             )
         else:
             candidates = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, candidate_limit)
@@ -1903,6 +2088,7 @@ class MemoryManager:
 
         active_scores = []
         keyword_scores = [item['keyword_score'] for item in memory_data]
+        now_ts = datetime.datetime.now().timestamp()
 
         for item in memory_data:
             db_index = index_map.get(item['index_id'])
@@ -2208,6 +2394,11 @@ class MemoryManager:
 
         return target_memory, raw_msgs
 
+    def _build_delete_scope_key(self, user_id: str, source_type: str = "") -> str:
+        source = str(source_type or self.default_source_type or "private").strip().lower()
+        prefix = "group" if source.startswith("group") else "private"
+        return f"{prefix}:{str(user_id or '').strip()}"
+
     # ========== 记忆删除与撤销 ==========
 
     async def _delete_memory_entry(self, user_id, target_memory, delete_raw=False):
@@ -2239,7 +2430,7 @@ class MemoryManager:
             except Exception as e:
                 logger.debug(f"Engram：获取备份向量数据失败：{e}")
 
-            # 创建删除记录
+            # 创建删除记录（DB 持久化为真相源）
             delete_record = {
                 'index_id': index_id,
                 'summary': summary,
@@ -2251,10 +2442,32 @@ class MemoryManager:
                 'active_score': target_memory.active_score,
                 'delete_raw': delete_raw,
                 'deleted_uuids': deleted_uuids,
-                'vector_data': vector_data
+                'vector_data': vector_data,
             }
 
-            # 保存到删除历史
+            scope_key = self._build_delete_scope_key(user_id, target_memory.source_type)
+            source_type = str(target_memory.source_type or self.default_source_type or "private")
+            delete_history_id = await loop.run_in_executor(
+                self.executor,
+                lambda: self.db.save_delete_history(
+                    scope_key=scope_key,
+                    user_id=str(user_id or ""),
+                    group_id=str(user_id or "") if source_type.startswith("group") else "",
+                    source_type=source_type,
+                    index_id=index_id,
+                    summary=summary,
+                    ref_uuids=target_memory.ref_uuids,
+                    prev_index_id=target_memory.prev_index_id,
+                    created_at=target_memory.created_at,
+                    active_score=target_memory.active_score,
+                    delete_raw=bool(delete_raw),
+                    deleted_uuids=json.dumps(deleted_uuids, ensure_ascii=False),
+                    vector_data=vector_data,
+                ),
+            )
+            delete_record["_history_id"] = delete_history_id
+
+            # 热缓存保留最近若干条，便于同进程快速撤销
             if user_id not in self._delete_history:
                 self._delete_history[user_id] = []
             self._delete_history[user_id].insert(0, delete_record)
@@ -2309,26 +2522,47 @@ class MemoryManager:
         return await self._delete_memory_entry(user_id, target_memory, delete_raw=delete_raw)
 
     async def undo_last_delete(self, user_id):
-        """
-        撤销最近一次删除操作
-
-        Args:
-            user_id: 用户ID
-
-        Returns:
-            (success: bool, message: str, summary: str)
-        """
-        # 检查是否有删除历史
-        if user_id not in self._delete_history or not self._delete_history[user_id]:
-            return False, "没有可撤销的删除操作。", ""
-
-        # 获取最近的删除记录
-        delete_record = self._delete_history[user_id].pop(0)
-
+        """撤销最近一次删除操作（优先使用 DB 历史，支持跨重启）。"""
         loop = asyncio.get_event_loop()
 
+        scope_private = self._build_delete_scope_key(user_id, "private")
+        scope_group = self._build_delete_scope_key(user_id, "group")
+
+        row_private = await loop.run_in_executor(self.executor, self.db.get_last_delete_history, scope_private)
+        row_group = await loop.run_in_executor(self.executor, self.db.get_last_delete_history, scope_group)
+
+        candidates = [r for r in [row_private, row_group] if r is not None]
+        if not candidates:
+            # 回退内存热缓存（兼容极端旧数据）
+            if user_id not in self._delete_history or not self._delete_history[user_id]:
+                return False, "没有可撤销的删除操作。", ""
+            delete_record = self._delete_history[user_id].pop(0)
+            history_id = None
+        else:
+            selected = sorted(candidates, key=lambda r: (r.deleted_at, r.id), reverse=True)[0]
+            history_id = selected.id
+            try:
+                deleted_uuids = json.loads(selected.deleted_uuids or "[]")
+                if not isinstance(deleted_uuids, list):
+                    deleted_uuids = []
+            except Exception:
+                deleted_uuids = []
+            delete_record = {
+                'index_id': selected.index_id,
+                'summary': selected.summary,
+                'ref_uuids': selected.ref_uuids,
+                'prev_index_id': selected.prev_index_id,
+                'source_type': selected.source_type,
+                'user_id': selected.user_id or user_id,
+                'created_at': selected.created_at,
+                'active_score': selected.active_score,
+                'delete_raw': selected.delete_raw,
+                'deleted_uuids': deleted_uuids,
+                'vector_data': selected.vector_data,
+            }
+
         try:
-            # 1. 恢复 SQLite 中的记忆索引
+            # 1) 恢复 SQLite 索引
             index_params = {
                 'index_id': delete_record['index_id'],
                 'summary': delete_record['summary'],
@@ -2336,8 +2570,6 @@ class MemoryManager:
                 'prev_index_id': delete_record['prev_index_id'],
                 'source_type': delete_record['source_type'],
                 'user_id': delete_record['user_id'],
-                'group_id': delete_record.get('group_id'),
-                'member_id': delete_record.get('member_id'),
                 'created_at': delete_record['created_at'],
                 'active_score': delete_record.get('active_score', 100)
             }
@@ -2348,13 +2580,10 @@ class MemoryManager:
                 source_type=index_params.get("source_type"),
             )
 
-            # 确保 ChromaDB 已初始化
+            # 2) 恢复向量
             await self._ensure_chroma_initialized()
-
-            # 2. 恢复 ChromaDB 中的向量数据
             vector_data = delete_record.get('vector_data')
             if vector_data and vector_data.get('embedding'):
-                # 有完整的向量数据，直接恢复
                 add_params = {
                     'ids': [delete_record['index_id']],
                     'documents': [vector_data.get('document', delete_record['summary'])],
@@ -2363,7 +2592,6 @@ class MemoryManager:
                 }
                 await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
             else:
-                # 没有向量数据，重新生成
                 add_params = {
                     'ids': [delete_record['index_id']],
                     'documents': [delete_record['summary']],
@@ -2381,7 +2609,7 @@ class MemoryManager:
                 if not added:
                     logger.warning("Engram：撤销操作已跳过向量恢复（embedding provider 不可用）")
 
-            # 3. 恢复原始消息的归档状态
+            # 3) 恢复原文归档状态
             if delete_record['deleted_uuids']:
                 def _mark_archived():
                     RawMemory = self.db.RawMemory
@@ -2394,12 +2622,16 @@ class MemoryManager:
                 except Exception as e:
                     logger.debug(f"Engram：恢复原始消息归档状态失败：{e}")
 
+            if history_id:
+                await loop.run_in_executor(self.executor, self.db.mark_delete_history_restored, history_id)
+
             return True, "撤销成功", delete_record['summary']
 
         except Exception as e:
             logger.error(f"Engram：撤销删除失败：{e}")
-            # 恢复失败，将记录放回历史
-            self._delete_history[user_id].insert(0, delete_record)
+            if not history_id:
+                self._delete_history.setdefault(user_id, []).insert(0, delete_record)
+                self._delete_history[user_id] = self._delete_history[user_id][:self._max_undo_history]
             return False, f"撤销失败：{e}", delete_record['summary']
 
     async def delete_memory_by_id(self, user_id, short_id, delete_raw=False):

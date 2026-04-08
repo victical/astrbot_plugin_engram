@@ -134,7 +134,8 @@ class TimeExpressionService:
         # 2) 单个日期 / 单个月份（支持未写年份，默认今年）
         single_match = re.search(token_pattern, text)
         if single_match:
-            raw = single_match.group(1)
+            # 单项匹配时 token_pattern 本身不含外层捕获组，使用 group(0)
+            raw = single_match.group(0)
             dt, kind, norm_desc, used_default_year = _parse_date_or_month(raw)
             if dt:
                 if kind == "day":

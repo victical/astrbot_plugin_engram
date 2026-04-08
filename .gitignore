@@ -43,3 +43,7 @@ reports/
 REFACTOR_CHECKLIST.md
 dev-docs
 sync_engram.sh
+.ace-tool/
+.claude/
+.pytest_cache/
+.github/

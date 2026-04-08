@@ -46,6 +46,50 @@ class MemoryIndex(BaseModel):
             (('user_id', 'created_at'), False),
         )
 
+
+class DeleteHistory(BaseModel):
+    id = AutoField()
+    scope_key = CharField(index=True)  # 例如 private:<user_id> / group:<storage_id>
+    user_id = CharField(null=True, index=True)
+    group_id = CharField(null=True, index=True)
+    source_type = CharField(default="private")
+
+    index_id = CharField(index=True)
+    summary = TextField()
+    ref_uuids = TextField(null=True)
+    prev_index_id = CharField(null=True)
+    created_at = DateTimeField(null=True)
+    active_score = IntegerField(default=100)
+    delete_raw = BooleanField(default=False)
+    deleted_uuids = TextField(null=True)
+    vector_data = JSONField(null=True)
+
+    is_restored = BooleanField(default=False, index=True)
+    deleted_at = DateTimeField(default=datetime.datetime.now, index=True)
+    restored_at = DateTimeField(null=True)
+
+    class Meta:
+        indexes = (
+            (("scope_key", "is_restored", "deleted_at"), False),
+        )
+
+
+class PendingVectorJob(BaseModel):
+    id = AutoField()
+    index_id = CharField(index=True)
+    user_id = CharField(null=True, index=True)
+    source_type = CharField(default="private")
+    summary = TextField()
+    metadata = JSONField(null=True)
+    retry_count = IntegerField(default=0)
+    reason = TextField(null=True)
+    queued_at = DateTimeField(default=datetime.datetime.now, index=True)
+
+    class Meta:
+        indexes = (
+            (("index_id", "queued_at"), False),
+        )
+
 class DatabaseManager:
     @staticmethod
     def _bind_model(model_cls, database):
@@ -97,14 +141,22 @@ class DatabaseManager:
         # 为每个 DatabaseManager 生成独立模型，避免多 DB 互相覆盖
         self.RawMemory = self._bind_model(RawMemory, self.db)
         self.MemoryIndex = self._bind_model(MemoryIndex, self.db)
+        self.DeleteHistory = self._bind_model(DeleteHistory, self.db)
+        self.PendingVectorJob = self._bind_model(PendingVectorJob, self.db)
         self._table_columns_cache = {}
 
         self.init_db()
 
     def init_db(self):
         self.db.connect(reuse_if_open=True)
-        self.db.create_tables([self.RawMemory, self.MemoryIndex])
+        self.db.create_tables([
+            self.RawMemory,
+            self.MemoryIndex,
+            self.DeleteHistory,
+            self.PendingVectorJob,
+        ])
         self._migrate_schema_if_needed()
+        self._ensure_memory_index_fts()
         self.db.close()
 
     def _migrate_schema_if_needed(self):
@@ -157,6 +209,71 @@ class DatabaseManager:
                 )
 
         self._table_columns_cache.clear()
+
+    def _ensure_memory_index_fts(self):
+        """为 MemoryIndex 构建 FTS5 索引与触发器，用于 BM25 候选召回。"""
+        table_name = self.MemoryIndex._meta.table_name
+        fts_table = f"{table_name}_fts"
+
+        with self.db.connection_context():
+            # 外部内容 FTS：summary 可检索，其他字段仅用于 bm25 参数占位/诊断
+            self.db.execute_sql(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table}
+                USING fts5(
+                    summary,
+                    user_id UNINDEXED,
+                    source_type UNINDEXED,
+                    created_at UNINDEXED,
+                    content='{table_name}',
+                    content_rowid='rowid',
+                    tokenize='unicode61'
+                )
+                """
+            )
+
+            # 触发器：保持 FTS 与主表一致
+            self.db.execute_sql(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table_name}_ai
+                AFTER INSERT ON {table_name}
+                BEGIN
+                    INSERT INTO {fts_table}(rowid, summary, user_id, source_type, created_at)
+                    VALUES (new.rowid, new.summary, new.user_id, new.source_type, new.created_at);
+                END;
+                """
+            )
+            self.db.execute_sql(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table_name}_ad
+                AFTER DELETE ON {table_name}
+                BEGIN
+                    INSERT INTO {fts_table}({fts_table}, rowid, summary, user_id, source_type, created_at)
+                    VALUES('delete', old.rowid, old.summary, old.user_id, old.source_type, old.created_at);
+                END;
+                """
+            )
+            self.db.execute_sql(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table_name}_au
+                AFTER UPDATE ON {table_name}
+                BEGIN
+                    INSERT INTO {fts_table}({fts_table}, rowid, summary, user_id, source_type, created_at)
+                    VALUES('delete', old.rowid, old.summary, old.user_id, old.source_type, old.created_at);
+                    INSERT INTO {fts_table}(rowid, summary, user_id, source_type, created_at)
+                    VALUES (new.rowid, new.summary, new.user_id, new.source_type, new.created_at);
+                END;
+                """
+            )
+
+            # 首次/升级后重建索引，确保旧数据可检索（避免每次启动全量重建）
+            try:
+                fts_count = self.db.execute_sql(f"SELECT COUNT(1) FROM {fts_table}").fetchone()[0]
+            except Exception:
+                fts_count = 0
+            if int(fts_count or 0) == 0:
+                self.db.execute_sql(f"INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')")
+
 
     def _ensure_index_exists(self, table_name: str, index_name: str, column_name: str, available_columns=None):
         available_columns = available_columns or set()
@@ -287,6 +404,37 @@ class DatabaseManager:
         with self.db.connection_context():
             return list(self.MemoryIndex.select().where(self.MemoryIndex.user_id == user_id).order_by(self.MemoryIndex.created_at.desc()).limit(limit))
 
+    def _search_memory_indexes_by_keywords_like(
+        self,
+        user_id,
+        normalized_keywords,
+        limit=50,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+    ):
+        """旧版兜底：SQLite LIKE 候选检索。"""
+        query = self.MemoryIndex.select().where(self.MemoryIndex.user_id == user_id)
+
+        if start_time:
+            query = query.where(self.MemoryIndex.created_at >= start_time)
+        if end_time:
+            query = query.where(self.MemoryIndex.created_at < end_time)
+
+        if isinstance(source_types, (list, tuple, set)):
+            source_types = [str(t).strip() for t in source_types if str(t).strip()]
+            if source_types:
+                query = query.where(self.MemoryIndex.source_type << source_types)
+
+        if normalized_keywords:
+            conditions = [self.MemoryIndex.summary.contains(k) for k in normalized_keywords]
+            cond = conditions[0]
+            for item in conditions[1:]:
+                cond = cond | item
+            query = query.where(cond)
+
+        return list(query.order_by(self.MemoryIndex.created_at.desc()).limit(limit))
+
     def search_memory_indexes_by_keywords(
         self,
         user_id,
@@ -295,38 +443,95 @@ class DatabaseManager:
         start_time=None,
         end_time=None,
         source_types=None,
+        use_bm25=True,
     ):
-        """关键词兜底检索：在 SQLite 中按 summary 模糊匹配候选记忆。"""
+        """关键词兜底检索：优先 FTS5 BM25，失败时回退 LIKE。"""
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 50
+
+        normalized_keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+
+        table_name = self.MemoryIndex._meta.table_name
+        fts_table = f"{table_name}_fts"
+
         with self.db.connection_context():
-            query = self.MemoryIndex.select().where(self.MemoryIndex.user_id == user_id)
+            # 无关键词时沿用时间倒序
+            if not normalized_keywords:
+                return self._search_memory_indexes_by_keywords_like(
+                    user_id=user_id,
+                    normalized_keywords=normalized_keywords,
+                    limit=limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_types=source_types,
+                )
 
-            # 时间范围过滤（左闭右开）
+            if not use_bm25:
+                return self._search_memory_indexes_by_keywords_like(
+                    user_id=user_id,
+                    normalized_keywords=normalized_keywords,
+                    limit=limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_types=source_types,
+                )
+
+            # FTS MATCH 表达式：关键词 OR，短语精确匹配
+            match_tokens = []
+            for token in normalized_keywords[:24]:
+                safe = token.replace('"', '""').strip()
+                if safe:
+                    match_tokens.append(f'"{safe}"')
+            match_expr = " OR ".join(match_tokens)
+
+            where_sql = ["mi.user_id = ?", f"{fts_table} MATCH ?"]
+            params = [str(user_id), match_expr]
+
             if start_time:
-                query = query.where(self.MemoryIndex.created_at >= start_time)
+                where_sql.append("mi.created_at >= ?")
+                params.append(start_time)
             if end_time:
-                query = query.where(self.MemoryIndex.created_at < end_time)
+                where_sql.append("mi.created_at < ?")
+                params.append(end_time)
 
-            # 来源类型过滤
             if isinstance(source_types, (list, tuple, set)):
                 source_types = [str(t).strip() for t in source_types if str(t).strip()]
                 if source_types:
-                    query = query.where(self.MemoryIndex.source_type << source_types)
+                    placeholders = ",".join(["?"] * len(source_types))
+                    where_sql.append(f"mi.source_type IN ({placeholders})")
+                    params.extend(source_types)
 
-            # summary 关键词 OR 匹配
-            normalized_keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
-            if normalized_keywords:
-                conditions = [self.MemoryIndex.summary.contains(k) for k in normalized_keywords]
-                cond = conditions[0]
-                for item in conditions[1:]:
-                    cond = cond | item
-                query = query.where(cond)
+            params.append(limit)
+
+            sql = f"""
+                SELECT mi.index_id, bm25({fts_table}) AS bm25_score
+                FROM {fts_table}
+                JOIN {table_name} AS mi ON mi.rowid = {fts_table}.rowid
+                WHERE {' AND '.join(where_sql)}
+                ORDER BY bm25_score ASC, mi.created_at DESC
+                LIMIT ?
+            """
 
             try:
-                limit = max(1, int(limit))
-            except (TypeError, ValueError):
-                limit = 50
+                rows = self.db.execute_sql(sql, params).fetchall()
+                ordered_ids = [str(row[0]) for row in rows if row and row[0]]
+                if not ordered_ids:
+                    return []
 
-            return list(query.order_by(self.MemoryIndex.created_at.desc()).limit(limit))
+                idx_map = self.get_memory_indexes_by_ids(ordered_ids)
+                return [idx_map[i] for i in ordered_ids if i in idx_map]
+            except Exception as e:
+                logger.warning("Engram：FTS5 BM25 检索失败，回退 LIKE：%s", e)
+                return self._search_memory_indexes_by_keywords_like(
+                    user_id=user_id,
+                    normalized_keywords=normalized_keywords,
+                    limit=limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_types=source_types,
+                )
 
     def get_memories_since(self, user_id, since_time):
         with self.db.connection_context():
@@ -474,6 +679,92 @@ class DatabaseManager:
                 "assistant_messages": assistant_msgs
             }
 
+    # ========== 删除历史持久化 ==========
+
+    def save_delete_history(self, **kwargs):
+        with self.db.connection_context():
+            row = self.DeleteHistory.create(**kwargs)
+            return row.id
+
+    def get_last_delete_history(self, scope_key):
+        with self.db.connection_context():
+            return (
+                self.DeleteHistory.select()
+                .where(
+                    (self.DeleteHistory.scope_key == scope_key)
+                    & (self.DeleteHistory.is_restored == False)
+                )
+                .order_by(self.DeleteHistory.deleted_at.desc(), self.DeleteHistory.id.desc())
+                .first()
+            )
+
+    def mark_delete_history_restored(self, record_id):
+        with self.db.connection_context():
+            return (
+                self.DeleteHistory.update(
+                    is_restored=True,
+                    restored_at=datetime.datetime.now(),
+                )
+                .where(self.DeleteHistory.id == record_id)
+                .execute()
+            )
+
+    # ========== 向量补偿任务持久化 ==========
+
+    def enqueue_pending_vector_jobs(self, rows):
+        if not rows:
+            return 0
+        now = datetime.datetime.now()
+        payload = []
+        for item in rows:
+            index_id = str(item.get("index_id", "")).strip()
+            if not index_id:
+                continue
+            payload.append({
+                "index_id": index_id,
+                "user_id": str(item.get("user_id", "") or "") or None,
+                "source_type": str(item.get("source_type", "") or "private") or "private",
+                "summary": str(item.get("summary", "") or ""),
+                "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                "retry_count": int(item.get("retry_count", 0) or 0),
+                "reason": str(item.get("reason", "") or ""),
+                "queued_at": item.get("queued_at") if isinstance(item.get("queued_at"), datetime.datetime) else now,
+            })
+
+        if not payload:
+            return 0
+
+        with self.db.connection_context():
+            self.PendingVectorJob.insert_many(payload).execute()
+        return len(payload)
+
+    def get_pending_vector_jobs(self, limit=200):
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 200
+
+        with self.db.connection_context():
+            query = (
+                self.PendingVectorJob.select()
+                .order_by(self.PendingVectorJob.queued_at.asc(), self.PendingVectorJob.id.asc())
+                .limit(limit)
+            )
+            return list(query)
+
+    def delete_pending_vector_jobs(self, index_ids):
+        if not index_ids:
+            return 0
+        ids = [str(i).strip() for i in index_ids if str(i).strip()]
+        if not ids:
+            return 0
+        with self.db.connection_context():
+            return (
+                self.PendingVectorJob.delete()
+                .where(self.PendingVectorJob.index_id << ids)
+                .execute()
+            )
+
 
 class StableDatabaseInterface:
     """Engram DB 稳定接口层：统一收口并提供启动阶段契约自检。"""
@@ -515,6 +806,12 @@ class StableDatabaseInterface:
         "get_all_user_ids",
         "get_all_group_ids",
         "get_all_users_stats",
+        "save_delete_history",
+        "get_last_delete_history",
+        "mark_delete_history_restored",
+        "enqueue_pending_vector_jobs",
+        "get_pending_vector_jobs",
+        "delete_pending_vector_jobs",
     )
 
     def __init__(self, backend):

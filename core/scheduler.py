@@ -35,6 +35,10 @@ class MemoryScheduler:
     
     async def start(self):
         """启动所有调度任务"""
+        if callable(getattr(self.logic, "ensure_pending_vector_retry_started", None)):
+            task0 = asyncio.create_task(self.logic.ensure_pending_vector_retry_started())
+            self._tasks.append(task0)
+
         # 保存任务引用，以便关闭时取消
         task1 = asyncio.create_task(self.background_worker())
         self._tasks.append(task1)

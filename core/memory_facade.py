@@ -200,6 +200,10 @@ class MemoryFacade:
     async def rebuild_vector_collection(self, full_rebuild: bool = False, batch_size: int = 200):
         """手动重建向量库"""
         return await self._memory_manager.rebuild_vector_collection(full_rebuild, batch_size)
+
+    async def ensure_pending_vector_retry_started(self):
+        """启动时触发补偿队列重试。"""
+        return await self._memory_manager.ensure_pending_vector_retry_started()
     
     # ========== 用户画像方法（委托给 ProfileManager） ==========
     
