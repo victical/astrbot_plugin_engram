@@ -1,3 +1,3 @@
-peewee>=3.16,<4.0
-chromadb>=0.4.13,<0.5.0; python_version < '3.13'
-zhdate>=0.1,<1.0
+peewee>=3.16
+chromadb>=0.4.13
+zhdate>=0.1
