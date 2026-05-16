@@ -108,26 +108,46 @@ class LLMContextInjector:
         self,
         req: Any,
         profile_block: str,
-        memory_block: str
+        memory_block: str,
+        target: str = "system"
     ) -> None:
         """
-        将画像和记忆块注入到LLM请求的system_prompt中
-        
+        将画像和记忆块注入到LLM请求中
+
         Args:
             req: LLM请求对象
             profile_block: 画像文本块
             memory_block: 记忆文本块
+            target: 注入目标，system 或 user
         """
         if not profile_block and not memory_block:
             return
-        
+
         inject_text = f"\n\n{profile_block}{memory_block}"
-        
-        if req.system_prompt:
+        target = self._normalize_target(target)
+
+        if target == "user" and self._inject_into_user_prompt(req, inject_text):
+            return
+        self._inject_into_system_prompt(req, inject_text)
+
+    def _normalize_target(self, target: str) -> str:
+        value = str(target or "system").strip().lower()
+        return value if value in {"system", "user"} else "system"
+
+    def _inject_into_system_prompt(self, req: Any, inject_text: str) -> None:
+        if getattr(req, "system_prompt", ""):
             req.system_prompt += inject_text
         else:
             req.system_prompt = f"你是一个有记忆的助手。以下是关于用户的信息：{inject_text}"
-    
+
+    def _inject_into_user_prompt(self, req: Any, inject_text: str) -> bool:
+        for attr in ("prompt", "user_prompt"):
+            if hasattr(req, attr):
+                current = getattr(req, attr) or ""
+                setattr(req, attr, f"{current}{inject_text}" if current else inject_text.lstrip())
+                return True
+        return False
+
     def _join_list(self, items: Any) -> str:
         """安全地连接列表项为字符串"""
         if isinstance(items, list) and items:

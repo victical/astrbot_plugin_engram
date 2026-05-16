@@ -34,6 +34,20 @@
         "default": false,
         "hint": "开启后，每次 LLM 请求时会在日志中输出注入的用户画像和记忆内容，便于调试和排查问题。"
       },
+      "llm_injection_target": {
+        "description": "记忆与画像注入位置",
+        "type": "string",
+        "options": [
+          "system",
+          "user"
+        ],
+        "labels": [
+          "系统提示词（默认）",
+          "用户提示词"
+        ],
+        "default": "system",
+        "hint": "控制用户画像、长期记忆和工具提示注入到 LLM 请求的位置。system 保持旧行为；user 会追加到用户提示词中，适合不希望修改 system prompt 的模型或平台。"
+      },
       "list_memory_count": {
         "description": "查询记忆指令默认返回的数量",
         "type": "int",
