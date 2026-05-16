@@ -5,6 +5,7 @@ LLM 工具命令处理器 (Memory Tool Handler)
 将 main.py 中的工具输出业务逻辑下沉，main 仅保留路由与参数收口。
 """
 
+import json
 import re
 from astrbot.api import logger
 
@@ -16,6 +17,27 @@ class MemoryToolHandler:
         self.config = config
         self.logic = logic
 
+    @staticmethod
+    def _normalize_mode(mode: str) -> str:
+        token = str(mode or "hybrid").strip().lower()
+        return token if token in {"hybrid", "semantic", "keyword", "recent"} else "hybrid"
+
+    def _build_structured_output(self, *, title: str, query: str, mode: str, results, time_desc: str, normalized_types, extra_hint: str) -> str:
+        payload = {
+            "type": "memory_search_result",
+            "title": title,
+            "query": query,
+            "mode": mode,
+            "count": len(results),
+            "time_filter": time_desc or "",
+            "source_types": list(normalized_types or []),
+            "results": [item.to_dict() if hasattr(item, "to_dict") else item for item in results],
+            "usage_hint": "如需查看某条记忆的完整原始对话，请使用 mem_get_detail_tool 并传入 memory_id 或 memory_ids。",
+        }
+        if extra_hint:
+            payload["extra_hint"] = extra_hint
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
     async def build_memory_search_output(
         self,
         *,
@@ -24,6 +46,7 @@ class MemoryToolHandler:
         limit: int,
         time_expr: str,
         source_types,
+        mode: str = "hybrid",
         default_types=None,
         title: str = "🧠 工具检索结果",
         extra_hint: str = "",
@@ -75,34 +98,32 @@ class MemoryToolHandler:
             start_time, end_time, time_desc = None, None, ""
 
         normalized_types = normalize_source_types(source_types, default_types=default_types)
+        normalized_mode = self._normalize_mode(mode)
 
         try:
-            memories = await logic.retrieve_memories(
+            results = await logic.retrieve_memory_search_results(
                 user_id,
                 query,
                 limit=final_limit,
                 start_time=start_time,
                 end_time=end_time,
-                source_types=normalized_types or None
+                source_types=normalized_types or None,
+                force_retrieve=True,
+                mode=normalized_mode,
             )
         except Exception as e:
             logger.error(f"Engram mem_search_tool 异常：{e}")
             return "工具检索失败，请稍后重试。"
 
-        if not memories:
+        if not results:
             return f"未检索到与“{query}”相关的长期记忆。"
 
-        result_lines = [f"{title}（共 {min(len(memories), final_limit)} 条）："]
-
-        if time_desc:
-            result_lines.append(f"⏱️ 时间筛选：{time_desc}")
-        if normalized_types:
-            result_lines.append(f"🗂️ 类型筛选：{', '.join(normalized_types)}")
-
-        for idx, memory in enumerate(memories[:final_limit], start=1):
-            result_lines.append(f"{idx}. {memory}")
-
-        if extra_hint:
-            result_lines.append(f"\n{extra_hint}")
-        result_lines.append("\n💡 如需查看某条记忆的完整原始对话，请使用 mem_get_detail_tool 并传入对应 🆔。")
-        return "\n\n".join(result_lines)
+        return self._build_structured_output(
+            title=title,
+            query=query,
+            mode=normalized_mode,
+            results=results[:final_limit],
+            time_desc=time_desc,
+            normalized_types=normalized_types,
+            extra_hint=extra_hint,
+        )
