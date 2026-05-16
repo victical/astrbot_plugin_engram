@@ -3016,7 +3016,13 @@ class MemoryManager:
             )
 
             if not raw_msgs:
-                return self._format_export_output(format, [], {})
+                # 空数据按指定格式返回空载荷，与有数据分支的 (success, data, stats) 元组对齐
+                if format == "json":
+                    empty_data = "[]"
+                else:
+                    # jsonl / txt / alpaca / sharegpt 等行式格式的空载荷统一为空字符串
+                    empty_data = ""
+                return True, empty_data, {"exported": 0}
 
             # 获取统计信息
             stats = await loop.run_in_executor(self.executor, self.db.get_all_users_stats)
