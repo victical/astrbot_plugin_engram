@@ -6,11 +6,45 @@ Engram WebUI Server
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import secrets
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+
+def _patch_starlette_router_for_compat() -> None:
+    """
+    兼容性 shim：某些 AstrBot 运行环境的 starlette 版本移除了 Router.__init__
+    的 on_startup / on_shutdown 关键字参数，但 FastAPI 内部仍然透传这两个参数，
+    导致 `Router.__init__() got an unexpected keyword argument 'on_startup'`。
+
+    检测到不兼容时打 patch：吸收并忽略这两个 kwarg（FastAPI 0.100+ 默认走 lifespan
+    协议，传入值在新接口下为空列表/None，丢弃不影响功能）。
+    """
+    try:
+        from starlette.routing import Router as _Router
+    except Exception:
+        return
+
+    try:
+        sig = inspect.signature(_Router.__init__)
+    except (TypeError, ValueError):
+        return
+
+    if "on_startup" in sig.parameters and "on_shutdown" in sig.parameters:
+        return  # 当前 starlette 原生支持，无需 patch
+
+    _orig_init = _Router.__init__
+
+    def _patched_init(self, *args, on_startup=None, on_shutdown=None, **kwargs):
+        return _orig_init(self, *args, **kwargs)
+
+    _Router.__init__ = _patched_init  # type: ignore[method-assign]
+
+
+_patch_starlette_router_for_compat()
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
