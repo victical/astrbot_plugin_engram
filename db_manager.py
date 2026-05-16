@@ -37,6 +37,8 @@ class MemoryIndex(BaseModel):
     prev_index_id = CharField(null=True, index=True)  # 添加索引：链表查询
     source_type = CharField()
     user_id = CharField(null=True, index=True)  # 添加索引：按用户查询
+    group_id = CharField(null=True, index=True)
+    member_id = CharField(null=True, index=True)
     active_score = IntegerField(default=100)
     created_at = DateTimeField(default=datetime.datetime.now, index=True)  # 添加索引：按时间排序
 
@@ -166,6 +168,10 @@ class DatabaseManager:
                 "group_id": "TEXT",
                 "member_id": "TEXT",
             },
+            self.MemoryIndex: {
+                "group_id": "TEXT",
+                "member_id": "TEXT",
+            },
         }
 
         for model, columns in migration_plan.items():
@@ -204,6 +210,19 @@ class DatabaseManager:
                 self._ensure_index_exists(
                     table_name,
                     "rawmemory_member_id_idx",
+                    "member_id",
+                    existing_columns | set(columns.keys()),
+                )
+            if model is self.MemoryIndex:
+                self._ensure_index_exists(
+                    table_name,
+                    "memoryindex_group_id_idx",
+                    "group_id",
+                    existing_columns | set(columns.keys()),
+                )
+                self._ensure_index_exists(
+                    table_name,
+                    "memoryindex_member_id_idx",
                     "member_id",
                     existing_columns | set(columns.keys()),
                 )
