@@ -21,8 +21,10 @@
 
 try:
     import chromadb
-except ImportError:
+    _CHROMADB_IMPORT_ERROR = None
+except ImportError as exc:
     chromadb = None
+    _CHROMADB_IMPORT_ERROR = exc
 
 import os
 import shutil
@@ -37,6 +39,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from astrbot.api import logger
 from ..services.intent_classifier import IntentClassifier
+from .memory_models import MemorySearchResult
 
 # 预编译正则表达式
 _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
@@ -112,6 +115,8 @@ class MemoryManager:
         self.chroma_client = None
         self.collection = None
         self._chroma_init_lock = asyncio.Lock()
+        # 保护 self.collection 替换与并发写入的临界区（rebuild_vector_collection vs add）
+        self._collection_swap_lock = Lock()
         self._chroma_initialized = False
 
         # 内存中记录最后聊天时间（带自动清理机制）
@@ -161,6 +166,10 @@ class MemoryManager:
 
     async def _ensure_chroma_initialized(self):
         """确保 ChromaDB 已初始化（延迟初始化，避免构造函数阻塞）"""
+        if chromadb is None:
+            detail = f": {_CHROMADB_IMPORT_ERROR}" if _CHROMADB_IMPORT_ERROR else ""
+            raise RuntimeError(f"chromadb import failed{detail}")
+
         # 仅日志告警：向量模型未配置时不抛错，后续检索/写入链路会优雅降级
         self._embedding_provider_id = str(self.config.get("embedding_provider", "")).strip()
         if not self._embedding_provider_id:
@@ -237,6 +246,28 @@ class MemoryManager:
             return datetime.datetime.fromtimestamp(timestamp)
         return timestamp
 
+    def _derive_scope_fields(self, items):
+        """从折叠源记录中推导群聊作用域字段。"""
+        group_id = None
+        member_id = None
+
+        for item in items or []:
+            current_group_id = getattr(item, "group_id", None)
+            current_member_id = getattr(item, "member_id", None)
+
+            if current_group_id and not group_id:
+                group_id = str(current_group_id)
+            if current_member_id and not member_id:
+                member_id = str(current_member_id)
+
+            if group_id and member_id:
+                break
+
+        return {
+            "group_id": group_id,
+            "member_id": member_id,
+        }
+
     def _is_valid_message_content(self, content: str) -> bool:
         """
         统一的消息内容过滤逻辑，用于判断消息是否应被纳入归档/检索。
@@ -280,6 +311,50 @@ class MemoryManager:
         if extra_type:
             allowed.add(extra_type)
         return allowed
+
+    def _normalize_search_mode(self, mode: str) -> str:
+        token = str(mode or "hybrid").strip().lower()
+        return token if token in {"hybrid", "semantic", "keyword", "recent"} else "hybrid"
+
+    @staticmethod
+    def _build_confidence_label(score: int | None) -> str | None:
+        if score is None:
+            return None
+        if score >= 80:
+            return "high"
+        if score >= 50:
+            return "medium"
+        return "low"
+
+    def _build_memory_search_result(
+        self,
+        *,
+        memory_id: str,
+        source_type: str,
+        created_at: str,
+        summary: str,
+        preview: str | None = None,
+        score: int | None = None,
+        rank_reason: str | None = None,
+    ) -> MemorySearchResult:
+        return MemorySearchResult(
+            memory_id=str(memory_id or "")[:8],
+            source_type=str(source_type or "unknown").strip() or "unknown",
+            created_at=str(created_at or ""),
+            summary=str(summary or ""),
+            preview=str(preview or "") or None,
+            score=score,
+            confidence=self._build_confidence_label(score),
+            rank_reason=rank_reason,
+        )
+
+    def _render_memory_search_result(self, result: MemorySearchResult) -> str:
+        relevance_badge = f"🎯 {result.score}% | " if result.score is not None and self.config.get("show_relevance_score", True) else ""
+        preview = f"\n   └ 📄 相关原文：{result.preview}" if result.preview else ""
+        return (
+            f"{relevance_badge}🆔 {result.memory_id} | ⏰ {result.created_at} | 🗂️ {result.source_type}\n"
+            f"📝 归档：{result.summary}{preview}"
+        )
 
     def _generate_query_keywords(self, query: str):
         """生成中英混合关键词：英文按词切分，中文按 2~4 gram 切分。"""
@@ -575,7 +650,13 @@ class MemoryManager:
                                 "reason": str(getattr(row, "reason", "") or "embedding_retry_failed"),
                                 "retry_count": retry_count,
                             })
-                        success_ids.append(index_id)
+                        else:
+                            # 达到重试上限，丢弃任务并记录，避免无限循环
+                            logger.error(
+                                "Engram：向量补偿任务 index_id=%s 已达最大重试次数 %d，放弃",
+                                index_id, max_retry,
+                            )
+                            success_ids.append(index_id)
                 except Exception as e:
                     retry_count = int(getattr(row, "retry_count", 0) or 0) + 1
                     if retry_count < max_retry:
@@ -588,7 +669,12 @@ class MemoryManager:
                             "reason": str(e),
                             "retry_count": retry_count,
                         })
-                    success_ids.append(index_id)
+                    else:
+                        logger.error(
+                            "Engram：向量补偿任务 index_id=%s 已达最大重试次数 %d 且持续异常：%s",
+                            index_id, max_retry, e,
+                        )
+                        success_ids.append(index_id)
 
             if success_ids:
                 await loop.run_in_executor(self.executor, self.db.delete_pending_vector_jobs, success_ids)
@@ -845,7 +931,11 @@ class MemoryManager:
         }
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(self.executor, lambda: self.collection.add(**add_params))
+            def _do_add():
+                # 与 rebuild_vector_collection 的 swap 路径互斥，避免读到正被删除的旧 collection
+                with self._collection_swap_lock:
+                    self.collection.add(**add_params)
+            await loop.run_in_executor(self.executor, _do_add)
             return True
         except Exception as e:
             if self._is_dimension_mismatch_error(e):
@@ -1010,7 +1100,11 @@ class MemoryManager:
         raw_msgs.reverse()
 
         # 计算回溯截止时间
-        max_days = self.config.get("max_history_days", 0)
+        try:
+            max_days = int(self.config.get("max_history_days", 0) or 0)
+        except (TypeError, ValueError):
+            logger.warning("Engram：max_history_days 配置非整数，已按 0 处理")
+            max_days = 0
         cutoff_date = None
         if max_days > 0:
             cutoff_date = (datetime.datetime.now() - datetime.timedelta(days=max_days)).date()
@@ -1219,6 +1313,9 @@ class MemoryManager:
         # 2. 调用 LLM 总结
         # 从配置获取提示词模板并替换占位符
         custom_prompt = self.config.get("summarize_prompt")
+        if not custom_prompt or not isinstance(custom_prompt, str):
+            logger.warning("Engram：summarize_prompt 未配置或非字符串，跳过本次总结")
+            return None
         ai_name = str(self.config.get("ai_name") or "").strip()
         prompt = custom_prompt.replace("{{chat_text}}", chat_text).replace("{{ai_name}}", ai_name)
 
@@ -1751,21 +1848,20 @@ class MemoryManager:
                 raw_map = await loop.run_in_executor(self.executor, _legacy_build_raw_map)
 
         best_score = max((x["keyword_score"] for x in rescored[:limit]), default=0.0)
-        all_memories = []
+        results = []
         for row in rescored[:limit]:
             item = row["item"]
             idx = item.index_id
             summary = item.summary
             created_at = self._ensure_datetime(item.created_at).strftime("%Y-%m-%d %H:%M:%S")
-            short_id = idx[:8]
+            source_type = str(getattr(item, "source_type", "") or "unknown").strip() or "unknown"
 
             if show_relevance_score and best_score > 0:
                 relevance_percent = max(1, min(100, int(row["keyword_score"] / best_score * 100)))
-                relevance_badge = f"🎯 {relevance_percent}% | "
             else:
-                relevance_badge = ""
+                relevance_percent = None
 
-            context_hint = ""
+            rank_reason = None
             if enable_context_hint and memory_context_window > 0 and item.prev_index_id:
                 timeline_snippets = []
                 prev_id = item.prev_index_id
@@ -1781,25 +1877,29 @@ class MemoryManager:
                     timeline_text = " ⟶ ".join(timeline_snippets)
                     if len(timeline_text) > 80:
                         timeline_text = timeline_text[:77] + "..."
-                    context_hint = f"\n   └ ⏪ 前情时间线：{timeline_text}"
+                    rank_reason = f"前情时间线：{timeline_text}"
 
-            raw_preview = ""
+            preview = None
             raw_msgs = raw_map.get(idx, [])
             filtered_raw = [
                 m.content[:50] for m in raw_msgs
                 if self._is_valid_message_content(m.content)
             ][:1]
             if filtered_raw:
-                raw_preview = f"\n   └ 📄 相关原文：{filtered_raw[0]}"
+                preview = filtered_raw[0]
 
-            all_memories.append(
-                f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n"
-                f"📝 归档：{summary}{context_hint}{raw_preview}"
-            )
+            results.append(self._build_memory_search_result(
+                memory_id=idx,
+                source_type=source_type,
+                created_at=created_at,
+                summary=summary,
+                preview=preview,
+                score=relevance_percent,
+                rank_reason=rank_reason,
+            ))
 
-        # 关键词兜底命中时同样增强 active_score
         reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
-        if all_memories and reinforce_bonus > 0:
+        if results and reinforce_bonus > 0:
             for row in rescored[:limit]:
                 try:
                     await loop.run_in_executor(
@@ -1811,11 +1911,11 @@ class MemoryManager:
                 except Exception as e:
                     logger.debug(f"Engram：fallback 增强记忆 {row['item'].index_id[:8]} 活跃度失败：{e}")
 
-        return all_memories
+        return results
 
     # ========== 记忆检索 ==========
 
-    async def retrieve_memories(
+    async def retrieve_memory_search_results(
         self,
         user_id,
         query,
@@ -1824,8 +1924,21 @@ class MemoryManager:
         end_time=None,
         source_types=None,
         force_retrieve: bool = False,
+        mode: str = "hybrid",
     ):
-        """检索相关记忆并返回原文摘要及背景（基于时间链），支持 RRF/混合策略排序和时间/类型过滤。"""
+        """检索相关记忆并返回结构化结果，支持时间、类型与模式过滤。"""
+        normalized_mode = self._normalize_search_mode(mode)
+
+        if normalized_mode == "keyword":
+            return await self._retrieve_memories_by_keyword_fallback(
+                user_id=user_id,
+                query=query,
+                limit=limit or self.config.get("max_recent_memories", 3),
+                start_time=start_time,
+                end_time=end_time,
+                source_types=source_types,
+            )
+
         # 确保 ChromaDB 已初始化
         await self._ensure_chroma_initialized()
 
@@ -1972,6 +2085,17 @@ class MemoryManager:
             weight_keyword = max(weight_keyword, 0.65)
             weight_recency = min(weight_recency, 0.05)
 
+        if normalized_mode == "semantic":
+            weight_vector = max(weight_vector, 0.75)
+            weight_keyword = min(weight_keyword, 0.15)
+            weight_recency = min(weight_recency, 0.08)
+        elif normalized_mode == "recent":
+            rank_strategy = "hybrid"
+            weight_recency = max(weight_recency, 0.75)
+            weight_vector = min(weight_vector, 0.15)
+            weight_keyword = min(weight_keyword, 0.1)
+            weight_activity = min(weight_activity, 0.05)
+
         # 仅在启用记忆衰减时保留 activity 强影响，否则降权，避免语义冲突
         if not enable_memory_decay:
             weight_activity *= 0.2
@@ -2064,7 +2188,7 @@ class MemoryManager:
             filtered_by_time = []
             for item in memory_data:
                 db_index = index_map.get(item['index_id'])
-                created_dt = db_index.created_at if db_index else None
+                created_dt = self._ensure_datetime(db_index.created_at) if db_index else None
                 if not created_dt:
                     continue
                 if start_time and created_dt < start_time:
@@ -2092,7 +2216,7 @@ class MemoryManager:
 
         for item in memory_data:
             db_index = index_map.get(item['index_id'])
-            created_dt = db_index.created_at if db_index else None
+            created_dt = self._ensure_datetime(db_index.created_at) if db_index else None
             active_score = float(db_index.active_score) if db_index else 100.0
             item['created_at_dt'] = created_dt
             item['active_score'] = active_score
@@ -2120,7 +2244,7 @@ class MemoryManager:
 
         # 3. 排序策略：RRF（可回退）或 Hybrid（四路融合）
         rrf_k = 60
-        use_keyword = enable_keyword_boost and query_keywords and len(memory_data) > 1
+        use_keyword = enable_keyword_boost and query_keywords and len(memory_data) > 1 and normalized_mode != "semantic"
 
         if rank_strategy == "rrf":
             if use_keyword:
@@ -2246,8 +2370,8 @@ class MemoryManager:
 
                     raw_map = await loop.run_in_executor(self.executor, _legacy_build_raw_map)
 
-        # 6. 构造带时间线背景和评分的记忆文本
-        all_memories = []
+        # 6. 构造结构化记忆结果
+        results = []
 
         for data in memory_data:
             index_id = data['index_id']
@@ -2255,6 +2379,12 @@ class MemoryManager:
             metadata = data['metadata']
             distance = data['distance']
             created_at = metadata.get("created_at", "未知时间")
+            db_index = db_indices.get(index_id)
+            source_type = str(
+                (metadata.get("source_type") if isinstance(metadata, dict) else "")
+                or getattr(db_index, "source_type", "")
+                or "unknown"
+            ).strip() or "unknown"
 
             if rank_strategy == "rrf" and use_keyword and memory_data:
                 quality_factor = max(0.0, 1.5 - distance) / 1.5
@@ -2264,9 +2394,7 @@ class MemoryManager:
             else:
                 relevance_percent = max(0, min(100, int(data.get('display_score', 0) * 100)))
 
-            # 尝试通过链表获取"前情提要"（可配置开关）
-            context_hint = ""
-            db_index = db_indices.get(index_id)
+            rank_reason = None
             if enable_context_hint and memory_context_window > 0 and db_index and db_index.prev_index_id:
                 timeline_snippets = []
                 prev_id = db_index.prev_index_id
@@ -2283,32 +2411,29 @@ class MemoryManager:
                     timeline_text = " ⟶ ".join(timeline_snippets)
                     if len(timeline_text) > 80:
                         timeline_text = timeline_text[:77] + "..."
-                    context_hint = f"\n   └ ⏪ 前情时间线：{timeline_text}"
+                    rank_reason = f"前情时间线：{timeline_text}"
 
-            # 获取原文预览（控制长度，避免提示词膨胀）
-            raw_preview = ""
+            preview = None
             raw_msgs = raw_map.get(index_id, [])
             filtered_raw = [
                 m.content[:50] for m in raw_msgs
                 if self._is_valid_message_content(m.content)
             ][:1]
             if filtered_raw:
-                raw_preview = f"\n   └ 📄 相关原文：{filtered_raw[0]}"
+                preview = filtered_raw[0]
 
-            # 添加 ID 信息（UUID 前 8 位）和相关性评分
-            short_id = index_id[:8]
+            results.append(self._build_memory_search_result(
+                memory_id=index_id,
+                source_type=source_type,
+                created_at=created_at,
+                summary=summary,
+                preview=preview,
+                score=relevance_percent if show_relevance_score else None,
+                rank_reason=rank_reason,
+            ))
 
-            # 根据配置决定是否显示相关性评分
-            if show_relevance_score:
-                relevance_badge = f"🎯 {relevance_percent}% | "
-            else:
-                relevance_badge = ""
-
-            all_memories.append(f"{relevance_badge}🆔 {short_id} | ⏰ {created_at}\n📝 归档：{summary}{context_hint}{raw_preview}")
-
-        # 7. Reinforce：被成功召回的记忆增强 active_score
         reinforce_bonus = self.config.get("memory_reinforce_bonus", 20)
-        if all_memories and reinforce_bonus > 0:
+        if results and reinforce_bonus > 0:
             for data in memory_data:
                 try:
                     await loop.run_in_executor(
@@ -2320,7 +2445,31 @@ class MemoryManager:
                 except Exception as e:
                     logger.debug(f"Engram：增强记忆 {data['index_id'][:8]} 活跃度失败：{e}")
 
-        return all_memories
+        return results
+
+    async def retrieve_memories(
+        self,
+        user_id,
+        query,
+        limit=None,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+        force_retrieve: bool = False,
+        mode: str = "hybrid",
+    ):
+        """检索相关记忆并返回兼容旧版注入/命令链路的文本结果。"""
+        results = await self.retrieve_memory_search_results(
+            user_id,
+            query,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            source_types=source_types,
+            force_retrieve=force_retrieve,
+            mode=mode,
+        )
+        return [self._render_memory_search_result(item) for item in results]
 
     async def get_memory_detail(self, user_id, sequence_num):
         """获取指定序号记忆的完整原文详情"""
@@ -2711,7 +2860,10 @@ class MemoryManager:
                     self.chroma_client.delete_collection(name="long_term_memories")
                 except Exception as e:
                     logger.debug(f"Engram：删除旧 Chroma 集合已跳过或失败，将继续重建：{e}")
-                self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
+                # 加锁切换 collection 引用，与并发的 _collection_add_texts 互斥，
+                # 避免写入路径持有已被销毁的旧 collection 引用导致静默丢失向量。
+                with self._collection_swap_lock:
+                    self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
 
             await loop.run_in_executor(self.executor, _backup_and_reset_collection)
 

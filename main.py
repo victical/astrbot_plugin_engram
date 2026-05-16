@@ -301,6 +301,7 @@ class EngramPlugin(Star):
         limit: int,
         time_expr: str,
         source_types,
+        mode: str = "hybrid",
         default_types=None,
         title: str = "🧠 工具检索结果",
         extra_hint: str = ""
@@ -331,6 +332,7 @@ class EngramPlugin(Star):
             limit=limit,
             time_expr=time_expr,
             source_types=source_types,
+            mode=mode,
             default_types=default_types,
             title=title,
             extra_hint=extra_hint,
@@ -395,7 +397,12 @@ class EngramPlugin(Star):
 
         combined_memory_block = f"{memory_block}{tool_hint_block}"
         if profile_block or combined_memory_block:
-            self._llm_injector.inject_context(req, profile_block, combined_memory_block)
+            self._llm_injector.inject_context(
+                req,
+                profile_block,
+                combined_memory_block,
+                target=self.config.get("llm_injection_target", "system"),
+            )
             
             # 调试模式：输出注入的内容
             if self.config.get("debug_injection", False):
@@ -527,7 +534,12 @@ class EngramPlugin(Star):
 
         combined_memory_block = f"{memory_block}{tool_hint_block}"
         if profile_block or combined_memory_block:
-            self._llm_injector.inject_context(req, profile_block, combined_memory_block)
+            self._llm_injector.inject_context(
+                req,
+                profile_block,
+                combined_memory_block,
+                target=self.config.get("llm_injection_target", "system"),
+            )
 
             if self.config.get("debug_injection", False):
                 logger.info(f"=== Engram 群聊调试模式 [群: {group_id}] ===")
@@ -621,15 +633,17 @@ class EngramPlugin(Star):
         query: str,
         limit: int = 3,
         time_expr: str = "",
-        source_types: list = None
+        source_types: list = None,
+        mode: str = "hybrid"
     ) -> str:
-        '''检索长期记忆（通用），仅返回给 LLM，不直接发送给用户。
+        '''检索长期记忆（通用），仅返回给 LLM，不直接发送给用户；结果包含 memory_id，可继续用于 mem_get_detail_tool。
 
         Args:
             query(string): 检索关键词或问题
             limit(number): 返回条数上限
             time_expr(string): 时间范围表达式
             source_types(array[string]): source_type 过滤
+            mode(string): 检索模式，可选 hybrid/semantic/keyword/recent
         '''
         output = await self._build_memory_search_output(
             event=event,
@@ -637,6 +651,7 @@ class EngramPlugin(Star):
             limit=limit,
             time_expr=time_expr,
             source_types=source_types,
+            mode=mode,
             default_types=None,
             title="🧠 工具检索结果"
         )
@@ -649,22 +664,17 @@ class EngramPlugin(Star):
         query: str,
         limit: int = 3,
         time_expr: str = "",
-        source_types: list = None
+        source_types: list = None,
+        mode: str = "hybrid"
     ) -> str:
-        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。
-
-        Args:
-            query(string): 检索关键词或问题
-            limit(number): 返回条数上限
-            time_expr(string): 时间范围表达式
-            source_types(array[string]): source_type 过滤
-        '''
+        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
         output = await self._build_memory_search_output(
             event=event,
             query=query,
             limit=limit,
             time_expr=time_expr,
             source_types=source_types,
+            mode=mode,
             default_types=None,
             title="🧠 工具检索结果"
         )
@@ -677,49 +687,67 @@ class EngramPlugin(Star):
         query: str,
         limit: int = 3,
         time_expr: str = "",
-        source_types: list = None
+        source_types: list = None,
+        mode: str = "hybrid"
     ) -> str:
-        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。
-
-        Args:
-            query(string): 检索关键词或问题
-            limit(number): 返回条数上限
-            time_expr(string): 时间范围表达式
-            source_types(array[string]): source_type 过滤
-        '''
+        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
         output = await self._build_memory_search_output(
             event=event,
             query=query,
             limit=limit,
             time_expr=time_expr,
             source_types=source_types,
+            mode=mode,
             default_types=None,
             title="🧠 工具检索结果"
         )
         return output
 
     @filter.llm_tool(name="mem_get_detail_tool")
-    async def mem_get_detail_tool(self, event: AstrMessageEvent, memory_id: str, max_messages: int = 20) -> str:
+    async def mem_get_detail_tool(
+        self,
+        event: AstrMessageEvent,
+        memory_id: str = "",
+        memory_ids: list = None,
+        max_messages: int = 20,
+    ) -> str:
         '''按记忆 ID 获取更完整的原始对话。
 
         Args:
-            memory_id(string): 记忆 ID，支持 8 位短 ID 或完整 ID
+            memory_id(string): 单个记忆 ID，支持 8 位短 ID 或完整 ID
+            memory_ids(array[string]): 多个记忆 ID，按顺序返回详情
             max_messages(number): 返回原始对话条数上限
         '''
         if not self.config.get("enable_memory_search_tool", True):
             return "记忆检索工具已关闭。"
-
-        # 群聊工具检索将自动路由到群聊记忆库
-
-        memory_id = str(memory_id or "").strip()
-        if len(memory_id) < 8:
-            return "memory_id 至少需要 8 位，请先通过 mem_search_tool 获取 🆔。"
 
         try:
             max_messages = int(max_messages)
         except (TypeError, ValueError):
             max_messages = 20
         max_messages = max(1, min(100, max_messages))
+
+        requested_ids = []
+        if isinstance(memory_ids, (list, tuple)):
+            requested_ids.extend(str(item or "").strip() for item in memory_ids)
+        if memory_id:
+            requested_ids.append(str(memory_id or "").strip())
+
+        normalized_ids = []
+        for item in requested_ids:
+            if item and item not in normalized_ids:
+                normalized_ids.append(item)
+
+        if not normalized_ids:
+            return "memory_id 或 memory_ids 至少提供一个有效 ID。"
+
+        invalid_ids = [item for item in normalized_ids if len(item) < 8]
+        if invalid_ids:
+            return "memory_id 至少需要 8 位，请先通过 mem_search_tool 获取 🆔。"
+
+        max_detail_ids = 5
+        truncated = len(normalized_ids) > max_detail_ids
+        normalized_ids = normalized_ids[:max_detail_ids]
 
         if event.get_group_id() and self.config.get("enable_group_memory", False):
             group_manager = await self._ensure_group_memory_manager()
@@ -729,48 +757,57 @@ class EngramPlugin(Star):
             user_id = event.get_sender_id()
             logic = self.logic
 
+        detail_blocks = []
         try:
-            memory_index, raw_msgs = await logic.get_memory_detail_by_id(user_id, memory_id)
-            if (not memory_index) and event.get_group_id() and self.config.get("group_memory_allow_private_recall", False):
-                memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(event.get_sender_id(), memory_id)
+            for current_id in normalized_ids:
+                memory_index, raw_msgs = await logic.get_memory_detail_by_id(user_id, current_id)
+                if (not memory_index) and event.get_group_id() and self.config.get("group_memory_allow_private_recall", False):
+                    memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(event.get_sender_id(), current_id)
+
+                if not memory_index:
+                    detail_blocks.append(str(raw_msgs or f"找不到 ID 为 {current_id} 的记忆。"))
+                    continue
+
+                created_at = self.logic._ensure_datetime(memory_index.created_at)
+                detail_lines = [
+                    f"📖 记忆详情（ID {memory_index.index_id[:8]}）",
+                    f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
+                    f"📝 归档：{memory_index.summary}",
+                    "————————————————",
+                    "🎙️ 原始对话回溯："
+                ]
+
+                if not raw_msgs:
+                    detail_lines.append("(暂无关联的原始对话数据)")
+                    detail_blocks.append("\n".join(detail_lines))
+                    continue
+
+                shown = 0
+                for m in raw_msgs:
+                    if not self.logic._is_valid_message_content(m.content):
+                        continue
+
+                    ts = self.logic._ensure_datetime(m.timestamp)
+                    time_str = ts.strftime("%H:%M:%S")
+                    role_name = "我" if m.role == "assistant" else (m.user_name or "你")
+                    detail_lines.append(f"[{time_str}] {role_name}: {m.content}")
+                    shown += 1
+
+                    if shown >= max_messages:
+                        break
+
+                if shown == 0:
+                    detail_lines.append("(原始对话均为空或被过滤)")
+
+                detail_blocks.append("\n".join(detail_lines))
         except Exception as e:
             logger.error(f"Engram mem_get_detail_tool 异常：{e}")
             return "工具检索失败，请稍后重试。"
 
-        if not memory_index:
-            return str(raw_msgs or f"找不到 ID 为 {memory_id} 的记忆。")
+        if truncated:
+            detail_blocks.append(f"(已截断，仅返回前 {max_detail_ids} 个 memory_id 的详情)")
 
-        created_at = self.logic._ensure_datetime(memory_index.created_at)
-        detail_lines = [
-            f"📖 记忆详情（ID {memory_index.index_id[:8]}）",
-            f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
-            f"📝 归档：{memory_index.summary}",
-            "————————————————",
-            "🎙️ 原始对话回溯："
-        ]
-
-        if not raw_msgs:
-            detail_lines.append("(暂无关联的原始对话数据)")
-            return "\n".join(detail_lines)
-
-        shown = 0
-        for m in raw_msgs:
-            if not self.logic._is_valid_message_content(m.content):
-                continue
-
-            ts = self.logic._ensure_datetime(m.timestamp)
-            time_str = ts.strftime("%H:%M:%S")
-            role_name = "我" if m.role == "assistant" else (m.user_name or "你")
-            detail_lines.append(f"[{time_str}] {role_name}: {m.content}")
-            shown += 1
-
-            if shown >= max_messages:
-                break
-
-        if shown == 0:
-            detail_lines.append("(原始对话均为空或被过滤)")
-
-        return "\n".join(detail_lines)
+        return "\n\n".join(detail_blocks)
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
@@ -1206,19 +1243,19 @@ class EngramPlugin(Star):
             for task in self._scheduler._tasks:
                 if not task.done():
                     task.cancel()
-            
-            # 等待任务清理完成（最多0.5秒）
+
+            # 等待任务清理完成（最多5秒，让正在执行的 LLM/DB 调用尽量优雅结束）
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*self._scheduler._tasks, return_exceptions=True),
-                    timeout=0.5
+                    timeout=5.0
                 )
                 logger.debug("Engram：所有调度任务已优雅停止")
             except asyncio.TimeoutError:
                 logger.debug("Engram：部分调度任务未在限定时间内完成")
             except Exception as e:
                 logger.debug(f"Engram：等待调度任务结束时发生异常：{e}")
-        
+
         if getattr(self, "_group_scheduler", None):
             self._group_scheduler._is_shutdown = True
             for task in self._group_scheduler._tasks:
@@ -1228,7 +1265,7 @@ class EngramPlugin(Star):
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*self._group_scheduler._tasks, return_exceptions=True),
-                    timeout=0.5
+                    timeout=5.0
                 )
                 logger.debug("Engram：群聊调度任务已优雅停止")
             except asyncio.TimeoutError:
@@ -1247,5 +1284,12 @@ class EngramPlugin(Star):
         self.logic._memory_manager.shutdown()
         if getattr(self, "_group_memory_manager", None):
             self._group_memory_manager.shutdown()
-        self.logic.executor.shutdown(wait=False)
+        # 等待 worker 线程完成正在执行的 SQL 写入，避免半提交事务
+        try:
+            self.logic.executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            # Python < 3.9 不支持 cancel_futures 参数
+            self.logic.executor.shutdown(wait=True)
+        except Exception as e:
+            logger.error(f"Engram：关闭线程池异常：{e}")
         await self.profile_renderer.close()

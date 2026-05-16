@@ -6,6 +6,7 @@
 
 import os
 import json
+import copy
 import asyncio
 import datetime
 from datetime import date
@@ -327,7 +328,9 @@ class ProfileManager:
         return await loop.run_in_executor(self.executor, _rollback)
 
     def _merge_profile_meta(self, old_meta: Dict[str, Any], accepted_updates: List[str], evidence_ref: str) -> Dict[str, Any]:
-        meta = old_meta if isinstance(old_meta, dict) else {}
+        # 深拷贝避免污染调用方的 current_persona["_meta"]，防止后续 _snapshot_profile
+        # 保存到回滚历史的"旧状态"被本次更新静默篡改（rollback 语义破坏）。
+        meta = copy.deepcopy(old_meta) if isinstance(old_meta, dict) else {}
         fields = meta.get("fields", {})
         if not isinstance(fields, dict):
             fields = {}
@@ -498,12 +501,19 @@ class ProfileManager:
                 return
 
             resp = await provider.text_chat(prompt=prompt)
-            content = resp.completion_text
+            content = (resp.completion_text if resp and resp.completion_text else "").strip()
+            if not content:
+                logger.warning(f"Engram：user_id={user_id} 画像更新 LLM 返回空响应，跳过本次更新")
+                return
 
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "{" in content:
                 content = content[content.find("{"):content.rfind("}") + 1]
+
+            if not content:
+                logger.warning(f"Engram：user_id={user_id} 画像更新 LLM 响应解析后为空，跳过本次更新")
+                return
 
             proposal = json.loads(content)
 

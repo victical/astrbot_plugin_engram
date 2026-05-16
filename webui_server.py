@@ -21,6 +21,13 @@ from fastapi.staticfiles import StaticFiles
 from astrbot.api import logger
 
 
+def _safe_int(value, default):
+    """安全将任意值转为整数，失败时返回 default。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 class EngramWebServer:
     """Engram WebUI 服务端"""
@@ -548,8 +555,14 @@ class EngramWebServer:
             query = request.query_params
             user_id = query.get("user_id")
             source_type = query.get("source_type")
-            page = max(1, int(query.get("page", 1)))
-            page_size = max(1, int(query.get("page_size", 20)))
+            try:
+                page = max(1, int(query.get("page", 1)))
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = max(1, int(query.get("page_size", 20)))
+            except (TypeError, ValueError):
+                page_size = 20
             page_size = min(page_size, 200)
             offset = (page - 1) * page_size
 
@@ -676,7 +689,7 @@ class EngramWebServer:
                     detail="需要提供 query 与 user_id",
                 )
 
-            limit = min(200, max(1, int(payload.get("limit", 50))))
+            limit = min(200, max(1, _safe_int(payload.get("limit", 50), 50)))
             source_types = payload.get("source_types")
             start_time_raw = payload.get("start_time")
             end_time_raw = payload.get("end_time")
@@ -800,8 +813,14 @@ class EngramWebServer:
             del token
             group_id = str(request.query_params.get("group_id", "") or "").strip()
             member_id = str(request.query_params.get("member_id", "") or "").strip()
-            page = max(1, int(request.query_params.get("page", 1)))
-            page_size = min(200, max(1, int(request.query_params.get("page_size", 20))))
+            try:
+                page = max(1, int(request.query_params.get("page", 1)))
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = min(200, max(1, int(request.query_params.get("page_size", 20))))
+            except (TypeError, ValueError):
+                page_size = 20
             offset = (page - 1) * page_size
 
             try:
@@ -872,7 +891,7 @@ class EngramWebServer:
                     detail="需要提供 query",
                 )
 
-            limit = min(200, max(1, int(payload.get("limit", 50))))
+            limit = min(200, max(1, _safe_int(payload.get("limit", 50), 50)))
 
             try:
                 group_db = await self._get_group_db()
@@ -1074,7 +1093,7 @@ class EngramWebServer:
         @self._app.get("/api/stats")
         async def get_stats(request: Request, token: str = Depends(self._auth_dependency())):
             del token
-            usry_params.get("user_id")
+            user_id = (request.query_params.get("user_id") or "").strip() or None
             try:
                 stats = await self._collect_stats(self.db, user_id=user_id)
                 return {"success": True, "data": stats}
@@ -1115,7 +1134,10 @@ class EngramWebServer:
         async def get_activities(request: Request, token: str = Depends(self._auth_dependency())):
             del token
             try:
-                limit = request.query_params.get("limit", 8)
+                try:
+                    limit = max(1, min(100, int(request.query_params.get("limit", 8))))
+                except (TypeError, ValueError):
+                    limit = 8
                 manager = getattr(self.logic, "_memory_manager", None)
                 if manager and hasattr(manager, "get_recent_activities"):
                     data = manager.get_recent_activities(limit=limit)
@@ -1149,9 +1171,15 @@ class EngramWebServer:
                 # 获取记忆总数用于显示羁绊等级（可选）
                 memory_count = 0
                 try:
-                    stats = await self._run_in_executor(self.db.get_message_stats, user_id)
-                    memory_count = stats.get("total_messages", 0) if stats else 0
-                except: pass
+                    memory_stats = await self._collect_stats(self.db, user_id=user_id)
+                    memory_count = int(memory_stats.get("memory_index_count", 0) or 0)
+                except Exception:
+                    try:
+                        stats = await self._run_in_executor(self.db.get_message_stats, user_id)
+                        memory_count = int(stats.get("total", 0) or 0) if stats else 0
+                    except Exception:
+                        logger.debug("Engram WebUI 获取画像图片记忆计数失败，已回退为 0")
+                        memory_count = 0
 
                 # 直接调用 async 的 render 方法，不要用 _run_in_executor
                 image_bytes = await renderer.render(user_id, profile, memory_count=memory_count)
@@ -1217,7 +1245,7 @@ class EngramWebServer:
         ):
             del token
             full_rebuild = bool(payload.get("full_rebuild", False))
-            batch_size = int(payload.get("batch_size", 200))
+            batch_size = _safe_int(payload.get("batch_size", 200), 200)
             batch_size = max(50, min(batch_size, 500))
 
             try:

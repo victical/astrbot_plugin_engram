@@ -104,7 +104,13 @@ class MemoryFacade:
         """关闭记忆系统"""
         self._is_shutdown = True
         self._memory_manager.shutdown()
-        self.executor.shutdown(wait=False)
+        try:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        except TypeError:
+            # Python < 3.9 不支持 cancel_futures 参数
+            self.executor.shutdown(wait=True)
+        except Exception:
+            self.executor.shutdown(wait=False)
     
     # ========== 记忆管理方法（委托给 MemoryManager） ==========
     
@@ -132,6 +138,29 @@ class MemoryFacade:
         """对私聊进行总结并存入长期记忆"""
         return await self._memory_manager._summarize_private_chat(user_id)
     
+    async def retrieve_memory_search_results(
+        self,
+        user_id,
+        query,
+        limit=None,
+        start_time=None,
+        end_time=None,
+        source_types=None,
+        force_retrieve: bool = False,
+        mode: str = "hybrid",
+    ):
+        """检索结构化记忆结果。"""
+        return await self._memory_manager.retrieve_memory_search_results(
+            user_id,
+            query,
+            limit,
+            start_time=start_time,
+            end_time=end_time,
+            source_types=source_types,
+            force_retrieve=force_retrieve,
+            mode=mode,
+        )
+
     async def retrieve_memories(
         self,
         user_id,
@@ -141,6 +170,7 @@ class MemoryFacade:
         end_time=None,
         source_types=None,
         force_retrieve: bool = False,
+        mode: str = "hybrid",
     ):
         """检索相关记忆（支持时间、来源类型过滤，以及显式强制检索）。"""
         return await self._memory_manager.retrieve_memories(
@@ -151,6 +181,7 @@ class MemoryFacade:
             end_time=end_time,
             source_types=source_types,
             force_retrieve=force_retrieve,
+            mode=mode,
         )
     
     async def get_memory_detail(self, user_id, sequence_num):

@@ -143,7 +143,10 @@ class OneBotSyncHandler:
         # 补充职业
         career_id = stranger_info.get("makeFriendCareer")
         if career_id and career_id != "0" and self.utils:
-            basic_info["job"] = self.utils.get_career(int(career_id))
+            try:
+                basic_info["job"] = self.utils.get_career(int(career_id))
+            except (TypeError, ValueError):
+                logger.debug(f"OneBot 同步：makeFriendCareer 字段非整数 {career_id!r}，已跳过")
 
         # 某些 OneBot 扩展实现可能会提供 location
         if "location" in stranger_info:
@@ -169,9 +172,15 @@ class OneBotSyncHandler:
         b_day = stranger_info.get("birthday_day")
 
         if b_year and b_month and b_day:
-            basic_info["birthday"] = f"{b_year}-{b_month}-{b_day}"
-            basic_info["constellation"] = self.utils.get_constellation(int(b_month), int(b_day))
-            basic_info["zodiac"] = self.utils.get_zodiac(int(b_year), int(b_month), int(b_day))
+            try:
+                y, m, d = int(b_year), int(b_month), int(b_day)
+                basic_info["birthday"] = f"{y}-{m}-{d}"
+                basic_info["constellation"] = self.utils.get_constellation(m, d)
+                basic_info["zodiac"] = self.utils.get_zodiac(y, m, d)
+            except (TypeError, ValueError):
+                logger.debug(
+                    f"OneBot 同步：birthday_* 字段非整数 (year={b_year!r}, month={b_month!r}, day={b_day!r})，已跳过"
+                )
         elif "birthday" in stranger_info and str(stranger_info["birthday"]).isdigit():
             b_str = str(stranger_info["birthday"])
             if len(b_str) == 8:
