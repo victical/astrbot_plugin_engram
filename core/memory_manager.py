@@ -132,6 +132,8 @@ class MemoryManager:
         self._is_shutdown = False
         self._embedding_provider_id = str(self.config.get("embedding_provider", "")).strip()
         self._embedding_unavailable_logged = False
+        self._embedding_unavailable_last_log_ts = 0.0
+        self._embedding_unavailable_log_interval = 2.0
 
         # 向量写入失败补偿队列（热缓存，真相源为 DB）
         self._pending_vector_jobs = []
@@ -535,6 +537,11 @@ class MemoryManager:
 
     def _warn_embedding_unavailable(self, message: str):
         """向量模型不可用时仅记录日志，不抛异常。"""
+        now = time.monotonic()
+        if now - self._embedding_unavailable_last_log_ts < self._embedding_unavailable_log_interval:
+            return
+
+        self._embedding_unavailable_last_log_ts = now
         if not self._embedding_unavailable_logged:
             logger.warning(f"Engram：{message}")
             self._embedding_unavailable_logged = True
