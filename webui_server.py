@@ -10,6 +10,7 @@ import inspect
 import json
 import secrets
 import time
+import contextlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,7 +50,7 @@ _patch_starlette_router_for_compat()
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from astrbot.api import logger
@@ -61,6 +62,15 @@ def _safe_int(value, default):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _clamp_int(value, default, min_value=None, max_value=None):
+    result = _safe_int(value, default)
+    if min_value is not None:
+        result = max(min_value, result)
+    if max_value is not None:
+        result = min(max_value, result)
+    return result
 
 
 class EngramWebServer:
@@ -92,17 +102,78 @@ class EngramWebServer:
             logger.warning("Engram WebUI 已启用登录鉴权，但未配置 webui_access_password")
 
         self._tokens: dict[str, dict[str, float]] = {}
-        self._token_lock = asyncio.Lock()
+        self._token_lock: asyncio.Lock | None = None
+        self._token_lock_loop = None
 
         self._failed_attempts: dict[str, list[float]] = {}
-        self._attempt_lock = asyncio.Lock()
+        self._attempt_lock: asyncio.Lock | None = None
+        self._attempt_lock_loop = None
 
         self._server: uvicorn.Server | None = None
         self._server_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._task_errors: dict[str, str] = {}
 
         self._app = FastAPI(title="Engram WebUI", version="1.0.0")
         self._setup_routes()
+
+    def _build_cors_origins(self) -> list[str]:
+        cors_origin = str(self.config.get("webui_cors_origin", "") or "").strip()
+        if cors_origin:
+            if "," in cors_origin:
+                return [item.strip() for item in cors_origin.split(",") if item.strip()]
+            return [cors_origin]
+
+        origins = [
+            f"http://localhost:{self.port}",
+            f"http://127.0.0.1:{self.port}",
+        ]
+        host = str(self.host or "").strip()
+        if host and host not in {"0.0.0.0", "::", "localhost", "127.0.0.1"}:
+            origins.append(f"http://{host}:{self.port}")
+        return list(dict.fromkeys(origins))
+
+    def _error_response(self, exc: Exception | None = None, *, message: str = "内部错误") -> dict[str, Any]:
+        error_id = secrets.token_hex(4)
+        if exc is not None:
+            logger.debug("Engram WebUI 内部错误 error_id=%s: %s", error_id, exc, exc_info=True)
+        return {"success": False, "error": message, "error_id": error_id}
+
+    def _max_body_bytes(self) -> int:
+        return _clamp_int(self.config.get("webui_max_body_bytes", 64 * 1024), 64 * 1024, 1)
+
+    def _get_token_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._token_lock is None or self._token_lock_loop is not loop:
+            self._token_lock = asyncio.Lock()
+            self._token_lock_loop = loop
+        return self._token_lock
+
+    def _get_attempt_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._attempt_lock is None or self._attempt_lock_loop is not loop:
+            self._attempt_lock = asyncio.Lock()
+            self._attempt_lock_loop = loop
+        return self._attempt_lock
+
+    def _handle_task_done(self, task_name: str, task: asyncio.Task) -> None:
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+
+        self._task_errors[task_name] = str(exc)
+        logger.error("Engram WebUI 后台任务[%s]异常退出: %s", task_name, exc, exc_info=exc)
+
+    def _create_task(self, task_name: str, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda done_task, name=task_name: self._handle_task_done(name, done_task))
+        return task
+
+    def _stop_timeout(self) -> int:
+        return _clamp_int(self.config.get("webui_stop_timeout_seconds", 3), 3, 1, 30)
 
     async def start(self):
         """启动 WebUI 服务"""
@@ -119,9 +190,9 @@ class EngramWebServer:
             lifespan="on",
         )
         self._server = uvicorn.Server(config)
-        self._server_task = asyncio.create_task(self._server.serve())
+        self._server_task = self._create_task("webui_server", self._server.serve())
 
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        self._cleanup_task = self._create_task("webui_cleanup", self._periodic_cleanup())
 
         for _ in range(50):
             if getattr(self._server, "started", False):
@@ -138,15 +209,19 @@ class EngramWebServer:
         """停止 WebUI 服务"""
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait_for(self._cleanup_task, timeout=self._stop_timeout())
 
         if self._server:
             self._server.should_exit = True
         if self._server_task:
-            await self._server_task
+            try:
+                await asyncio.wait_for(self._server_task, timeout=self._stop_timeout())
+            except asyncio.TimeoutError:
+                logger.warning("Engram WebUI 停止超时，正在取消服务任务")
+                self._server_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(self._server_task, timeout=1)
 
         self._server = None
         self._server_task = None
@@ -158,9 +233,9 @@ class EngramWebServer:
         while True:
             try:
                 await asyncio.sleep(300)
-                async with self._token_lock:
+                async with self._get_token_lock():
                     await self._cleanup_tokens_locked()
-                async with self._attempt_lock:
+                async with self._get_attempt_lock():
                     await self._cleanup_failed_attempts_locked()
             except asyncio.CancelledError:
                 break
@@ -197,14 +272,14 @@ class EngramWebServer:
             self._failed_attempts.pop(ip, None)
 
     async def _check_rate_limit(self, client_ip: str) -> bool:
-        async with self._attempt_lock:
+        async with self._get_attempt_lock():
             await self._cleanup_failed_attempts_locked()
             attempts = self._failed_attempts.get(client_ip, [])
             recent = [t for t in attempts if time.time() - t < self.login_window_seconds]
             return len(recent) < self.login_max_attempts
 
     async def _record_failed_attempt(self, client_ip: str):
-        async with self._attempt_lock:
+        async with self._get_attempt_lock():
             self._failed_attempts.setdefault(client_ip, []).append(time.time())
 
     def _auth_dependency(self):
@@ -224,7 +299,7 @@ class EngramWebServer:
                 detail="未提供认证 Token",
             )
 
-        async with self._token_lock:
+        async with self._get_token_lock():
             info = self._tokens.get(token)
             if not info:
                 raise HTTPException(
@@ -444,6 +519,14 @@ class EngramWebServer:
                 return True
         return False
 
+    @staticmethod
+    def _memory_index_member_filter(MemoryIndex, member_id: str):
+        return MemoryIndex.member_id == str(member_id or "").strip()
+
+    @staticmethod
+    def _memory_index_legacy_member_filter(MemoryIndex):
+        return MemoryIndex.member_id.is_null(True) | (MemoryIndex.member_id == "")
+
     def _model_has_table_column(self, db, model, column_name: str) -> bool:
         backend = getattr(db, "_backend", db)
         getter = getattr(backend, "_get_table_columns", None)
@@ -461,14 +544,23 @@ class EngramWebServer:
         if not index_path.exists():
             logger.warning("Engram WebUI 未找到前端文件: %s", index_path)
 
-        cors_origin = str(self.config.get("webui_cors_origin", "")).strip()
-        allow_origins = [
-            f"http://{self.host}:{self.port}",
-            "http://localhost",
-            "http://127.0.0.1",
-        ]
-        if cors_origin:
-            allow_origins = [cors_origin]
+        @self._app.middleware("http")
+        async def limit_body_size(request: Request, call_next):
+            if request.method in {"POST", "PUT", "PATCH"}:
+                content_length = request.headers.get("content-length")
+                max_body = self._max_body_bytes()
+                if content_length:
+                    try:
+                        if int(content_length) > max_body:
+                            return JSONResponse(
+                                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                content={"detail": "请求体过大"},
+                            )
+                    except (TypeError, ValueError):
+                        pass
+            return await call_next(request)
+
+        allow_origins = self._build_cors_origins()
 
         self._app.add_middleware(
             CORSMiddleware,
@@ -519,7 +611,7 @@ class EngramWebServer:
             now = time.time()
             max_lifetime = 86400
 
-            async with self._token_lock:
+            async with self._get_token_lock():
                 await self._cleanup_tokens_locked()
                 self._tokens[token] = {
                     "created_at": now,
@@ -535,7 +627,7 @@ class EngramWebServer:
         @self._app.post("/api/logout")
         async def logout(token: str = Depends(self._auth_dependency())):
             if not self._auth_disabled:
-                async with self._token_lock:
+                async with self._get_token_lock():
                     self._tokens.pop(token, None)
             return {"detail": "已退出登录"}
 
@@ -550,7 +642,7 @@ class EngramWebServer:
                 }
             except Exception as exc:
                 logger.error("Engram WebUI 获取用户列表失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/groups")
         async def list_groups(token: str = Depends(self._auth_dependency())):
@@ -578,7 +670,7 @@ class EngramWebServer:
                 }
             except Exception as exc:
                 logger.error("Engram WebUI 获取群组列表失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/memories")
         async def list_memories(
@@ -644,7 +736,7 @@ class EngramWebServer:
                 }
             except Exception as exc:
                 logger.error("Engram WebUI 获取记忆列表失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/memories/{memory_id}")
         async def get_memory_detail(
@@ -708,7 +800,7 @@ class EngramWebServer:
                 raise
             except Exception as exc:
                 logger.error("Engram WebUI 获取记忆详情失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.post("/api/memories/search")
         async def search_memories(
@@ -778,7 +870,7 @@ class EngramWebServer:
                 return {"success": True, "data": {"items": items}}
             except Exception as exc:
                 logger.error("Engram WebUI 搜索记忆失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.delete("/api/memories/{memory_id}")
         async def delete_memory(
@@ -817,7 +909,7 @@ class EngramWebServer:
                 raise
             except Exception as exc:
                 logger.error("Engram WebUI 删除记忆失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.post("/api/memories/undo")
         async def undo_memory(
@@ -837,7 +929,7 @@ class EngramWebServer:
                 return {"success": True, "data": {"summary": summary}}
             except Exception as exc:
                 logger.error("Engram WebUI 撤销删除失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/group-memories")
         async def list_group_memories(
@@ -880,8 +972,21 @@ class EngramWebServer:
                             items = list(query.limit(page_size).offset(offset))
                             return total, [self._serialize_group_memory_item(item, fallback_group_id=group_id or getattr(item, "user_id", "")) for item in items]
 
-                        matched_items = []
-                        for item in query:
+                        if self._model_has_table_column(group_db, MemoryIndex, "member_id"):
+                            exact_query = query.where(self._memory_index_member_filter(MemoryIndex, member_id))
+                            legacy_query = query.where(self._memory_index_legacy_member_filter(MemoryIndex))
+                            matched_items = [
+                                self._serialize_group_memory_item(
+                                    item,
+                                    fallback_group_id=group_id or getattr(item, "user_id", ""),
+                                )
+                                for item in exact_query
+                            ]
+                        else:
+                            legacy_query = query
+                            matched_items = []
+
+                        for item in legacy_query:
                             raw_msgs = self._load_group_memory_raw_messages(group_db, item)
                             if self._group_memory_matches_member(member_id, raw_msgs):
                                 matched_items.append(
@@ -891,6 +996,7 @@ class EngramWebServer:
                                         fallback_group_id=group_id or getattr(item, "user_id", ""),
                                     )
                                 )
+                        matched_items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
                         total = len(matched_items)
                         return total, matched_items[offset: offset + page_size]
 
@@ -909,7 +1015,7 @@ class EngramWebServer:
                 raise
             except Exception as exc:
                 logger.error("Engram WebUI 获取群聊记忆列表失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.post("/api/group-memories/search")
         async def search_group_memories(
@@ -948,22 +1054,43 @@ class EngramWebServer:
                             )
                         else:
                             rows = rows.where(MemoryIndex.summary.contains(query))
-                        rows = rows.order_by(MemoryIndex.created_at.desc()).limit(limit)
+                        has_member_column = self._model_has_table_column(group_db, MemoryIndex, "member_id")
+                        if member_id and has_member_column:
+                            exact_rows = rows.where(self._memory_index_member_filter(MemoryIndex, member_id))
+                            legacy_rows = rows.where(self._memory_index_legacy_member_filter(MemoryIndex))
+                        else:
+                            exact_rows = rows
+                            legacy_rows = None
+
+                        exact_rows = exact_rows.order_by(MemoryIndex.created_at.desc()).limit(limit)
                         items = []
-                        for item in rows:
-                            raw_msgs = None
-                            if member_id:
-                                raw_msgs = self._load_group_memory_raw_messages(group_db, item)
-                                if not self._group_memory_matches_member(member_id, raw_msgs):
-                                    continue
+                        for item in exact_rows:
                             items.append(
                                 self._serialize_group_memory_item(
                                     item,
-                                    raw_msgs=raw_msgs,
+                                    raw_msgs=None,
                                     fallback_group_id=group_id or getattr(item, "user_id", ""),
                                 )
                             )
-                        return items
+
+                        if member_id and legacy_rows is not None and len(items) < limit:
+                            legacy_rows = legacy_rows.order_by(MemoryIndex.created_at.desc()).limit(limit)
+                            for item in legacy_rows:
+                                raw_msgs = self._load_group_memory_raw_messages(group_db, item)
+                                if not self._group_memory_matches_member(member_id, raw_msgs):
+                                    continue
+                                items.append(
+                                    self._serialize_group_memory_item(
+                                        item,
+                                        raw_msgs=raw_msgs,
+                                        fallback_group_id=group_id or getattr(item, "user_id", ""),
+                                    )
+                                )
+                                if len(items) >= limit:
+                                    break
+
+                        items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+                        return items[:limit]
 
                 items = await self._run_in_executor(_search)
                 return {
@@ -978,7 +1105,7 @@ class EngramWebServer:
                 raise
             except Exception as exc:
                 logger.error("Engram WebUI 搜索群聊记忆失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/group-memories/{memory_id}")
         async def get_group_memory_detail(
@@ -1063,7 +1190,7 @@ class EngramWebServer:
                 raise
             except Exception as exc:
                 logger.error("Engram WebUI 获取群聊记忆详情失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.delete("/api/group-memories/{memory_id}")
         async def delete_group_memory(
@@ -1122,7 +1249,7 @@ class EngramWebServer:
                 raise
             except Exception as exc:
                 logger.error("Engram WebUI 删除群聊记忆失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/stats")
         async def get_stats(request: Request, token: str = Depends(self._auth_dependency())):
@@ -1133,7 +1260,7 @@ class EngramWebServer:
                 return {"success": True, "data": stats}
             except Exception as exc:
                 logger.error("Engram WebUI 获取统计信息失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/stats/overview")
         async def get_stats_overview(token: str = Depends(self._auth_dependency())):
@@ -1158,7 +1285,7 @@ class EngramWebServer:
                 }
             except Exception as exc:
                 logger.error("Engram WebUI 获取统计概览失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/stat")
         async def get_stats_alias(request: Request, token: str = Depends(self._auth_dependency())):
@@ -1180,7 +1307,7 @@ class EngramWebServer:
                 return {"success": True, "data": data}
             except Exception as exc:
                 logger.error("Engram WebUI 获取近期动态失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/profile/{user_id}")
         async def get_profile(user_id: str, token: str = Depends(self._auth_dependency())):
@@ -1190,11 +1317,12 @@ class EngramWebServer:
                 return {"success": True, "data": profile}
             except Exception as exc:
                 logger.error("Engram WebUI 获取画像失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.get("/api/profile/{user_id}/render")
         async def render_profile_image(user_id: str, token: str = Depends(self._auth_dependency())):
             del token
+            renderer = None
             try:
                 # 调用 ProfileRenderer 渲染图片
                 from fastapi.responses import Response
@@ -1218,13 +1346,16 @@ class EngramWebServer:
                 # 直接调用 async 的 render 方法，不要用 _run_in_executor
                 image_bytes = await renderer.render(user_id, profile, memory_count=memory_count)
                 
-                # 关闭 renderer 的 session (虽然目前是单次使用)
-                await renderer.close()
-                
                 return Response(content=image_bytes, media_type="image/png")
             except Exception as exc:
                 logger.error("Engram WebUI 渲染画像失败: %s", exc, exc_info=True)
-                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="内部错误")
+            finally:
+                if renderer is not None:
+                    try:
+                        await renderer.close()
+                    except Exception as close_exc:
+                        logger.debug("Engram WebUI 关闭画像渲染器失败: %s", close_exc)
 
         @self._app.post("/api/profile/{user_id}")
         async def update_profile(
@@ -1238,7 +1369,7 @@ class EngramWebServer:
                 return {"success": True, "data": result}
             except Exception as exc:
                 logger.error("Engram WebUI 更新画像失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.post("/api/profile/{user_id}/remove-item")
         async def remove_profile_item(
@@ -1261,7 +1392,7 @@ class EngramWebServer:
                 return {"success": True, "data": profile, "message": message}
             except Exception as exc:
                 logger.error("Engram WebUI 删除画像标签失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.delete("/api/profile/{user_id}")
         async def clear_profile(user_id: str, token: str = Depends(self._auth_dependency())):
@@ -1271,7 +1402,7 @@ class EngramWebServer:
                 return {"success": True, "data": result}
             except Exception as exc:
                 logger.error("Engram WebUI 清除画像失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
         @self._app.post("/api/maintenance/rebuild-vectors")
         async def rebuild_vectors(
@@ -1289,7 +1420,7 @@ class EngramWebServer:
                 return {"success": True, "data": result}
             except Exception as exc:
                 logger.error("Engram WebUI 重建向量库失败: %s", exc, exc_info=True)
-                return {"success": False, "error": str(exc)}
+                return self._error_response(exc)
 
 
 __all__ = ["EngramWebServer"]

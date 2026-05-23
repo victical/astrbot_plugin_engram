@@ -1,7 +1,7 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, At
 
 # 核心模块
 from .core import MemoryFacade, MemoryScheduler, MemoryManager
@@ -80,30 +80,139 @@ class EngramPlugin(Star):
         self._group_scheduler = None
         self._group_mem_handler = None
         self._group_db = None
-        self._group_memory_init_lock = asyncio.Lock()
+        self._group_memory_init_lock = None
+        self._group_memory_init_lock_loop = None
+        self._startup_tasks = []
+        self._startup_task_errors = {}
+        self._group_memory_prewarm_started = False
 
         # 初始化调度器
         self._scheduler = MemoryScheduler(self.logic, self.config)
-        asyncio.create_task(self._scheduler.start())
+        self._create_background_task("private_scheduler_start", self._scheduler.start())
+        self._maybe_start_group_memory_prewarm()
 
         # WebUI 服务端
-        self.enable_webui_server = self.config.get("enable_webui_server", False)
-        self.webui_host = self.config.get("webui_host", "0.0.0.0")
-        self.webui_port = int(self.config.get("webui_port", 8080))
+        enable_webui_server, webui_host, webui_port = self._get_webui_settings()
         self._webui_server = None
-        if self.enable_webui_server:
+        if enable_webui_server:
             try:
                 logger.info(
                     "Engram：准备启动 WebUI 服务 host=%s port=%s",
-                    self.webui_host,
-                    self.webui_port
+                    webui_host,
+                    webui_port
                 )
-                self._webui_server = EngramWebServer(self, host=self.webui_host, port=self.webui_port)
-                asyncio.create_task(self._webui_server.start())
+                self._webui_server = EngramWebServer(self, host=webui_host, port=webui_port)
+                self._create_background_task("webui_server_start", self._webui_server.start())
             except Exception as e:
                 logger.error(f"Engram：WebUI 服务启动失败：{e}")
                 self._webui_server = None
-        
+
+    def _handle_background_task_done(self, task_name: str, task: asyncio.Task):
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+
+        self._startup_task_errors[task_name] = str(exc)
+        logger.error("Engram 后台启动任务[%s]异常退出：%s", task_name, exc, exc_info=exc)
+
+    def _create_background_task(self, task_name: str, coro):
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda done_task, name=task_name: self._handle_background_task_done(name, done_task))
+        self._startup_tasks.append(task)
+        return task
+
+    def _maybe_start_group_memory_prewarm(self):
+        if not self.config.get("enable_group_memory", False):
+            return None
+        if getattr(self, "_group_memory_prewarm_started", False):
+            return None
+        if getattr(self, "_group_memory_manager", None) is not None:
+            return None
+        self._group_memory_prewarm_started = True
+        return self._create_background_task("group_memory_prewarm", self._ensure_group_memory_manager())
+
+    def _get_webui_settings(self):
+        enabled = bool(self.config.get("enable_webui_server", False))
+        host = str(self.config.get("webui_host", "0.0.0.0") or "0.0.0.0").strip() or "0.0.0.0"
+        try:
+            port = int(self.config.get("webui_port", 8080))
+        except (TypeError, ValueError):
+            port = 8080
+        port = max(1, min(65535, port))
+        return enabled, host, port
+
+    def _get_group_memory_init_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._group_memory_init_lock is None or self._group_memory_init_lock_loop is not loop:
+            self._group_memory_init_lock = asyncio.Lock()
+            self._group_memory_init_lock_loop = loop
+        return self._group_memory_init_lock
+
+    def _iter_database_handles(self):
+        seen = set()
+        for db in (
+            getattr(getattr(self, "logic", None), "db", None),
+            getattr(self, "_group_db", None),
+        ):
+            if db is None:
+                continue
+            key = id(db)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield db
+
+    @staticmethod
+    def _close_db_handle_for_current_thread(db):
+        close_current = getattr(db, "close_thread_connection", None)
+        if callable(close_current):
+            close_current()
+            return
+
+        raw_db = getattr(db, "db", None)
+        if raw_db is None:
+            return
+        try:
+            if hasattr(raw_db, "is_closed") and raw_db.is_closed():
+                return
+            raw_db.close()
+        except Exception as e:
+            logger.debug("Engram：关闭当前线程数据库连接失败：%s", e)
+
+    def _close_worker_database_connections(self):
+        executor = getattr(getattr(self, "logic", None), "executor", None)
+        if executor is None or getattr(executor, "_shutdown", False):
+            return
+
+        dbs = list(self._iter_database_handles())
+        if not dbs:
+            return
+
+        try:
+            max_workers = max(1, int(getattr(executor, "_max_workers", 1) or 1))
+        except (TypeError, ValueError):
+            max_workers = 1
+
+        def _close_all_for_worker():
+            for db in dbs:
+                self._close_db_handle_for_current_thread(db)
+
+        futures = []
+        for _ in range(max_workers):
+            try:
+                futures.append(executor.submit(_close_all_for_worker))
+            except Exception as e:
+                logger.debug("Engram：提交数据库连接关闭任务失败：%s", e)
+                break
+
+        for future in futures:
+            try:
+                future.result(timeout=2.0)
+            except Exception as e:
+                logger.debug("Engram：等待数据库连接关闭任务失败：%s", e)
 
     def _is_command_message(self, content: str) -> bool:
         """检测消息是否为指令"""
@@ -163,7 +272,7 @@ class EngramPlugin(Star):
         if not self.config.get("enable_group_memory", False):
             return None
 
-        async with self._group_memory_init_lock:
+        async with self._get_group_memory_init_lock():
             if self._group_memory_manager is not None:
                 return self._group_memory_manager
 
@@ -199,9 +308,47 @@ class EngramPlugin(Star):
             group_scheduler_config["enable_yearly_folding"] = False
 
             self._group_scheduler = MemoryScheduler(self._group_memory_manager, group_scheduler_config)
-            asyncio.create_task(self._group_scheduler.start())
+            self._create_background_task("group_scheduler_start", self._group_scheduler.start())
 
         return self._group_memory_manager
+
+    def _extract_at_user_ids(
+        self, event: AstrMessageEvent, exclude_ids: set, max_count: int = 3
+    ) -> list:
+        """
+        从消息链提取被 @ 的用户 ID 列表（去重 + 排除 bot 自身和发言者）。
+        默认上限 3 人，避免水群刷屏型 @ 灌爆 token。
+        """
+        try:
+            chain = getattr(getattr(event, "message_obj", None), "message", None) or []
+        except Exception:
+            return []
+
+        try:
+            self_id = str(event.get_self_id() or "").strip()
+        except Exception:
+            self_id = ""
+
+        excluded = {str(x).strip() for x in (exclude_ids or set()) if x}
+        if self_id:
+            excluded.add(self_id)
+
+        seen = set()
+        result = []
+        for seg in chain:
+            if not isinstance(seg, At):
+                continue
+            qq = getattr(seg, "qq", None)
+            if qq is None:
+                continue
+            uid = str(qq).strip()
+            if not uid or uid in excluded or uid in seen:
+                continue
+            seen.add(uid)
+            result.append(uid)
+            if len(result) >= max_count:
+                break
+        return result
 
     def _resolve_group_storage_id(self, group_id: str, sender_id: str) -> str:
         """根据配置决定群聊记忆的 session/user 绑定方式。"""
@@ -241,7 +388,11 @@ class EngramPlugin(Star):
             return None
         if self._group_mem_handler is not None:
             return self._group_mem_handler
-        await self._ensure_group_memory_manager()
+        try:
+            await self._ensure_group_memory_manager()
+        except Exception as e:
+            logger.error("Engram：初始化群聊记忆命令处理器失败：%s", e, exc_info=True)
+            return None
         return self._group_mem_handler
 
     @staticmethod
@@ -259,6 +410,16 @@ class EngramPlugin(Star):
         for src, dst in replacements.items():
             text = text.replace(src, dst)
         return text
+
+    async def _run_plain_command(self, event: AstrMessageEvent, command_name: str, handler_call, transform=None):
+        try:
+            result = await handler_call()
+            if transform is not None:
+                result = transform(result)
+            return event.plain_result(result)
+        except Exception as e:
+            logger.error("Engram command %s failed: %s", command_name, e, exc_info=True)
+            return event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     # 兼容保留：以下方法由 main 转发到 services.injection_strategy
     def _extract_topic_tokens(self, query: str):
@@ -532,11 +693,38 @@ class EngramPlugin(Star):
         except Exception as e:
             logger.debug(f"Engram：群聊画像读取失败，已跳过：{e}")
 
+        # 当前消息中被 @ 的人（去重 + 排除 bot 自身和发言者，默认上限 3 人），
+        # 各取一行精简画像并入"被提及的人"块。无画像则跳过。
+        at_block = ""
+        try:
+            try:
+                at_max = int(self.config.get("group_at_profile_max", 3))
+            except (TypeError, ValueError):
+                at_max = 3
+            at_max = max(0, min(at_max, 10))
+            if at_max > 0:
+                at_user_ids = self._extract_at_user_ids(
+                    event, exclude_ids={sender_id}, max_count=at_max,
+                )
+                compact_lines = []
+                for uid in at_user_ids:
+                    try:
+                        at_profile = await self.logic.get_user_profile(uid)
+                        line = self._llm_injector.build_compact_profile_block(at_profile)
+                        if line:
+                            compact_lines.append(line)
+                    except Exception as e:
+                        logger.debug(f"Engram：群聊被@用户画像读取失败 uid={uid}：{e}")
+                at_block = self._llm_injector.build_at_target_block(compact_lines)
+        except Exception as e:
+            logger.debug(f"Engram：群聊@画像注入失败，已跳过：{e}")
+
         combined_memory_block = f"{memory_block}{tool_hint_block}"
-        if profile_block or combined_memory_block:
+        full_profile_block = f"{profile_block}\n{at_block}" if at_block else profile_block
+        if full_profile_block or combined_memory_block:
             self._llm_injector.inject_context(
                 req,
-                profile_block,
+                full_profile_block,
                 combined_memory_block,
                 target=self.config.get("llm_injection_target", "system"),
             )
@@ -862,15 +1050,21 @@ class EngramPlugin(Star):
     async def mem_list(self, event: AstrMessageEvent, count: str = ""):
         """查看最近生成的长期记忆归档"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_list(user_id=user_id, count=count)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_list",
+            lambda: self._mem_handler.handle_mem_list(user_id=user_id, count=count),
+        )
 
     @filter.command("mem_view")
     async def mem_view(self, event: AstrMessageEvent, index: str):
         """查看指定序号或 ID 记忆的完整对话原文"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_view(user_id=user_id, index=index)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_view",
+            lambda: self._mem_handler.handle_mem_view(user_id=user_id, index=index),
+        )
 
     @filter.command("mem_search")
     async def mem_search(self, event: AstrMessageEvent, query: str):
@@ -879,60 +1073,85 @@ class EngramPlugin(Star):
 
         handler = getattr(self, "_mem_handler", None)
         if handler is not None:
-            result = await handler.handle_mem_search(user_id=user_id, query=query)
-            yield event.plain_result(result)
+            yield await self._run_plain_command(
+                event,
+                "mem_search",
+                lambda: handler.handle_mem_search(user_id=user_id, query=query),
+            )
             return
 
-        # 兼容 __new__ 场景测试：回退到直连逻辑
-        memories = await self.logic.retrieve_memories(user_id, query, limit=3, force_retrieve=True)
-        if not memories:
-            yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆。")
-            return
-        result = [f"🔍 搜索关键词 '{query}' 的结果（按相关性排序）：\n"] + memories
-        result.append("\n💡 使用 /mem_delete <ID> 可根据记忆 ID 删除指定记忆。")
-        yield event.plain_result("\n".join(result))
+        try:
+            # 兼容 __new__ 场景测试：回退到直连逻辑
+            memories = await self.logic.retrieve_memories(user_id, query, limit=3, force_retrieve=True)
+            if not memories:
+                yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆。")
+                return
+            result = [f"🔍 搜索关键词 '{query}' 的结果（按相关性排序）：\n"] + memories
+            result.append("\n💡 使用 /mem_delete <ID> 可根据记忆 ID 删除指定记忆。")
+            yield event.plain_result("\n".join(result))
+        except Exception as e:
+            logger.error("Engram command mem_search failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.command("mem_delete")
     async def mem_delete(self, event: AstrMessageEvent, index: str):
         """删除指定序号或 ID 的总结记忆（保留原始消息）"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=False)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_delete",
+            lambda: self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=False),
+        )
 
     @filter.command("mem_delete_all")
     async def mem_delete_all(self, event: AstrMessageEvent, index: str):
         """删除指定序号或 ID 的总结记忆及其关联的原始消息"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=True)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_delete_all",
+            lambda: self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=True),
+        )
 
     @filter.command("mem_undo")
     async def mem_undo(self, event: AstrMessageEvent):
         """撤销最近一次删除操作"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_undo(user_id=user_id)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_undo",
+            lambda: self._mem_handler.handle_mem_undo(user_id=user_id),
+        )
 
     @filter.command("mem_clear_raw")
     async def mem_clear_raw(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有未归档的原始消息数据"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_clear_raw(user_id=user_id, confirm=confirm)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_clear_raw",
+            lambda: self._mem_handler.handle_mem_clear_raw(user_id=user_id, confirm=confirm),
+        )
 
     @filter.command("mem_clear_archive")
     async def mem_clear_archive(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有长期记忆归档（保留原始消息）"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_clear_archive(user_id=user_id, confirm=confirm)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_clear_archive",
+            lambda: self._mem_handler.handle_mem_clear_archive(user_id=user_id, confirm=confirm),
+        )
 
     @filter.command("mem_clear_all")
     async def mem_clear_all(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有原始消息和长期记忆数据"""
         user_id = event.get_sender_id()
-        result = await self._mem_handler.handle_mem_clear_all(user_id=user_id, confirm=confirm)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "mem_clear_all",
+            lambda: self._mem_handler.handle_mem_clear_all(user_id=user_id, confirm=confirm),
+        )
 
     @filter.command_group("profile")
     def profile_group(self, event: AstrMessageEvent): 
@@ -944,57 +1163,80 @@ class EngramPlugin(Star):
     async def profile_clear(self, event: AstrMessageEvent, confirm: str = ""):
         """清除用户画像数据"""
         user_id = event.get_sender_id()
-        result = await self._profile_handler.handle_profile_clear(user_id=user_id, confirm=confirm)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "profile_clear",
+            lambda: self._profile_handler.handle_profile_clear(user_id=user_id, confirm=confirm),
+        )
 
     @profile_group.command("show")
     async def profile_show(self, event: AstrMessageEvent):
         """显示手账风格的用户深度画像"""
         user_id = event.get_sender_id()
-        success, result = await self._profile_handler.handle_profile_show(user_id=user_id)
-        if success:
-            from astrbot.api.message_components import Image as MsgImage
-            yield event.chain_result([MsgImage.fromBytes(result)])
-        else:
-            yield event.plain_result(result)
+        try:
+            success, result = await self._profile_handler.handle_profile_show(user_id=user_id)
+            if success:
+                from astrbot.api.message_components import Image as MsgImage
+                yield event.chain_result([MsgImage.fromBytes(result)])
+            else:
+                yield event.plain_result(result)
+        except Exception as e:
+            logger.error("Engram command profile_show failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @profile_group.command("set")
     async def profile_set(self, event: AstrMessageEvent, key: str, value: str):
         """手动设置画像字段的值 (如: /profile set 职业 程序员)"""
         user_id = event.get_sender_id()
-        result = await self._profile_handler.handle_profile_set(user_id=user_id, key=key, value=value)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "profile_set",
+            lambda: self._profile_handler.handle_profile_set(user_id=user_id, key=key, value=value),
+        )
 
     @profile_group.command("rollback")
     async def profile_rollback(self, event: AstrMessageEvent, steps: str = "1"):
         """回滚用户画像到历史版本（默认回滚 1 步）"""
         user_id = event.get_sender_id()
-        result = await self._profile_handler.handle_profile_rollback(user_id=user_id, steps=steps)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "profile_rollback",
+            lambda: self._profile_handler.handle_profile_rollback(user_id=user_id, steps=steps),
+        )
 
     @profile_group.command("delete")
     async def profile_delete(self, event: AstrMessageEvent, category: str, value: str):
         """删除画像记忆碎片 (如: /profile delete 爱好 篮球)"""
         user_id = event.get_sender_id()
-        result = await self._profile_handler.handle_profile_delete(user_id=user_id, category=category, value=value)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "profile_delete",
+            lambda: self._profile_handler.handle_profile_delete(user_id=user_id, category=category, value=value),
+        )
 
     @profile_group.command("evidence")
     async def profile_evidence(self, event: AstrMessageEvent, top_n: str = "8"):
         """查看画像证据摘要"""
         user_id = event.get_sender_id()
-        result = await self._profile_handler.handle_profile_evidence(user_id=user_id, top_n=top_n)
-        yield event.plain_result(result)
+        yield await self._run_plain_command(
+            event,
+            "profile_evidence",
+            lambda: self._profile_handler.handle_profile_evidence(user_id=user_id, top_n=top_n),
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize")
     async def force_summarize(self, event: AstrMessageEvent):
         """[管理员] 立即对当前所有未处理对话进行记忆归档"""
         user_id = event.get_sender_id()
-        start_msg, done_msg = self._mem_handler.get_force_summarize_messages()
-        yield event.plain_result(start_msg)
-        await self._mem_handler.handle_force_summarize(user_id=user_id)
-        yield event.plain_result(done_msg)
+        try:
+            start_msg, done_msg = self._mem_handler.get_force_summarize_messages()
+            yield event.plain_result(start_msg)
+            await self._mem_handler.handle_force_summarize(user_id=user_id)
+            yield event.plain_result(done_msg)
+        except Exception as e:
+            logger.error("Engram command engram_force_summarize failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_force_summarize_all")
@@ -1009,8 +1251,8 @@ class EngramPlugin(Star):
         try:
             private_total = await self.logic.summarize_all_users()
         except Exception as e:
-            logger.error(f"Engram：强制归档全部私聊记忆失败：{e}")
-            yield event.plain_result(f"❌ 私聊记忆归档失败：{e}")
+            logger.error("Engram：强制归档全部私聊记忆失败：%s", e, exc_info=True)
+            yield event.plain_result("❌ 私聊记忆归档失败，请稍后重试。")
             return
 
         if group_enabled:
@@ -1019,9 +1261,9 @@ class EngramPlugin(Star):
                 if group_manager is not None:
                     group_total = await group_manager.summarize_all_users()
             except Exception as e:
-                logger.error(f"Engram：强制归档全部群聊记忆失败：{e}")
+                logger.error("Engram：强制归档全部群聊记忆失败：%s", e, exc_info=True)
                 yield event.plain_result(
-                    f"⚠️ 私聊记忆归档已完成（{private_total}），但群聊记忆归档失败：{e}"
+                    f"⚠️ 私聊记忆归档已完成（{private_total}），但群聊记忆归档失败，请稍后重试。"
                 )
                 return
 
@@ -1040,15 +1282,19 @@ class EngramPlugin(Star):
         """[管理员] 立即基于指定天数的记忆强制深度更新画像"""
         user_id = event.get_sender_id()
 
-        ok, err_msg, days_int = self._profile_handler.resolve_force_persona_days(days)
-        if not ok:
-            yield event.plain_result(err_msg)
-            return
+        try:
+            ok, err_msg, days_int = self._profile_handler.resolve_force_persona_days(days)
+            if not ok:
+                yield event.plain_result(err_msg)
+                return
 
-        start_msg, done_msg = self._profile_handler.build_force_persona_messages(days_int)
-        yield event.plain_result(start_msg)
-        await self._profile_handler.handle_force_persona(user_id=user_id, days_int=days_int)
-        yield event.plain_result(done_msg)
+            start_msg, done_msg = self._profile_handler.build_force_persona_messages(days_int)
+            yield event.plain_result(start_msg)
+            await self._profile_handler.handle_force_persona(user_id=user_id, days_int=days_int)
+            yield event.plain_result(done_msg)
+        except Exception as e:
+            logger.error("Engram command engram_force_persona failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mem_rebuild_vector")
@@ -1067,8 +1313,8 @@ class EngramPlugin(Star):
             result = await self._mem_handler.handle_rebuild_vectors(full_rebuild_flag=full_rebuild_flag, batch_size=200)
             yield event.plain_result(self._mem_handler.build_rebuild_vector_result_text(full_rebuild_flag, result))
         except Exception as e:
-            logger.error(f"Engram：重建向量库失败：{e}")
-            yield event.plain_result(f"❌ 向量库重建失败：{e}")
+            logger.error("Engram：重建向量库失败：%s", e, exc_info=True)
+            yield event.plain_result("❌ 向量库重建失败，请稍后重试。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("engram_rebuild_vectors")
@@ -1082,8 +1328,8 @@ class EngramPlugin(Star):
             result = await self._mem_handler.handle_rebuild_vectors(full_rebuild_flag=full_rebuild_flag, batch_size=200)
             yield event.plain_result(self._mem_handler.build_rebuild_vector_result_text(full_rebuild_flag, result))
         except Exception as e:
-            logger.error(f"Engram：重建向量库失败：{e}")
-            yield event.plain_result(f"❌ 向量库重建失败：{e}")
+            logger.error("Engram：重建向量库失败：%s", e, exc_info=True)
+            yield event.plain_result("❌ 向量库重建失败，请稍后重试。")
 
     @filter.command("group_mem_list")
     async def group_mem_list(self, event: AstrMessageEvent, count: str = ""):
@@ -1096,8 +1342,12 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        result = await handler.handle_mem_list(user_id=storage_id, count=count)
-        yield event.plain_result(self._rewrite_group_command_hints(result))
+        yield await self._run_plain_command(
+            event,
+            "group_mem_list",
+            lambda: handler.handle_mem_list(user_id=storage_id, count=count),
+            transform=self._rewrite_group_command_hints,
+        )
 
     @filter.command("group_mem_view")
     async def group_mem_view(self, event: AstrMessageEvent, index: str):
@@ -1110,8 +1360,12 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        result = await handler.handle_mem_view(user_id=storage_id, index=index)
-        yield event.plain_result(self._rewrite_group_command_hints(result))
+        yield await self._run_plain_command(
+            event,
+            "group_mem_view",
+            lambda: handler.handle_mem_view(user_id=storage_id, index=index),
+            transform=self._rewrite_group_command_hints,
+        )
 
     @filter.command("group_mem_search")
     async def group_mem_search(self, event: AstrMessageEvent, query: str):
@@ -1124,8 +1378,12 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        result = await handler.handle_mem_search(user_id=storage_id, query=query)
-        yield event.plain_result(self._rewrite_group_command_hints(result))
+        yield await self._run_plain_command(
+            event,
+            "group_mem_search",
+            lambda: handler.handle_mem_search(user_id=storage_id, query=query),
+            transform=self._rewrite_group_command_hints,
+        )
 
     @filter.command("group_mem_delete")
     async def group_mem_delete(self, event: AstrMessageEvent, index: str):
@@ -1138,8 +1396,12 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        result = await handler.handle_mem_delete(user_id=storage_id, index=index, delete_raw=False)
-        yield event.plain_result(self._rewrite_group_command_hints(result))
+        yield await self._run_plain_command(
+            event,
+            "group_mem_delete",
+            lambda: handler.handle_mem_delete(user_id=storage_id, index=index, delete_raw=False),
+            transform=self._rewrite_group_command_hints,
+        )
 
     @filter.command("group_mem_delete_all")
     async def group_mem_delete_all(self, event: AstrMessageEvent, index: str):
@@ -1152,8 +1414,12 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        result = await handler.handle_mem_delete(user_id=storage_id, index=index, delete_raw=True)
-        yield event.plain_result(self._rewrite_group_command_hints(result))
+        yield await self._run_plain_command(
+            event,
+            "group_mem_delete_all",
+            lambda: handler.handle_mem_delete(user_id=storage_id, index=index, delete_raw=True),
+            transform=self._rewrite_group_command_hints,
+        )
 
     @filter.command("group_mem_undo")
     async def group_mem_undo(self, event: AstrMessageEvent):
@@ -1166,8 +1432,12 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        result = await handler.handle_mem_undo(user_id=storage_id)
-        yield event.plain_result(self._rewrite_group_command_hints(result))
+        yield await self._run_plain_command(
+            event,
+            "group_mem_undo",
+            lambda: handler.handle_mem_undo(user_id=storage_id),
+            transform=self._rewrite_group_command_hints,
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("group_mem_force_summarize")
@@ -1181,16 +1451,24 @@ class EngramPlugin(Star):
             yield event.plain_result("群聊记忆未开启或未初始化。")
             return
         storage_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-        start_msg, done_msg = handler.get_force_summarize_messages()
-        yield event.plain_result(self._rewrite_group_command_hints(start_msg))
-        await handler.handle_force_summarize(user_id=storage_id)
-        yield event.plain_result(self._rewrite_group_command_hints(done_msg))
+        try:
+            start_msg, done_msg = handler.get_force_summarize_messages()
+            yield event.plain_result(self._rewrite_group_command_hints(start_msg))
+            await handler.handle_force_summarize(user_id=storage_id)
+            yield event.plain_result(self._rewrite_group_command_hints(done_msg))
+        except Exception as e:
+            logger.error("Engram command group_mem_force_summarize failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.command("mem_export")
     async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
         """导出原始消息数据用于模型微调"""
-        async for result in self.export_handler.handle_export_command(event, format, days):
-            yield result
+        try:
+            async for result in self.export_handler.handle_export_command(event, format, days):
+                yield result
+        except Exception as e:
+            logger.error("Engram command mem_export failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.command("mem_stats")
     async def mem_stats(self, event: AstrMessageEvent):
@@ -1221,15 +1499,23 @@ class EngramPlugin(Star):
             inode,
             db_size,
         )
-        async for result in self.export_handler.handle_stats_command(event):
-            yield result
+        try:
+            async for result in self.export_handler.handle_stats_command(event):
+                yield result
+        except Exception as e:
+            logger.error("Engram command mem_stats failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
     
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mem_export_all")
     async def mem_export_all(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
         """[管理员] 导出所有用户的原始消息数据"""
-        async for result in self.export_handler.handle_export_all_command(event, format, days):
-            yield result
+        try:
+            async for result in self.export_handler.handle_export_all_command(event, format, days):
+                yield result
+        except Exception as e:
+            logger.error("Engram command mem_export_all failed: %s", e, exc_info=True)
+            yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     async def terminate(self):
         """优雅关闭插件：先设置标志，再取消任务，最后关闭资源"""
@@ -1273,6 +1559,20 @@ class EngramPlugin(Star):
             except Exception as e:
                 logger.debug(f"Engram：等待群聊调度任务结束时发生异常：{e}")
 
+        startup_tasks = [task for task in getattr(self, "_startup_tasks", []) if not task.done()]
+        for task in startup_tasks:
+            task.cancel()
+        if startup_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*startup_tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.debug("Engram：部分启动后台任务未在限定时间内完成")
+            except Exception as e:
+                logger.debug(f"Engram：等待启动后台任务结束时发生异常：{e}")
+
         # 步骤3：关闭 WebUI 服务
         if getattr(self, "_webui_server", None):
             try:
@@ -1284,9 +1584,10 @@ class EngramPlugin(Star):
         self.logic._memory_manager.shutdown()
         if getattr(self, "_group_memory_manager", None):
             self._group_memory_manager.shutdown()
+        self._close_worker_database_connections()
         # 等待 worker 线程完成正在执行的 SQL 写入，避免半提交事务
         try:
-            self.logic.executor.shutdown(wait=True, cancel_futures=True)
+            self.logic.executor.shutdown(wait=True, cancel_futures=False)
         except TypeError:
             # Python < 3.9 不支持 cancel_futures 参数
             self.logic.executor.shutdown(wait=True)

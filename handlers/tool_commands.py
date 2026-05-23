@@ -9,6 +9,8 @@ import json
 import re
 from astrbot.api import logger
 
+from ..core.memory_models import MemorySearchResult
+
 
 class MemoryToolHandler:
     """记忆工具处理器。"""
@@ -37,6 +39,49 @@ class MemoryToolHandler:
         if extra_hint:
             payload["extra_hint"] = extra_hint
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _parse_legacy_memory_result(text: str, fallback_source_type: str = "private") -> dict:
+        """Convert the legacy rendered memory text into structured tool output."""
+        raw = str(text or "")
+        header, _, body = raw.partition("\n")
+
+        score = None
+        score_match = re.search(r"🎯\s*(\d+)%", header)
+        if score_match:
+            try:
+                score = int(score_match.group(1))
+            except (TypeError, ValueError):
+                score = None
+
+        memory_id = ""
+        id_match = re.search(r"🆔\s*([^\s|]+)", header)
+        if id_match:
+            memory_id = id_match.group(1).strip()
+
+        created_at = ""
+        created_match = re.search(r"⏰\s*([^|]+?)(?:\s*\||$)", header)
+        if created_match:
+            created_at = created_match.group(1).strip()
+
+        source_type = fallback_source_type
+        source_match = re.search(r"🗂️\s*([^\s|]+)", header)
+        if source_match:
+            source_type = source_match.group(1).strip() or fallback_source_type
+
+        summary = body.strip() or raw.strip()
+        if summary.startswith("📝"):
+            summary = summary[1:].strip()
+        if summary.startswith("归档："):
+            summary = summary[len("归档："):].strip()
+
+        return {
+            "memory_id": memory_id,
+            "source_type": source_type,
+            "created_at": created_at,
+            "score": score,
+            "summary": summary,
+        }
 
     async def build_memory_search_output(
         self,
@@ -101,16 +146,33 @@ class MemoryToolHandler:
         normalized_mode = self._normalize_mode(mode)
 
         try:
-            results = await logic.retrieve_memory_search_results(
-                user_id,
-                query,
-                limit=final_limit,
-                start_time=start_time,
-                end_time=end_time,
-                source_types=normalized_types or None,
-                force_retrieve=True,
-                mode=normalized_mode,
-            )
+            if callable(getattr(logic, "retrieve_memory_search_results", None)):
+                results = await logic.retrieve_memory_search_results(
+                    user_id,
+                    query,
+                    limit=final_limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_types=normalized_types or None,
+                    force_retrieve=True,
+                    mode=normalized_mode,
+                )
+            else:
+                legacy_results = await logic.retrieve_memories(
+                    user_id,
+                    query,
+                    limit=final_limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_types=normalized_types or None,
+                    force_retrieve=True,
+                    mode=normalized_mode,
+                )
+                fallback_source = (normalized_types or ["private"])[0]
+                results = [
+                    self._parse_legacy_memory_result(item, fallback_source_type=fallback_source)
+                    for item in legacy_results
+                ]
         except Exception as e:
             logger.error(f"Engram mem_search_tool 异常：{e}")
             return "工具检索失败，请稍后重试。"

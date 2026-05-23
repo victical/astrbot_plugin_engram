@@ -164,6 +164,12 @@
         "type": "bool",
         "default": false,
         "hint": "开启后群聊检索会额外包含该用户的私聊记忆。默认关闭。"
+      },
+      "group_at_profile_max": {
+        "description": "群聊@注入画像最大人数",
+        "type": "int",
+        "default": 3,
+        "hint": "群聊中除当前发言者外，注入画像的被@用户上限（按消息出现顺序去重；不含 bot 自身）。设为 0 关闭。"
       }
     }
   },

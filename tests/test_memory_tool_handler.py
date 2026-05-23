@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from astrbot_plugin_engram.handlers.tool_commands import MemoryToolHandler
+from astrbot_plugin_engram.core.memory_models import MemorySearchResult
 
 
 class DummyEvent:
@@ -89,3 +90,38 @@ def test_memory_tool_uses_normalized_type_as_source_fallback():
     assert payload["results"][0]["memory_id"] == "feedbeef"
     assert payload["results"][0]["source_type"] == "group"
     assert payload["results"][0]["score"] is None
+
+
+def test_memory_tool_prefers_structured_search_results():
+    logic = SimpleNamespace(
+        retrieve_memory_search_results=AsyncMock(
+            return_value=[
+                MemorySearchResult(
+                    memory_id="facefeed",
+                    source_type="private",
+                    created_at="2026-05-03 09:00:00",
+                    summary="用户偏好结构化工具结果",
+                    score=91,
+                )
+            ]
+        ),
+        retrieve_memories=AsyncMock(),
+    )
+    handler = MemoryToolHandler({"enable_memory_search_tool": True}, logic)
+
+    output = asyncio.run(
+        handler.build_memory_search_output(
+            event=DummyEvent(),
+            query="偏好",
+            limit=1,
+            time_expr="",
+            source_types=None,
+            parse_time_expr=parse_time_expr,
+            normalize_source_types=normalize_source_types,
+        )
+    )
+
+    logic.retrieve_memory_search_results.assert_awaited_once()
+    logic.retrieve_memories.assert_not_awaited()
+    payload = json.loads(output)
+    assert payload["results"][0]["memory_id"] == "facefeed"

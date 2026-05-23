@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import re
 from peewee import *
 from playhouse.sqlite_ext import JSONField, SqliteExtDatabase
 from astrbot.api import logger
@@ -160,6 +161,14 @@ class DatabaseManager:
         self._migrate_schema_if_needed()
         self._ensure_memory_index_fts()
         self.db.close()
+
+    def close_thread_connection(self):
+        """Close the peewee connection bound to the current thread."""
+        try:
+            if not self.db.is_closed():
+                self.db.close()
+        except Exception as e:
+            logger.debug("Engram：关闭当前线程数据库连接失败：%s", e)
 
     def _migrate_schema_if_needed(self):
         """自动迁移旧版 SQLite 表结构，避免升级后缺列报错。"""
@@ -500,9 +509,20 @@ class DatabaseManager:
             # FTS MATCH 表达式：关键词 OR，短语精确匹配
             match_tokens = []
             for token in normalized_keywords[:24]:
-                safe = token.replace('"', '""').strip()
+                safe = re.sub(r'[\x00-\x1f\x7f"]', ' ', token).replace('"', '""').strip()
+                if len(safe) > 64:
+                    safe = safe[:64]
                 if safe:
                     match_tokens.append(f'"{safe}"')
+            if not match_tokens:
+                return self._search_memory_indexes_by_keywords_like(
+                    user_id=user_id,
+                    normalized_keywords=normalized_keywords,
+                    limit=limit,
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_types=source_types,
+                )
             match_expr = " OR ".join(match_tokens)
 
             where_sql = ["mi.user_id = ?", f"{fts_table} MATCH ?"]

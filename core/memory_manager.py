@@ -46,6 +46,28 @@ _CHINESE_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
 _ENGLISH_WORD_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
 _CHINESE_BLOCK_PATTERN = re.compile(r"[\u4e00-\u9fa5]+")
 
+DEFAULT_SUMMARIZE_PROMPT = (
+    "你是{{ai_name}}，请根据聊天记录生成【结构化 JSON 记忆摘要】，用于后续检索。\n\n"
+    "【要求】\n"
+    "- 只基于对话中明确出现的信息，不允许编造。\n"
+    "- summary 用自然语言一句话概括，30~60字。\n"
+    "- key_facts 是3~5条核心事实（短句）。\n"
+    "- keywords 是5~10个关键词（实体/主题/事件/地点/数值）。\n"
+    "- entities 是对话中出现的人名/物品/地点/作品等实体。\n"
+    "- mood 用1~3个词描述情绪（可为空）。\n\n"
+    "【输出 JSON 格式】\n"
+    "{\n"
+    '  "summary": "...",\n'
+    '  "key_facts": ["...", "..."],\n'
+    '  "keywords": ["...", "..."],\n'
+    '  "entities": ["...", "..."],\n'
+    '  "mood": "..."\n'
+    "}\n\n"
+    "【对话内容】\n"
+    "{{chat_text}}\n\n"
+    "注意：只输出 JSON，不要包含 Markdown 或其他解释。"
+)
+
 
 class MemoryManager:
     """记忆管理器"""
@@ -114,7 +136,8 @@ class MemoryManager:
         self.chroma_path = chroma_path or os.path.join(self.data_dir, "engram_chroma")
         self.chroma_client = None
         self.collection = None
-        self._chroma_init_lock = asyncio.Lock()
+        self._chroma_init_lock = None
+        self._chroma_init_lock_loop = None
         # 保护 self.collection 替换与并发写入的临界区（rebuild_vector_collection vs add）
         self._collection_swap_lock = Lock()
         self._chroma_initialized = False
@@ -122,6 +145,7 @@ class MemoryManager:
         # 内存中记录最后聊天时间（带自动清理机制）
         self.last_chat_time = {}     # {user_id: timestamp}
         self.unsaved_msg_count = {}  # {user_id: count}
+        self._activity_lock = Lock()
         self._max_inactive_users = 100  # 最大缓存用户数
         self._inactive_threshold = 7 * 24 * 3600  # 7天无活动则清理
 
@@ -138,12 +162,27 @@ class MemoryManager:
         # 向量写入失败补偿队列（热缓存，真相源为 DB）
         self._pending_vector_jobs = []
         self._max_pending_vector_jobs = 5000
-        self._pending_retry_lock = asyncio.Lock()
+        self._pending_retry_lock = None
+        self._pending_retry_lock_loop = None
         self._pending_retry_started = False
 
     def shutdown(self):
         """关闭记忆管理器"""
         self._is_shutdown = True
+
+    def _get_chroma_init_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._chroma_init_lock is None or self._chroma_init_lock_loop is not loop:
+            self._chroma_init_lock = asyncio.Lock()
+            self._chroma_init_lock_loop = loop
+        return self._chroma_init_lock
+
+    def _get_pending_retry_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._pending_retry_lock is None or self._pending_retry_lock_loop is not loop:
+            self._pending_retry_lock = asyncio.Lock()
+            self._pending_retry_lock_loop = loop
+        return self._pending_retry_lock
 
     def _verify_db_contract(self, stage="startup"):
         """校验 DB 接口契约，优先复用稳定接口层的 verify_contract。"""
@@ -184,7 +223,7 @@ class MemoryManager:
         if self._chroma_initialized:
             return
 
-        async with self._chroma_init_lock:
+        async with self._get_chroma_init_lock():
             # 双重检查
             if self._chroma_initialized:
                 return
@@ -215,29 +254,27 @@ class MemoryManager:
     def _cleanup_inactive_users(self):
         """清理长期不活跃的用户缓存，防止内存泄漏"""
         now_ts = time.time()
-
-        # 找出所有超过阈值的不活跃用户
-        inactive_users = [
-            user_id for user_id, last_time in self.last_chat_time.items()
-            if now_ts - last_time > self._inactive_threshold
-        ]
-
-        # 清理不活跃用户（但只有在已归档后才清理）
-        for user_id in inactive_users:
-            if self.unsaved_msg_count.get(user_id, 0) == 0:
-                self.last_chat_time.pop(user_id, None)
-                self.unsaved_msg_count.pop(user_id, None)
-
-        # 如果用户数仍然过多，按最后活跃时间排序，保留最近的
-        if len(self.last_chat_time) > self._max_inactive_users:
-            sorted_users = sorted(self.last_chat_time.items(), key=lambda x: x[1], reverse=True)
-            users_to_keep = set(u[0] for u in sorted_users[:self._max_inactive_users])
-
-            for user_id in list(self.last_chat_time.keys()):
-                if user_id not in users_to_keep and self.unsaved_msg_count.get(user_id, 0) == 0:
+        with self._activity_lock:
+            activity_items = list(dict(self.last_chat_time).items())
+            inactive_users = [
+                user_id for user_id, last_time in activity_items
+                if now_ts - last_time > self._inactive_threshold
+            ]
+            for user_id in inactive_users:
+                if self.unsaved_msg_count.get(user_id, 0) == 0:
                     self.last_chat_time.pop(user_id, None)
                     self.unsaved_msg_count.pop(user_id, None)
-
+            if len(self.last_chat_time) > self._max_inactive_users:
+                sorted_users = sorted(
+                    list(dict(self.last_chat_time).items()),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                users_to_keep = set(u[0] for u in sorted_users[:self._max_inactive_users])
+                for user_id in list(self.last_chat_time.keys()):
+                    if user_id not in users_to_keep and self.unsaved_msg_count.get(user_id, 0) == 0:
+                        self.last_chat_time.pop(user_id, None)
+                        self.unsaved_msg_count.pop(user_id, None)
     @staticmethod
     def _ensure_datetime(timestamp):
         """
@@ -269,6 +306,20 @@ class MemoryManager:
             "group_id": group_id,
             "member_id": member_id,
         }
+
+    @staticmethod
+    def _safe_load_uuids(value) -> list:
+        """Parse a JSON UUID list, treating corrupt legacy data as empty."""
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError) as e:
+            logger.warning("Engram：ref_uuids 字段损坏，已按空列表处理：%s", e)
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed if str(item or "").strip()]
 
     def _is_valid_message_content(self, content: str) -> bool:
         """
@@ -607,7 +658,7 @@ class MemoryManager:
         if self._is_shutdown:
             return {"loaded": 0, "success": 0, "failed": 0}
 
-        async with self._pending_retry_lock:
+        async with self._get_pending_retry_lock():
             loop = asyncio.get_event_loop()
             rows = await loop.run_in_executor(
                 self.executor,
@@ -1006,8 +1057,9 @@ class MemoryManager:
 
         # 更新记录
         if role == "user":
-            self.last_chat_time[user_id] = datetime.datetime.now().timestamp()
-            self.unsaved_msg_count[user_id] = self.unsaved_msg_count.get(user_id, 0) + 1
+            with self._activity_lock:
+                self.last_chat_time[user_id] = datetime.datetime.now().timestamp()
+                self.unsaved_msg_count[user_id] = self.unsaved_msg_count.get(user_id, 0) + 1
 
     # ========== 近期动态 ==========
 
@@ -1082,11 +1134,19 @@ class MemoryManager:
         timeout = self._get_archive_timeout()
         min_count = self._get_archive_min_msg_count()
 
-        for user_id, last_time in list(self.last_chat_time.items()):
-            if now_ts - last_time > timeout and self.unsaved_msg_count.get(user_id, 0) >= min_count:
+        with self._activity_lock:
+            activity_items = list(dict(self.last_chat_time).items())
+            unsaved_counts = {
+                user_id: self.unsaved_msg_count.get(user_id, 0)
+                for user_id, _last_time in activity_items
+            }
+
+        for user_id, last_time in activity_items:
+            if now_ts - last_time > timeout and unsaved_counts.get(user_id, 0) >= min_count:
                 # 触发记忆归档
                 await self._summarize_private_chat(user_id)
-                self.unsaved_msg_count[user_id] = 0
+                with self._activity_lock:
+                    self.unsaved_msg_count[user_id] = 0
 
         # 定期清理不活跃用户缓存，防止内存泄漏
         self._cleanup_inactive_users()
@@ -1321,8 +1381,8 @@ class MemoryManager:
         # 从配置获取提示词模板并替换占位符
         custom_prompt = self.config.get("summarize_prompt")
         if not custom_prompt or not isinstance(custom_prompt, str):
-            logger.warning("Engram：summarize_prompt 未配置或非字符串，跳过本次总结")
-            return None
+            logger.warning("Engram：summarize_prompt 未配置或非字符串，已使用内置默认提示词")
+            custom_prompt = DEFAULT_SUMMARIZE_PROMPT
         ai_name = str(self.config.get("ai_name") or "").strip()
         prompt = custom_prompt.replace("{{chat_text}}", chat_text).replace("{{ai_name}}", ai_name)
 
@@ -2497,7 +2557,9 @@ class MemoryManager:
         if not target_memory.ref_uuids:
             return target_memory, []
 
-        uuids = json.loads(target_memory.ref_uuids)
+        uuids = self._safe_load_uuids(target_memory.ref_uuids)
+        if not uuids:
+            return target_memory, []
         raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
 
         return target_memory, raw_msgs
@@ -2545,7 +2607,9 @@ class MemoryManager:
         if not target_memory.ref_uuids:
             return target_memory, []
 
-        uuids = json.loads(target_memory.ref_uuids)
+        uuids = self._safe_load_uuids(target_memory.ref_uuids)
+        if not uuids:
+            return target_memory, []
         raw_msgs = await loop.run_in_executor(self.executor, self.db.get_memories_by_uuids, uuids)
 
         return target_memory, raw_msgs
@@ -2568,7 +2632,7 @@ class MemoryManager:
             await self._ensure_chroma_initialized()
 
             # 保存删除前的数据（用于撤销）
-            deleted_uuids = json.loads(target_memory.ref_uuids) if target_memory.ref_uuids else []
+            deleted_uuids = self._safe_load_uuids(target_memory.ref_uuids)
 
             # 获取向量数据（用于恢复）
             vector_data = None
@@ -2601,6 +2665,26 @@ class MemoryManager:
                 'vector_data': vector_data,
             }
 
+            # 1. 从 ChromaDB 删除向量数据
+            await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
+
+            # 2. 如果需要，删除关联的原始消息
+            if delete_raw and target_memory.ref_uuids:
+                uuids = self._safe_load_uuids(target_memory.ref_uuids)
+                await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
+            else:
+                # 不删除原始消息时，将其标记为未归档，以便重新总结
+                if deleted_uuids:
+                    def _mark_unarchived():
+                        RawMemory = self.db.RawMemory
+                        with self.db.db.connection_context():
+                            RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
+                    await loop.run_in_executor(self.executor, _mark_unarchived)
+
+            # 3. 从 SQLite 删除记忆索引
+            await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
+
+            # 4. 所有删除步骤成功后再写撤销历史，避免失败删除污染 undo 状态。
             scope_key = self._build_delete_scope_key(user_id, target_memory.source_type)
             source_type = str(target_memory.source_type or self.default_source_type or "private")
             delete_history_id = await loop.run_in_executor(
@@ -2628,25 +2712,6 @@ class MemoryManager:
                 self._delete_history[user_id] = []
             self._delete_history[user_id].insert(0, delete_record)
             self._delete_history[user_id] = self._delete_history[user_id][:self._max_undo_history]
-
-            # 1. 从 ChromaDB 删除向量数据
-            await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
-
-            # 2. 如果需要，删除关联的原始消息
-            if delete_raw and target_memory.ref_uuids:
-                uuids = json.loads(target_memory.ref_uuids)
-                await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
-            else:
-                # 不删除原始消息时，将其标记为未归档，以便重新总结
-                if deleted_uuids:
-                    def _mark_unarchived():
-                        RawMemory = self.db.RawMemory
-                        with self.db.db.connection_context():
-                            RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
-                    await loop.run_in_executor(self.executor, _mark_unarchived)
-
-            # 3. 从 SQLite 删除记忆索引
-            await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
 
             return True, "删除成功", summary
         except Exception as e:
@@ -2863,13 +2928,13 @@ class MemoryManager:
                         logger.warning(f"Engram：备份 ChromaDB 失败，将继续重建：{e}")
                         backup_dir = ""
 
-                try:
-                    self.chroma_client.delete_collection(name="long_term_memories")
-                except Exception as e:
-                    logger.debug(f"Engram：删除旧 Chroma 集合已跳过或失败，将继续重建：{e}")
-                # 加锁切换 collection 引用，与并发的 _collection_add_texts 互斥，
-                # 避免写入路径持有已被销毁的旧 collection 引用导致静默丢失向量。
+                # 删除旧 collection 与新 collection 引用切换必须处于同一临界区，
+                # 否则并发写入可能在 delete_collection 后仍读到已销毁的旧引用。
                 with self._collection_swap_lock:
+                    try:
+                        self.chroma_client.delete_collection(name="long_term_memories")
+                    except Exception as e:
+                        logger.debug(f"Engram：删除旧 Chroma 集合已跳过或失败，将继续重建：{e}")
                     self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
 
             await loop.run_in_executor(self.executor, _backup_and_reset_collection)

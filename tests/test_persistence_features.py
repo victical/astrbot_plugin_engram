@@ -108,3 +108,30 @@ def test_search_memory_indexes_by_keywords_bm25_and_like_fallback(tmp_path):
     )
     assert like_rows
     assert like_rows[0].index_id == "idx-1"
+
+
+def test_search_memory_indexes_by_keywords_sanitizes_fts_tokens(tmp_path, monkeypatch):
+    manager = DatabaseManager(str(tmp_path))
+    captured = {}
+
+    class EmptyRows:
+        def fetchall(self):
+            return []
+
+    def fake_execute_sql(sql, params=None, *args, **kwargs):
+        captured["match_expr"] = params[1]
+        return EmptyRows()
+
+    monkeypatch.setattr(manager.db, "execute_sql", fake_execute_sql)
+
+    manager.search_memory_indexes_by_keywords(
+        user_id="u1",
+        keywords=['bad\x00\x1f"token' + "x" * 100],
+        limit=5,
+        use_bm25=True,
+    )
+
+    match_expr = captured["match_expr"]
+    assert "\x00" not in match_expr
+    assert "\x1f" not in match_expr
+    assert len(match_expr.strip('"')) <= 64

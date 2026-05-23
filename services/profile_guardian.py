@@ -84,6 +84,13 @@ class ProfileGuardian:
         self._enable_conflict_detection = self._config.get("enable_conflict_detection", True)
         self._enable_strong_evidence = self._config.get("enable_strong_evidence_protection", True)
 
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def validate_update(
         self,
         current_profile: Dict[str, Any],
@@ -129,7 +136,7 @@ class ProfileGuardian:
 
         # social_graph 保留系统维护字段
         old_stats = current_profile.get("social_graph", {}).get("interaction_stats", {})
-        new_social = new_profile.get("social_graph", {})
+        new_social = dict(new_profile.get("social_graph", {}) or {})
         if old_stats:
             new_social["interaction_stats"] = old_stats
         validated["social_graph"] = new_social
@@ -287,7 +294,7 @@ class ProfileGuardian:
                 key = f"{category}:{item}"
                 if key in proposal_map:
                     prop = proposal_map[key]
-                    prop["confidence"] = int(prop.get("confidence", 0)) + 1
+                    prop["confidence"] = self._safe_int(prop.get("confidence", 0)) + 1
                     prop["last_seen"] = now_iso
 
                     if prop["confidence"] >= self._confidence_threshold:
@@ -470,7 +477,10 @@ class ProfileGuardian:
                 continue
 
             exist = merged[key]
-            exist["confidence"] = max(int(exist.get("confidence", 0)), int(p.get("confidence", 0)))
+            exist["confidence"] = max(
+                self._safe_int(exist.get("confidence", 0)),
+                self._safe_int(p.get("confidence", 0)),
+            )
             exist["last_seen"] = max(str(exist.get("last_seen", "")), str(p.get("last_seen", "")))
             if not exist.get("first_seen"):
                 exist["first_seen"] = p.get("first_seen")

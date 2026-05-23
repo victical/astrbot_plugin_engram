@@ -88,6 +88,66 @@ class LLMContextInjector:
         
         return "\n".join(lines)
     
+    def build_compact_profile_block(self, profile: Dict[str, Any]) -> str:
+        """
+        构建画像精简一行块（用于群聊"被@的人"等配角场景）。
+
+        返回格式形如：
+            "Bob (QQ: 100002): 程序员，喜欢 Python；老朋友"
+        若画像为空或仅有默认占位（昵称为"未知"），返回空字符串。
+        """
+        if not isinstance(profile, dict):
+            return ""
+
+        basic = profile.get("basic_info") or {}
+        attrs = profile.get("attributes") or {}
+        prefs = profile.get("preferences") or {}
+        social = profile.get("social_graph") or {}
+
+        nickname = str(basic.get("nickname") or "").strip()
+        qq_id = str(basic.get("qq_id") or "").strip()
+        if not nickname or nickname == "未知":
+            return ""
+
+        traits: List[str] = []
+        job = str(basic.get("job") or "").strip()
+        if job and job != "未知":
+            traits.append(job)
+
+        hobbies = self._join_list(attrs.get("hobbies") or [])
+        if hobbies:
+            traits.append(f"喜欢 {hobbies}")
+
+        favorites = []
+        for key in ("favorite_foods", "favorite_items", "favorite_activities"):
+            joined = self._join_list(prefs.get(key) or [])
+            if joined:
+                favorites.append(joined)
+        if favorites:
+            traits.append(f"偏好 {'、'.join(favorites)}")
+
+        relationship = str(social.get("relationship_status") or "").strip()
+
+        head = f"{nickname} (QQ: {qq_id})" if qq_id else nickname
+        body_parts = []
+        if traits:
+            body_parts.append("，".join(traits))
+        if relationship:
+            body_parts.append(relationship)
+        if not body_parts:
+            return ""
+        return f"{head}：{'；'.join(body_parts)}"
+
+    def build_at_target_block(self, compact_lines: List[str]) -> str:
+        """把若干 compact 行拼成"被提及的人"段落；空列表返回空串。"""
+        compact_lines = [line for line in (compact_lines or []) if line]
+        if not compact_lines:
+            return ""
+        lines = ["【被提及的人】"]
+        lines.extend(f"- {line}" for line in compact_lines)
+        lines.append("")
+        return "\n".join(lines)
+
     def build_memory_block(self, memories: List[str]) -> str:
         """
         构建长期记忆文本块

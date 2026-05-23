@@ -16,8 +16,32 @@ class FriendCacheService:
         self.config = config or {}
         self._friends = set()
         self._last_refresh = 0.0
-        self._lock = asyncio.Lock()
-        self._refresh_interval = int(self.config.get("group_memory_friend_cache_ttl", 3600) or 3600)
+        self._lock = None
+        self._lock_loop = None
+
+    @staticmethod
+    def _safe_int(value, default: int = 3600, min_value: int | None = None) -> int:
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            result = default
+        if min_value is not None:
+            result = max(min_value, result)
+        return result
+
+    def _get_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    def _get_refresh_interval(self) -> int:
+        return self._safe_int(
+            self.config.get("group_memory_friend_cache_ttl", 3600),
+            default=3600,
+            min_value=1,
+        )
 
     def add_friend(self, user_id: str) -> None:
         """增量加入好友缓存。"""
@@ -29,7 +53,7 @@ class FriendCacheService:
             return True
         if not self._friends:
             return True
-        return (time.time() - self._last_refresh) >= self._refresh_interval
+        return (time.time() - self._last_refresh) >= self._get_refresh_interval()
 
     async def refresh(self, bot=None, force: bool = False) -> bool:
         """刷新好友列表缓存。"""
@@ -40,7 +64,7 @@ class FriendCacheService:
         if not self._should_refresh(force=force):
             return True
 
-        async with self._lock:
+        async with self._get_lock():
             if not self._should_refresh(force=force):
                 return True
 

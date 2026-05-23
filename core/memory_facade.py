@@ -105,7 +105,7 @@ class MemoryFacade:
         self._is_shutdown = True
         self._memory_manager.shutdown()
         try:
-            self.executor.shutdown(wait=True, cancel_futures=True)
+            self.executor.shutdown(wait=True, cancel_futures=False)
         except TypeError:
             # Python < 3.9 不支持 cancel_futures 参数
             self.executor.shutdown(wait=True)

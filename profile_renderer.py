@@ -146,7 +146,9 @@ class ProfileRenderer:
             try:
                 # 检查文件是否有效（大于 1KB）
                 if os.path.getsize(cache_file) > 1024:
-                    return Image.open(cache_file).convert("RGBA")
+                    with Image.open(cache_file) as img:
+                        img.load()
+                        return img.convert("RGBA")
             except Exception as e:
                 logger.debug(f"Engram 画像渲染器：加载用户 {user_id} 的头像缓存失败：{e}")
                 # 缓存文件损坏，删除它
@@ -161,7 +163,9 @@ class ProfileRenderer:
             async with session.get(avatar_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     avatar_data = await resp.read()
-                    avatar_img = Image.open(io.BytesIO(avatar_data)).convert("RGBA")
+                    with Image.open(io.BytesIO(avatar_data)) as img:
+                        img.load()
+                        avatar_img = img.convert("RGBA")
                     
                     # 保存到缓存
                     try:

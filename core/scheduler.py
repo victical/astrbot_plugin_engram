@@ -5,6 +5,8 @@
 import asyncio
 import calendar
 import datetime
+import json
+import os
 import random
 import time
 from typing import Dict, Callable, Awaitable
@@ -25,47 +27,153 @@ class MemoryScheduler:
         self.logic = logic
         self.config = config
         self._is_shutdown = False
+        self._started = False
+        self._local_tz = datetime.datetime.now().astimezone().tzinfo
+        self._state_path = self._resolve_state_path()
+        self._scheduler_state = self._load_scheduler_state()
         self._tasks = []  # 追踪后台任务
         self._task_metrics = {}  # 任务可观测指标：耗时/成功率/失败率/跳过原因
+
+    @staticmethod
+    def _safe_int(value, default: int = 0, min_value: int | None = None, max_value: int | None = None) -> int:
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            result = default
+        if min_value is not None:
+            result = max(min_value, result)
+        if max_value is not None:
+            result = min(max_value, result)
+        return result
+
+    def _now(self) -> datetime.datetime:
+        return datetime.datetime.now(self._local_tz)
+
+    def _naive_local(self, value: datetime.datetime) -> datetime.datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(self._local_tz).replace(tzinfo=None)
+
+    def _calculate_sleep_until(self, run_at: datetime.datetime, now: datetime.datetime | None = None) -> int:
+        now = now or self._now()
+        return max(1, int((run_at - now).total_seconds()))
+
+    def _resolve_state_path(self) -> str | None:
+        data_dir = getattr(self.logic, "data_dir", None)
+        if not data_dir:
+            manager = getattr(self.logic, "_memory_manager", None)
+            data_dir = getattr(manager, "data_dir", None)
+        if not data_dir:
+            return None
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except Exception as e:
+            logger.debug("Engram：创建调度器状态目录失败：%s", e)
+            return None
+        return os.path.join(data_dir, "scheduler_state.json")
+
+    def _load_scheduler_state(self) -> dict:
+        if not self._state_path or not os.path.exists(self._state_path):
+            return {}
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.warning("Engram：读取调度器状态失败，已忽略旧状态：%s", e)
+            return {}
+
+    def _save_scheduler_state(self):
+        if not self._state_path:
+            return
+        tmp_path = f"{self._state_path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(self._scheduler_state, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self._state_path)
+        except Exception as e:
+            logger.warning("Engram：写入调度器状态失败：%s", e)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    def _should_run_window(self, task_name: str, run_key: str, run_at: datetime.datetime) -> bool:
+        state = self._scheduler_state.get(task_name)
+        if not isinstance(state, dict):
+            return True
+        return state.get("last_run_key") != str(run_key)
+
+    def _mark_run_window_complete(self, task_name: str, run_key: str, run_at: datetime.datetime):
+        self._scheduler_state[task_name] = {
+            "last_run_key": str(run_key),
+            "last_run_at": run_at.isoformat(),
+            "updated_at": self._now().isoformat(),
+        }
+        self._save_scheduler_state()
 
     def _push_activity(self, title: str, *, category: str = "task", source: str = "private", meta: dict | None = None):
         manager = getattr(self.logic, "_memory_manager", None)
         if manager and hasattr(manager, "add_activity"):
             manager.add_activity(title=title, category=category, source=source, meta=meta)
+
+    def _handle_task_done(self, task_name: str, task: asyncio.Task):
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+
+        metric = self._get_metric(task_name)
+        metric["runs_total"] += 1
+        metric["fail_total"] += 1
+        metric["last_run_at"] = self._now().strftime("%Y-%m-%d %H:%M:%S")
+        metric["last_error"] = str(exc)[:300]
+        logger.error("Engram 调度任务[%s]异常退出：%s", task_name, exc, exc_info=exc)
+
+    def _create_task(self, task_name: str, coro: Awaitable):
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda done_task, name=task_name: self._handle_task_done(name, done_task))
+        self._tasks.append(task)
+        return task
     
     async def start(self):
         """启动所有调度任务"""
+        if self._started and any(not task.done() for task in self._tasks):
+            logger.warning("Engram 调度器已经在运行，跳过重复启动")
+            return
+
+        self._started = True
+        self._is_shutdown = False
+        self._tasks = [task for task in self._tasks if not task.done()]
+
         if callable(getattr(self.logic, "ensure_pending_vector_retry_started", None)):
-            task0 = asyncio.create_task(self.logic.ensure_pending_vector_retry_started())
-            self._tasks.append(task0)
+            self._create_task("ensure_pending_vector_retry_started", self.logic.ensure_pending_vector_retry_started())
 
         # 保存任务引用，以便关闭时取消
-        task1 = asyncio.create_task(self.background_worker())
-        self._tasks.append(task1)
+        self._create_task("background_worker", self.background_worker())
 
         if callable(getattr(self.logic, "_update_persona_daily", None)):
-            task2 = asyncio.create_task(self.daily_persona_scheduler())
-            self._tasks.append(task2)
+            self._create_task("daily_persona_scheduler", self.daily_persona_scheduler())
 
         if callable(getattr(self.logic, "_ensure_chroma_initialized", None)):
-            task3 = asyncio.create_task(self.daily_memory_maintenance())
-            self._tasks.append(task3)
+            self._create_task("daily_memory_maintenance", self.daily_memory_maintenance())
 
         if self.config.get("enable_memory_folding", True) and callable(getattr(self.logic, "fold_weekly_summaries", None)):
-            task4 = asyncio.create_task(self.weekly_folding_scheduler())
-            self._tasks.append(task4)
+            self._create_task("weekly_folding_scheduler", self.weekly_folding_scheduler())
 
         if self.config.get("enable_monthly_folding", True) and callable(getattr(self.logic, "fold_monthly_summaries", None)):
-            task5 = asyncio.create_task(self.monthly_folding_scheduler())
-            self._tasks.append(task5)
+            self._create_task("monthly_folding_scheduler", self.monthly_folding_scheduler())
 
         if self.config.get("enable_yearly_folding", True) and callable(getattr(self.logic, "fold_yearly_summaries", None)):
-            task6 = asyncio.create_task(self.yearly_folding_scheduler())
-            self._tasks.append(task6)
+            self._create_task("yearly_folding_scheduler", self.yearly_folding_scheduler())
     
     def shutdown(self):
         """停止调度器（设置关闭标志）"""
         self._is_shutdown = True
+        self._started = False
 
     def _get_metric(self, task_name: str) -> dict:
         metric = self._task_metrics.get(task_name)
@@ -104,7 +212,7 @@ class MemoryScheduler:
         metric["runs_total"] += 1
         metric["total_duration_ms"] += duration_ms
         metric["last_duration_ms"] = round(duration_ms, 2)
-        metric["last_run_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        metric["last_run_at"] = self._now().strftime("%Y-%m-%d %H:%M:%S")
 
         if success:
             metric["success_total"] += 1
@@ -155,7 +263,7 @@ class MemoryScheduler:
                     self._observe_run(task_name, started_at, True)
                 except Exception as e:
                     self._observe_run(task_name, started_at, False, e)
-                    raise
+                    await asyncio.sleep(60)
             except asyncio.CancelledError:
                 # 任务被取消（插件关闭）
                 self._observe_skip(task_name, "task_cancelled")
@@ -170,6 +278,7 @@ class MemoryScheduler:
                     break
                 if not self._is_shutdown:
                     logger.error(f"Engram 后台归档任务异常：{e}")
+                await asyncio.sleep(60)
     
     def _calculate_next_check_time(self) -> int:
         """计算下一次检测的休眠时间（秒）"""
@@ -183,7 +292,7 @@ class MemoryScheduler:
         
         # 找出最早需要触发归档的时间
         earliest_trigger = float('inf')
-        for user_id, last_time in self.logic.last_chat_time.items():
+        for user_id, last_time in list(self.logic.last_chat_time.items()):
             if self.logic.unsaved_msg_count.get(user_id, 0) >= min_count:
                 trigger_time = last_time + timeout
                 earliest_trigger = min(earliest_trigger, trigger_time)
@@ -202,11 +311,12 @@ class MemoryScheduler:
         while not self._is_shutdown:
             try:
                 # 计算距离下一个00:00的秒数
-                now = datetime.datetime.now()
+                now = self._now()
                 tomorrow = (now + datetime.timedelta(days=1)).replace(
                     hour=0, minute=0, second=0, microsecond=0
                 )
-                sleep_seconds = (tomorrow - now).total_seconds()
+                sleep_seconds = self._calculate_sleep_until(tomorrow, now)
+                run_key = tomorrow.strftime("%Y-%m-%d")
 
                 logger.info(f"Engram：每日画像更新已调度，距离执行约 {sleep_seconds/3600:.1f} 小时")
                 await asyncio.sleep(sleep_seconds)
@@ -225,13 +335,20 @@ class MemoryScheduler:
                     break
 
                 # 执行画像更新 - 带并发控制和延迟
+                if not self._should_run_window(task_name, run_key, tomorrow):
+                    self._observe_skip(task_name, "run_window_already_completed")
+                    continue
+
                 started_at = time.perf_counter()
                 try:
                     await self._execute_daily_persona_update()
                     self._observe_run(task_name, started_at, True)
+                    self._mark_run_window_complete(task_name, run_key, tomorrow)
                 except Exception as e:
                     self._observe_run(task_name, started_at, False, e)
-                    raise
+                    if not self._is_shutdown:
+                        logger.error("Engram daily persona scheduler failed: %s", e)
+                    await asyncio.sleep(60)
 
             except asyncio.CancelledError:
                 # 任务被取消（插件关闭）
@@ -277,7 +394,7 @@ class MemoryScheduler:
 
                     # 关键修复：00:00 执行时应该查询的是【昨天】的记忆，而不是【今天】
                     # 因为 00:00 时"今天"刚开始，还没有任何记忆
-                    now = datetime.datetime.now()
+                    now = self._naive_local(self._now())
                     yesterday_start = (now - datetime.timedelta(days=1)).replace(
                         hour=0, minute=0, second=0, microsecond=0
                     )
@@ -345,8 +462,8 @@ class MemoryScheduler:
 
     def _calculate_next_monthly_run(self, now: datetime.datetime, run_day: int, run_hour: int) -> datetime.datetime:
         """计算下一次月总结执行时间。"""
-        run_day = max(1, min(31, int(run_day)))
-        run_hour = max(0, min(23, int(run_hour)))
+        run_day = self._safe_int(run_day, default=1, min_value=1, max_value=31)
+        run_hour = self._safe_int(run_hour, default=3, min_value=0, max_value=23)
 
         curr_last_day = calendar.monthrange(now.year, now.month)[1]
         curr_day = min(run_day, curr_last_day)
@@ -362,7 +479,7 @@ class MemoryScheduler:
 
         next_last_day = calendar.monthrange(year, month)[1]
         next_day = min(run_day, next_last_day)
-        return datetime.datetime(year, month, next_day, run_hour, 0, 0)
+        return datetime.datetime(year, month, next_day, run_hour, 0, 0, tzinfo=now.tzinfo)
 
     def _calculate_next_yearly_run(
         self,
@@ -372,29 +489,29 @@ class MemoryScheduler:
         run_hour: int
     ) -> datetime.datetime:
         """计算下一次年度总结执行时间。"""
-        run_month = max(1, min(12, int(run_month)))
-        run_day = max(1, min(31, int(run_day)))
-        run_hour = max(0, min(23, int(run_hour)))
+        run_month = self._safe_int(run_month, default=1, min_value=1, max_value=12)
+        run_day = self._safe_int(run_day, default=1, min_value=1, max_value=31)
+        run_hour = self._safe_int(run_hour, default=4, min_value=0, max_value=23)
 
         curr_last_day = calendar.monthrange(now.year, run_month)[1]
         curr_day = min(run_day, curr_last_day)
-        candidate = datetime.datetime(now.year, run_month, curr_day, run_hour, 0, 0)
+        candidate = datetime.datetime(now.year, run_month, curr_day, run_hour, 0, 0, tzinfo=now.tzinfo)
         if candidate > now:
             return candidate
 
         next_last_day = calendar.monthrange(now.year + 1, run_month)[1]
         next_day = min(run_day, next_last_day)
-        return datetime.datetime(now.year + 1, run_month, next_day, run_hour, 0, 0)
+        return datetime.datetime(now.year + 1, run_month, next_day, run_hour, 0, 0, tzinfo=now.tzinfo)
 
     async def weekly_folding_scheduler(self):
         """每周调度周总结折叠任务（默认周日 02:00）"""
         task_name = "weekly_folding_scheduler"
-        run_weekday = int(self.config.get("weekly_folding_weekday", 6))  # 0=周一, 6=周日
-        run_hour = int(self.config.get("weekly_folding_hour", 2))
 
         while not self._is_shutdown:
             try:
-                now = datetime.datetime.now()
+                run_weekday = self._safe_int(self.config.get("weekly_folding_weekday", 6), default=6, min_value=0, max_value=6)
+                run_hour = self._safe_int(self.config.get("weekly_folding_hour", 2), default=2, min_value=0, max_value=23)
+                now = self._now()
                 next_run = now.replace(hour=run_hour, minute=0, second=0, microsecond=0)
 
                 days_ahead = (run_weekday - now.weekday()) % 7
@@ -407,7 +524,8 @@ class MemoryScheduler:
                     microsecond=0
                 )
 
-                sleep_seconds = max(1, int((next_run - now).total_seconds()))
+                sleep_seconds = self._calculate_sleep_until(next_run, now)
+                run_key = next_run.strftime("%Y-W%W")
                 logger.info(
                     "Engram：周折叠已调度，距离执行约 %.1f 小时",
                     sleep_seconds / 3600
@@ -422,13 +540,20 @@ class MemoryScheduler:
                     self._is_shutdown = True
                     break
 
+                if not self._should_run_window(task_name, run_key, next_run):
+                    self._observe_skip(task_name, "run_window_already_completed")
+                    continue
+
                 started_at = time.perf_counter()
                 try:
                     await self._execute_weekly_folding()
                     self._observe_run(task_name, started_at, True)
+                    self._mark_run_window_complete(task_name, run_key, next_run)
                 except Exception as e:
                     self._observe_run(task_name, started_at, False, e)
-                    raise
+                    if not self._is_shutdown:
+                        logger.error("Engram weekly folding scheduler failed: %s", e)
+                    await asyncio.sleep(60)
             except asyncio.CancelledError:
                 self._observe_skip(task_name, "task_cancelled")
                 logger.debug("Engram：周折叠调度器任务已取消")
@@ -445,14 +570,15 @@ class MemoryScheduler:
     async def monthly_folding_scheduler(self):
         """每月调度月总结折叠任务（默认每月 1 号 03:00）。"""
         task_name = "monthly_folding_scheduler"
-        run_day = int(self.config.get("monthly_folding_day", 1))
-        run_hour = int(self.config.get("monthly_folding_hour", 3))
 
         while not self._is_shutdown:
             try:
-                now = datetime.datetime.now()
+                run_day = self._safe_int(self.config.get("monthly_folding_day", 1), default=1, min_value=1, max_value=31)
+                run_hour = self._safe_int(self.config.get("monthly_folding_hour", 3), default=3, min_value=0, max_value=23)
+                now = self._now()
                 next_run = self._calculate_next_monthly_run(now, run_day, run_hour)
-                sleep_seconds = max(1, int((next_run - now).total_seconds()))
+                sleep_seconds = self._calculate_sleep_until(next_run, now)
+                run_key = next_run.strftime("%Y-%m")
 
                 logger.info(
                     "Engram：月折叠已调度，距离执行约 %.1f 小时",
@@ -468,13 +594,20 @@ class MemoryScheduler:
                     self._is_shutdown = True
                     break
 
+                if not self._should_run_window(task_name, run_key, next_run):
+                    self._observe_skip(task_name, "run_window_already_completed")
+                    continue
+
                 started_at = time.perf_counter()
                 try:
                     await self._execute_monthly_folding()
                     self._observe_run(task_name, started_at, True)
+                    self._mark_run_window_complete(task_name, run_key, next_run)
                 except Exception as e:
                     self._observe_run(task_name, started_at, False, e)
-                    raise
+                    if not self._is_shutdown:
+                        logger.error("Engram monthly folding scheduler failed: %s", e)
+                    await asyncio.sleep(60)
             except asyncio.CancelledError:
                 self._observe_skip(task_name, "task_cancelled")
                 logger.debug("Engram：月折叠调度器任务已取消")
@@ -491,15 +624,16 @@ class MemoryScheduler:
     async def yearly_folding_scheduler(self):
         """每年调度年度总结折叠任务（默认每年 1 月 1 日 04:00）。"""
         task_name = "yearly_folding_scheduler"
-        run_month = int(self.config.get("yearly_folding_month", 1))
-        run_day = int(self.config.get("yearly_folding_day", 1))
-        run_hour = int(self.config.get("yearly_folding_hour", 4))
 
         while not self._is_shutdown:
             try:
-                now = datetime.datetime.now()
+                run_month = self._safe_int(self.config.get("yearly_folding_month", 1), default=1, min_value=1, max_value=12)
+                run_day = self._safe_int(self.config.get("yearly_folding_day", 1), default=1, min_value=1, max_value=31)
+                run_hour = self._safe_int(self.config.get("yearly_folding_hour", 4), default=4, min_value=0, max_value=23)
+                now = self._now()
                 next_run = self._calculate_next_yearly_run(now, run_month, run_day, run_hour)
-                sleep_seconds = max(1, int((next_run - now).total_seconds()))
+                sleep_seconds = self._calculate_sleep_until(next_run, now)
+                run_key = next_run.strftime("%Y")
 
                 logger.info(
                     "Engram：年折叠已调度，距离执行约 %.1f 小时",
@@ -515,13 +649,20 @@ class MemoryScheduler:
                     self._is_shutdown = True
                     break
 
+                if not self._should_run_window(task_name, run_key, next_run):
+                    self._observe_skip(task_name, "run_window_already_completed")
+                    continue
+
                 started_at = time.perf_counter()
                 try:
                     await self._execute_yearly_folding()
                     self._observe_run(task_name, started_at, True)
+                    self._mark_run_window_complete(task_name, run_key, next_run)
                 except Exception as e:
                     self._observe_run(task_name, started_at, False, e)
-                    raise
+                    if not self._is_shutdown:
+                        logger.error("Engram yearly folding scheduler failed: %s", e)
+                    await asyncio.sleep(60)
             except asyncio.CancelledError:
                 self._observe_skip(task_name, "task_cancelled")
                 logger.debug("Engram：年折叠调度器任务已取消")
@@ -542,9 +683,9 @@ class MemoryScheduler:
             self._observe_skip(task_name, "weekly_folding_disabled")
             return
 
-        folding_days = int(self.config.get("weekly_folding_days", 7))
-        delay = int(self.config.get("weekly_folding_delay", 1))
-        jitter = int(self.config.get("weekly_folding_jitter", 0))
+        folding_days = self._safe_int(self.config.get("weekly_folding_days", 7), default=7, min_value=1)
+        delay = self._safe_int(self.config.get("weekly_folding_delay", 1), default=1, min_value=0)
+        jitter = self._safe_int(self.config.get("weekly_folding_jitter", 0), default=0, min_value=0)
 
         user_ids = list(self.logic.last_chat_time.keys())
         if not user_ids:
@@ -587,9 +728,9 @@ class MemoryScheduler:
             self._observe_skip(task_name, "monthly_folding_disabled")
             return
 
-        folding_days = int(self.config.get("monthly_folding_days", 30))
-        delay = int(self.config.get("monthly_folding_delay", 1))
-        jitter = int(self.config.get("monthly_folding_jitter", 0))
+        folding_days = self._safe_int(self.config.get("monthly_folding_days", 30), default=30, min_value=1)
+        delay = self._safe_int(self.config.get("monthly_folding_delay", 1), default=1, min_value=0)
+        jitter = self._safe_int(self.config.get("monthly_folding_jitter", 0), default=0, min_value=0)
 
         loop = asyncio.get_event_loop()
         try:
@@ -646,9 +787,9 @@ class MemoryScheduler:
             self._observe_skip(task_name, "yearly_folding_disabled")
             return
 
-        folding_days = int(self.config.get("yearly_folding_days", 365))
-        delay = int(self.config.get("yearly_folding_delay", 1))
-        jitter = int(self.config.get("yearly_folding_jitter", 0))
+        folding_days = self._safe_int(self.config.get("yearly_folding_days", 365), default=365, min_value=1)
+        delay = self._safe_int(self.config.get("yearly_folding_delay", 1), default=1, min_value=0)
+        jitter = self._safe_int(self.config.get("yearly_folding_jitter", 0), default=0, min_value=0)
 
         loop = asyncio.get_event_loop()
         try:
@@ -706,11 +847,12 @@ class MemoryScheduler:
         while not self._is_shutdown:
             try:
                 # 计算距离下一个 01:00 的秒数
-                now = datetime.datetime.now()
+                now = self._now()
                 next_run = now.replace(hour=1, minute=0, second=0, microsecond=0)
                 if now >= next_run:
                     next_run += datetime.timedelta(days=1)
-                sleep_seconds = (next_run - now).total_seconds()
+                sleep_seconds = self._calculate_sleep_until(next_run, now)
+                run_key = next_run.strftime("%Y-%m-%d")
 
                 logger.info(f"Engram：记忆维护已调度，距离执行约 {sleep_seconds/3600:.1f} 小时")
                 await asyncio.sleep(sleep_seconds)
@@ -723,13 +865,20 @@ class MemoryScheduler:
                     self._is_shutdown = True
                     break
 
+                if not self._should_run_window(task_name, run_key, next_run):
+                    self._observe_skip(task_name, "run_window_already_completed")
+                    continue
+
                 started_at = time.perf_counter()
                 try:
                     await self._execute_memory_maintenance()
                     self._observe_run(task_name, started_at, True)
+                    self._mark_run_window_complete(task_name, run_key, next_run)
                 except Exception as e:
                     self._observe_run(task_name, started_at, False, e)
-                    raise
+                    if not self._is_shutdown:
+                        logger.error("Engram daily memory maintenance failed: %s", e)
+                    await asyncio.sleep(60)
 
             except asyncio.CancelledError:
                 self._observe_skip(task_name, "task_cancelled")
@@ -751,9 +900,9 @@ class MemoryScheduler:
         loop = asyncio.get_event_loop()
 
         enable_decay = self.config.get("enable_memory_decay", True)
-        decay_rate = self.config.get("memory_decay_rate", 1)
+        decay_rate = self._safe_int(self.config.get("memory_decay_rate", 1), default=1, min_value=0)
         enable_prune = self.config.get("enable_memory_prune", True)
-        prune_threshold = self.config.get("memory_prune_threshold", 0)
+        prune_threshold = self._safe_int(self.config.get("memory_prune_threshold", 0), default=0)
         had_error = False
 
         if (not enable_decay or decay_rate <= 0) and not enable_prune:

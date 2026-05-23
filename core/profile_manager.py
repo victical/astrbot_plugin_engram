@@ -9,6 +9,7 @@ import json
 import copy
 import asyncio
 import datetime
+import tempfile
 from datetime import date
 from typing import Any, Dict, List
 
@@ -97,6 +98,32 @@ class ProfileManager:
     def _get_profile_history_path(self, user_id):
         return os.path.join(self.history_dir, f"{user_id}.json")
 
+    def _atomic_write_json(self, path: str, payload: Any, *, indent: int = 4) -> None:
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=directory,
+                prefix=f".{os.path.basename(path)}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                json.dump(payload, tmp, ensure_ascii=False, indent=indent)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    logger.debug("Engram profile manager failed to remove temp file: %s", tmp_path)
+
     async def get_user_profile(self, user_id):
         loop = asyncio.get_event_loop()
         path = self._get_profile_path(user_id)
@@ -167,8 +194,7 @@ class ProfileManager:
 
             profile = _merge_value(profile, update_data)
 
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(profile, f, ensure_ascii=False, indent=4)
+            self._atomic_write_json(path, profile, indent=4)
             return profile
 
         return await loop.run_in_executor(self.executor, _update)
@@ -228,8 +254,7 @@ class ProfileManager:
                 meta["fields"] = fields
                 profile["_meta"] = meta
 
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(profile, f, ensure_ascii=False, indent=4)
+            self._atomic_write_json(path, profile, indent=4)
 
             return True, "删除成功"
 
@@ -268,8 +293,7 @@ class ProfileManager:
         limit = max(1, int(self._profile_history_limit))
         trimmed = history[-limit:]
 
-        with open(history_path, 'w', encoding='utf-8') as f:
-            json.dump(trimmed, f, ensure_ascii=False, indent=2)
+        self._atomic_write_json(history_path, trimmed, indent=2)
 
     def _snapshot_profile(self, user_id: str, profile: Dict[str, Any]):
         if not isinstance(profile, dict):
@@ -278,7 +302,7 @@ class ProfileManager:
         history = self._load_profile_history(user_id)
         history.append({
             "snapshot_at": datetime.datetime.now().isoformat(),
-            "profile": profile,
+            "profile": copy.deepcopy(profile),
         })
         self._save_profile_history(user_id, history)
 
@@ -312,8 +336,7 @@ class ProfileManager:
                 }
 
             path = self._get_profile_path(user_id)
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(target, f, ensure_ascii=False, indent=4)
+            self._atomic_write_json(path, target, indent=4)
 
             remain_history = history[:-steps_int]
             self._save_profile_history(user_id, remain_history)
@@ -538,8 +561,7 @@ class ProfileManager:
 
             def _write():
                 self._snapshot_profile(user_id, current_persona)
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(validated_persona, f, ensure_ascii=False, indent=4)
+                self._atomic_write_json(path, validated_persona, indent=4)
 
             await loop.run_in_executor(self.executor, _write)
 

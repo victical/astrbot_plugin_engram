@@ -18,7 +18,7 @@ _LLM_INTENT_PROMPT = (
     "长期记忆包含用户的历史对话、个人偏好、过去事件等信息。\n"
     "只有当用户在询问过去的事情、引用之前的对话、或问题需要了解用户历史才能正确回答时，才需要调用。\n"
     "日常寒暄、简单问候、即时性问题（如天气、时间）不需要调用。\n\n"
-    "用户消息：{query}\n\n"
+    "用户消息：{{query}}\n\n"
     "请只回答一个字：是 或 否"
 )
 
@@ -93,12 +93,44 @@ class IntentClassifier:
             re.compile(pattern) for pattern in _EVENT_NARRATIVE_PATTERNS
         )
 
+    def _refresh_config(self):
+        mode = str(self._config.get("memory_intent_mode", "keyword")).strip().lower()
+        if mode not in ("disabled", "keyword", "llm"):
+            logger.warning(f"Engram 意图分类器：未知模式 '{mode}'，已回退到 'keyword'")
+            mode = "keyword"
+        self._mode = mode
+
+        raw_min_len = self._config.get("intent_min_length", 4)
+        try:
+            val = int(raw_min_len) if str(raw_min_len).strip() else 4
+        except (ValueError, TypeError):
+            val = 4
+        self._min_length = max(1, val)
+
+        self._weak_triggers = self._parse_weak_triggers()
+        self._pattern_mode = self._parse_bool(self._config.get("intent_pattern_mode", True), default=True)
+        self._trigger_score_threshold = self._parse_trigger_threshold()
+
+    @staticmethod
+    def _parse_bool(value, default: bool = True) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on", "enable", "enabled"):
+            return True
+        if text in ("0", "false", "no", "off", "disable", "disabled"):
+            return False
+        return default
+
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
 
     async def should_retrieve_memory(self, query: str) -> bool:
         """判断是否需要检索长期记忆（异步，兼容 LLM 模式）"""
+        self._refresh_config()
         if self._mode == "disabled":
             return True
 
@@ -130,6 +162,7 @@ class IntentClassifier:
         - preference_fact: 偏好/事实类（适合更强调关键词精确性）
         - event_narrative: 事件叙事类（适合综合语义与关键词）
         """
+        self._refresh_config()
         if query is None:
             return "skip", 0.0
 
@@ -241,7 +274,7 @@ class IntentClassifier:
                 logger.warning("Engram 意图分类器：无可用 LLM 提供商，已回退到 keyword")
                 return self._keyword_check(text)
 
-            prompt = _LLM_INTENT_PROMPT.format(query=text)
+            prompt = _LLM_INTENT_PROMPT.replace("{{query}}", text)
             resp = await provider.text_chat(prompt=prompt)
             answer = resp.completion_text.strip() if resp.completion_text else ""
 
