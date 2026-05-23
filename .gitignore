@@ -47,3 +47,5 @@ sync_engram.sh
 .claude/
 .pytest_cache/
 .github/
+.worktrees/
+worktrees/
