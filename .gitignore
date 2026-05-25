@@ -49,3 +49,5 @@ sync_engram.sh
 .github/
 .worktrees/
 worktrees/
+.codex-tasks/
+.ruff_cache/
