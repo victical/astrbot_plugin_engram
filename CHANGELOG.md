@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.9] - 2026-05-25
+
+### Fixed
+- **数据库膨胀修复**：修复 `DatabaseManager._bind_model()` 使用 Python 内存地址作为模型类名后缀导致每次重启都创建重复索引的问题。该 bug 会导致数据库文件在数百次重启后膨胀至 1GB 以上，实际数据仅占约 30MB。修复后使用固定类名，不再产生孤儿索引。
+  - 已受影响的用户请参阅 README 中的 [已知问题与修复] 章节执行清理。
+
 ## [1.6.8] - 2026-04-05
 
 ### Added

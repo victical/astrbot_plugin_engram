@@ -108,7 +108,7 @@ class DatabaseManager:
             },
         )
         return type(
-            f"{model_cls.__name__}Bound_{id(database)}",
+            model_cls.__name__,
             (model_cls,),
             {"Meta": meta},
         )

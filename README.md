@@ -2,7 +2,9 @@
 
 ![Visitor Count](https://count.getloli.com/get/@:victical-astrbot_plugin_engram?theme=moebooru)
 
-`astrbot_plugin_engram` 是一款为 Astrbot 设计的工业级长期记忆增强插件。它模仿人类大脑的记忆机制，通过“双轨制”架构解决了 LLM 在即时通讯场景下记忆碎片化、遗忘快、无法回溯原文等痛点。
+`astrbot_plugin_engram` 是一款为 Astrbot 设计的工业级长期记忆增强插件。它模仿人类大脑的记忆机制，通过”双轨制”架构解决了 LLM 在即时通讯场景下记忆碎片化、遗忘快、无法回溯原文等痛点。
+
+> ⚠️ **如果你的数据库文件异常膨胀（数百 MB 甚至超过 1GB），请参阅 [已知问题与修复](#-已知问题与修复) 章节。**
 
 当前版本已支持：
 - **群聊记忆**：群聊长期记忆独立存储、检索、删除与归档。
@@ -181,6 +183,41 @@ data/plugins_data/astrbot_plugin_engram/exports/
 - **群聊检索私聊记忆**：`group_memory_allow_private_recall` 启用后群聊检索包含私聊。
 - **SQLite BM25 兜底开关**：`enable_sqlite_bm25_fallback`，默认开启。向量检索不可用/为空时优先使用 FTS5 BM25 候选召回；关闭后使用旧 LIKE contains。
 - **WebUI 访问密码**：`webui_access_password`。如需修改 WebUI 登录密码，请直接修改该配置项并重启插件；当前不支持在线改密码。
+
+## 🔧 已知问题与修复
+
+### 数据库文件异常膨胀（v1.6.7 及更早版本）
+
+**现象**：`engram_memories.db` 或 `engram_memories_group.db` 文件体积远超预期（数百 MB 甚至超过 1GB），但实际消息数据量很小。
+
+**原因**：`DatabaseManager._bind_model()` 在为 peewee 模型绑定数据库时，使用了 Python 对象的内存地址作为类名后缀（`Bound_{id(database)}`）。由于内存地址在每次进程重启后都会变化，peewee 的 `create_tables()` 每次都会为"新"类名创建一整套索引，而旧索引永远不会被清理。经过数百次重启后，数千个孤儿索引累积占满了磁盘空间。
+
+**诊断方法**：
+
+```bash
+sqlite3 /path/to/engram_memories.db "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE '%bound_%';"
+```
+
+如果返回值远大于 0（正常应为 0），说明存在此问题。
+
+**修复方法**：
+
+1. 停止 AstrBot
+2. 备份数据库文件
+3. 执行清理：
+
+```bash
+DB="/path/to/engram_memories.db"
+# 删除所有孤儿索引
+sqlite3 "$DB" "SELECT 'DROP INDEX IF EXISTS \"' || name || '\";' FROM sqlite_master WHERE type='index' AND name LIKE '%bound_%';" | sqlite3 "$DB"
+# 回收空间
+sqlite3 "$DB" "VACUUM;"
+```
+
+4. 如果启用了群聊记忆，对 `engram_memories_group.db` 执行同样操作
+5. 重启 AstrBot
+
+升级到修复版本后，重启不再产生新的孤儿索引。
 
 ## 🚀 安装
 
