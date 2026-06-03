@@ -1,7 +1,7 @@
 """
 LLM 工具命令处理器 (Memory Tool Handler)
 
-负责 mem_search_tool / overview / detail 等工具检索输出构建。
+负责 memory_recall / session_search 等 LLM 工具输出构建。
 将 main.py 中的工具输出业务逻辑下沉，main 仅保留路由与参数收口。
 """
 
@@ -34,7 +34,7 @@ class MemoryToolHandler:
             "time_filter": time_desc or "",
             "source_types": list(normalized_types or []),
             "results": [item.to_dict() if hasattr(item, "to_dict") else item for item in results],
-            "usage_hint": "如需查看某条记忆的完整原始对话，请使用 mem_get_detail_tool 并传入 memory_id 或 memory_ids。",
+            "usage_hint": "如需查找具体原始对话片段，请使用 session_search，并提供明确关键词。",
         }
         if extra_hint:
             payload["extra_hint"] = extra_hint
@@ -136,10 +136,10 @@ class MemoryToolHandler:
         try:
             start_time, end_time, time_desc = parse_time_expr(parse_target)
         except re.error as e:
-            logger.warning(f"Engram mem_search_tool：time_expr 正则解析失败：{e}")
+            logger.warning(f"Engram memory_recall：time_expr 正则解析失败：{e}")
             start_time, end_time, time_desc = None, None, ""
         except Exception as e:
-            logger.warning(f"Engram mem_search_tool：解析 time_expr 失败：{e}")
+            logger.warning(f"Engram memory_recall：解析 time_expr 失败：{e}")
             start_time, end_time, time_desc = None, None, ""
 
         normalized_types = normalize_source_types(source_types, default_types=default_types)
@@ -174,7 +174,7 @@ class MemoryToolHandler:
                     for item in legacy_results
                 ]
         except Exception as e:
-            logger.error(f"Engram mem_search_tool 异常：{e}")
+            logger.error(f"Engram memory_recall 异常：{e}")
             return "工具检索失败，请稍后重试。"
 
         if not results:
@@ -189,3 +189,58 @@ class MemoryToolHandler:
             normalized_types=normalized_types,
             extra_hint=extra_hint,
         )
+
+    async def build_session_search_output(
+        self,
+        *,
+        event,
+        query: str,
+        window: int = 5,
+        limit: int = 3,
+        get_search_results,
+    ) -> str:
+        """构建原始会话检索工具输出。"""
+        if not self.config.get("enable_memory_search_tool", True):
+            return "记忆检索工具已关闭。"
+
+        query = str(query or "").strip()
+        if not query:
+            return "query 不能为空，请提供要检索的原文关键词。"
+
+        try:
+            max_results = int(self.config.get("memory_search_tool_max_results", 3))
+        except (TypeError, ValueError):
+            max_results = 3
+        max_results = max(1, min(10, max_results))
+
+        try:
+            request_limit = int(limit)
+        except (TypeError, ValueError):
+            request_limit = max_results
+        final_limit = max(1, min(10, request_limit, max_results))
+
+        try:
+            final_window = int(window)
+        except (TypeError, ValueError):
+            final_window = 5
+        final_window = max(0, min(20, final_window))
+
+        try:
+            results = await get_search_results(event, query, final_limit, final_window)
+        except Exception as e:
+            logger.error(f"Engram session_search 异常：{e}")
+            return "原文检索失败，请稍后重试。"
+
+        results = list(results or [])[:final_limit]
+        if not results:
+            return f"未检索到与“{query}”相关的原始对话。"
+
+        payload = {
+            "type": "session_search_result",
+            "title": "🎙️ 原始会话检索结果",
+            "query": query,
+            "count": len(results),
+            "window": final_window,
+            "results": results,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)

@@ -160,6 +160,7 @@ class DatabaseManager:
         ])
         self._migrate_schema_if_needed()
         self._ensure_memory_index_fts()
+        self._ensure_raw_memory_fts()
         self.db.close()
 
     def close_thread_connection(self):
@@ -302,6 +303,78 @@ class DatabaseManager:
             if int(fts_count or 0) == 0:
                 self.db.execute_sql(f"INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')")
 
+    def _ensure_raw_memory_fts(self):
+        """为 RawMemory 构建 FTS5 索引，用于原始会话关键词检索。"""
+        table_name = self.RawMemory._meta.table_name
+        fts_table = f"{table_name}_fts"
+
+        with self.db.connection_context():
+            self.db.execute_sql(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table}
+                USING fts5(
+                    content,
+                    user_id UNINDEXED,
+                    session_id UNINDEXED,
+                    timestamp UNINDEXED,
+                    content='{table_name}',
+                    content_rowid='rowid',
+                    tokenize='unicode61'
+                )
+                """
+            )
+            self.db.execute_sql(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table_name}_ai
+                AFTER INSERT ON {table_name}
+                BEGIN
+                    INSERT INTO {fts_table}(rowid, content, user_id, session_id, timestamp)
+                    VALUES (new.rowid, new.content, new.user_id, new.session_id, new.timestamp);
+                END;
+                """
+            )
+            self.db.execute_sql(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table_name}_ad
+                AFTER DELETE ON {table_name}
+                BEGIN
+                    INSERT INTO {fts_table}({fts_table}, rowid, content, user_id, session_id, timestamp)
+                    VALUES('delete', old.rowid, old.content, old.user_id, old.session_id, old.timestamp);
+                END;
+                """
+            )
+            self.db.execute_sql(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {table_name}_au
+                AFTER UPDATE ON {table_name}
+                BEGIN
+                    INSERT INTO {fts_table}({fts_table}, rowid, content, user_id, session_id, timestamp)
+                    VALUES('delete', old.rowid, old.content, old.user_id, old.session_id, old.timestamp);
+                    INSERT INTO {fts_table}(rowid, content, user_id, session_id, timestamp)
+                    VALUES (new.rowid, new.content, new.user_id, new.session_id, new.timestamp);
+                END;
+                """
+            )
+
+            try:
+                fts_count = self.db.execute_sql(f"SELECT COUNT(1) FROM {fts_table}").fetchone()[0]
+            except Exception:
+                fts_count = 0
+            if int(fts_count or 0) == 0:
+                self.db.execute_sql(f"INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')")
+
+    @staticmethod
+    def _build_fts_match_expr(tokens):
+        """构建安全的 FTS MATCH 表达式。"""
+        match_tokens = []
+        for token in tokens[:24]:
+            safe = re.sub(r'[\x00-\x1f\x7f"]', ' ', token).replace('"', '""').strip()
+            if len(safe) > 64:
+                safe = safe[:64]
+            if safe:
+                match_tokens.append(f'"{safe}"')
+        return " OR ".join(match_tokens)
+
 
     def _ensure_index_exists(self, table_name: str, index_name: str, column_name: str, available_columns=None):
         available_columns = available_columns or set()
@@ -428,6 +501,140 @@ class DatabaseManager:
 
         return result_map
 
+    @staticmethod
+    def _raw_memory_to_dict(row):
+        timestamp = getattr(row, "timestamp", None)
+        if isinstance(timestamp, datetime.datetime):
+            timestamp_value = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            timestamp_value = str(timestamp or "")
+        return {
+            "uuid": str(getattr(row, "uuid", "") or ""),
+            "session_id": str(getattr(row, "session_id", "") or ""),
+            "user_id": str(getattr(row, "user_id", "") or ""),
+            "group_id": str(getattr(row, "group_id", "") or ""),
+            "member_id": str(getattr(row, "member_id", "") or ""),
+            "user_name": str(getattr(row, "user_name", "") or ""),
+            "role": str(getattr(row, "role", "") or ""),
+            "content": str(getattr(row, "content", "") or ""),
+            "msg_type": str(getattr(row, "msg_type", "") or ""),
+            "timestamp": timestamp_value,
+        }
+
+    def _search_raw_memory_sessions_like(self, user_id, query, limit=5):
+        query_text = str(query or "").strip()
+        if not query_text:
+            return []
+        with self.db.connection_context():
+            rows = (
+                self.RawMemory.select()
+                .where(
+                    (self.RawMemory.user_id == str(user_id))
+                    & (self.RawMemory.content.contains(query_text))
+                )
+                .order_by(self.RawMemory.timestamp.desc())
+                .limit(limit)
+            )
+            return list(rows)
+
+    def _search_raw_memory_sessions_fts(self, user_id, query, limit=5):
+        keywords = [part for part in re.split(r"\s+", str(query or "").strip()) if part]
+        match_expr = self._build_fts_match_expr(keywords)
+        if not match_expr:
+            return []
+
+        table_name = self.RawMemory._meta.table_name
+        fts_table = f"{table_name}_fts"
+        sql = f"""
+            SELECT rm.uuid
+            FROM {fts_table}
+            JOIN {table_name} AS rm ON rm.rowid = {fts_table}.rowid
+            WHERE rm.user_id = ? AND {fts_table} MATCH ?
+            ORDER BY bm25({fts_table}) ASC, rm.timestamp DESC
+            LIMIT ?
+        """
+        rows = self.db.execute_sql(sql, [str(user_id), match_expr, limit]).fetchall()
+        ordered_ids = [str(row[0]) for row in rows if row and row[0]]
+        if not ordered_ids:
+            return []
+        raw_by_uuid = {
+            item.uuid: item
+            for item in self.RawMemory.select().where(self.RawMemory.uuid << ordered_ids)
+        }
+        return [raw_by_uuid[uuid] for uuid in ordered_ids if uuid in raw_by_uuid]
+
+    def search_raw_memory_sessions(self, user_id, query, limit=3, window=5):
+        """搜索原始消息，并返回每条命中的同会话上下文窗口。"""
+        query_text = str(query or "").strip()
+        if not query_text:
+            return []
+
+        try:
+            final_limit = max(1, min(10, int(limit)))
+        except (TypeError, ValueError):
+            final_limit = 3
+        try:
+            final_window = max(0, min(20, int(window)))
+        except (TypeError, ValueError):
+            final_window = 5
+
+        with self.db.connection_context():
+            try:
+                matches = self._search_raw_memory_sessions_fts(str(user_id), query_text, final_limit)
+            except Exception as e:
+                logger.warning("Engram：RawMemory FTS5 检索失败，回退 LIKE：%s", e)
+                matches = []
+
+            if not matches:
+                matches = self._search_raw_memory_sessions_like(str(user_id), query_text, final_limit)
+
+            results = []
+            seen = set()
+            for match in matches:
+                if match.uuid in seen:
+                    continue
+                seen.add(match.uuid)
+
+                before_rows = list(
+                    self.RawMemory.select()
+                    .where(
+                        (self.RawMemory.user_id == str(user_id))
+                        & (self.RawMemory.session_id == match.session_id)
+                        & (
+                            (self.RawMemory.timestamp < match.timestamp)
+                            | (
+                                (self.RawMemory.timestamp == match.timestamp)
+                                & (self.RawMemory.uuid < match.uuid)
+                            )
+                        )
+                    )
+                    .order_by(self.RawMemory.timestamp.desc(), self.RawMemory.uuid.desc())
+                    .limit(final_window)
+                )
+                after_rows = list(
+                    self.RawMemory.select()
+                    .where(
+                        (self.RawMemory.user_id == str(user_id))
+                        & (self.RawMemory.session_id == match.session_id)
+                        & (
+                            (self.RawMemory.timestamp > match.timestamp)
+                            | (
+                                (self.RawMemory.timestamp == match.timestamp)
+                                & (self.RawMemory.uuid > match.uuid)
+                            )
+                        )
+                    )
+                    .order_by(self.RawMemory.timestamp.asc(), self.RawMemory.uuid.asc())
+                    .limit(final_window)
+                )
+                context = list(reversed(before_rows)) + [match] + after_rows
+                results.append({
+                    "match": self._raw_memory_to_dict(match),
+                    "context": [self._raw_memory_to_dict(row) for row in context],
+                })
+
+            return results
+
     def get_memory_list(self, user_id, limit=5):
         with self.db.connection_context():
             return list(self.MemoryIndex.select().where(self.MemoryIndex.user_id == user_id).order_by(self.MemoryIndex.created_at.desc()).limit(limit))
@@ -507,14 +714,8 @@ class DatabaseManager:
                 )
 
             # FTS MATCH 表达式：关键词 OR，短语精确匹配
-            match_tokens = []
-            for token in normalized_keywords[:24]:
-                safe = re.sub(r'[\x00-\x1f\x7f"]', ' ', token).replace('"', '""').strip()
-                if len(safe) > 64:
-                    safe = safe[:64]
-                if safe:
-                    match_tokens.append(f'"{safe}"')
-            if not match_tokens:
+            match_expr = self._build_fts_match_expr(normalized_keywords)
+            if not match_expr:
                 return self._search_memory_indexes_by_keywords_like(
                     user_id=user_id,
                     normalized_keywords=normalized_keywords,
@@ -523,7 +724,6 @@ class DatabaseManager:
                     end_time=end_time,
                     source_types=source_types,
                 )
-            match_expr = " OR ".join(match_tokens)
 
             where_sql = ["mi.user_id = ?", f"{fts_table} MATCH ?"]
             params = [str(user_id), match_expr]
@@ -823,6 +1023,7 @@ class StableDatabaseInterface:
         "get_unarchived_raw",
         "mark_as_archived",
         "get_memories_by_uuids",
+        "search_raw_memory_sessions",
         "save_memory_index",
         "get_last_memory_index",
         "get_memory_index_by_id",

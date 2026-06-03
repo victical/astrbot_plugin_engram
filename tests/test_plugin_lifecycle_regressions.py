@@ -199,6 +199,31 @@ def test_webui_settings_read_live_config_values():
     assert plugin._get_webui_settings() == (False, "0.0.0.0", 8080)
 
 
+def test_profile_affinity_is_enabled_by_default_and_can_be_disabled():
+    plugin = EngramPlugin.__new__(EngramPlugin)
+
+    assert plugin._is_profile_affinity_enabled({}) is True
+    assert plugin._is_profile_affinity_enabled({"enable_profile_affinity": True}) is True
+    assert plugin._is_profile_affinity_enabled({"enable_profile_affinity": False}) is False
+
+
+def test_affinity_memory_provider_is_built_regardless_of_profile_affinity_switch():
+    db = object()
+    plugin = EngramPlugin.__new__(EngramPlugin)
+    plugin.logic = SimpleNamespace(db=db)
+
+    # 关闭羁绊展示时，只读适配器仍然构建，好感度插件才能拿到数据源
+    plugin.config = {"enable_profile_affinity": False}
+    provider = plugin._build_affinity_memory_provider()
+    assert provider is not None
+    assert provider.logic is plugin.logic
+    assert provider.db is db
+
+    # 默认（开启）同样构建
+    plugin.config = {}
+    assert plugin._build_affinity_memory_provider() is not None
+
+
 def test_memory_facade_shutdown_does_not_cancel_queued_futures():
     class DummyExecutor:
         def __init__(self):

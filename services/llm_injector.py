@@ -9,8 +9,11 @@ from typing import Dict, List, Any, Optional
 class LLMContextInjector:
     """LLM上下文注入器 - 负责构建画像和记忆文本块并注入到LLM请求"""
     
-    def __init__(self):
-        pass
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+
+    def _is_profile_affinity_enabled(self) -> bool:
+        return bool(self.config.get("enable_profile_affinity", True))
     
     def build_profile_block(self, profile: Dict[str, Any]) -> str:
         """
@@ -78,8 +81,9 @@ class LLMContextInjector:
             lines.append(f"- 讨厌: {dislikes}")
         
         # v2.1 优化：显示羁绊等级
-        status = social.get("relationship_status", "萍水相逢")
-        lines.append(f"- 当前羁绊: {status}")
+        if self._is_profile_affinity_enabled():
+            status = social.get("relationship_status", "萍水相逢")
+            lines.append(f"- 当前羁绊: {status}")
         
         # 交互指令
         lines.append("")
@@ -126,7 +130,9 @@ class LLMContextInjector:
         if favorites:
             traits.append(f"偏好 {'、'.join(favorites)}")
 
-        relationship = str(social.get("relationship_status") or "").strip()
+        relationship = ""
+        if self._is_profile_affinity_enabled():
+            relationship = str(social.get("relationship_status") or "").strip()
 
         head = f"{nickname} (QQ: {qq_id})" if qq_id else nickname
         body_parts = []

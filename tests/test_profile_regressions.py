@@ -117,3 +117,27 @@ def test_profile_renderer_closes_cached_avatar_file(tmp_path, monkeypatch):
 
     assert avatar == {"mode": "RGBA"}
     assert opened and opened[0].closed is True
+
+
+def test_profile_renderer_skips_bond_calculation_when_affinity_disabled(tmp_path):
+    renderer = ProfileRenderer(config={"enable_profile_affinity": False}, plugin_data_dir=str(tmp_path))
+
+    class FailingBondCalculator:
+        def calculate_bond_level(self, *_args, **_kwargs):
+            raise AssertionError("bond calculation should be disabled")
+
+    renderer._bond_calculator = FailingBondCalculator()
+    profile = {
+        "basic_info": {
+            "qq_id": "u1",
+            "nickname": "Alice",
+            "signature": "hello",
+        },
+        "attributes": {},
+        "preferences": {},
+        "social_graph": {},
+    }
+
+    image_bytes = renderer._render_sync("u1", profile, memory_count=10, avatar_img=None, height=900)
+
+    assert image_bytes.startswith(b"\x89PNG")

@@ -318,13 +318,13 @@
         "description": "启用工具化记忆检索",
         "type": "bool",
         "default": true,
-        "hint": "开启后，向模型注入 mem_search_tool 的调用提示。模型在记忆不足时可主动调用工具检索，减少猜测。"
+        "hint": "开启后，向模型注入 memory_recall / session_search 的调用提示。模型在记忆不足时可主动调用工具检索，减少猜测。"
       },
       "memory_search_tool_max_results": {
         "description": "工具检索最大返回条数",
         "type": "int",
         "default": 3,
-        "hint": "限制 mem_search_tool 单次最多返回的记忆条数，范围建议 1-10。"
+        "hint": "限制 memory_recall / session_search 单次最多返回的结果条数，范围建议 1-10。"
       },
       "memory_tool_hint_mode": {
         "description": "工具提示注入策略",
@@ -740,6 +740,12 @@
         "type": "int",
         "default": 90,
         "hint": "likes/dislikes 在超过该天数未出现新证据时会被自动衰减移除。"
+      },
+      "enable_profile_affinity": {
+        "description": "启用画像羁绊功能",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后 /profile show 会显示羁绊等级，LLM 注入画像会包含当前羁绊。关闭后隐藏羁绊展示、移除注入提示词中的羁绊/关系状态。供 astrbot_plugin_affinity 读取画像和记忆的只读适配器始终初始化，不受此开关影响。"
       },
       "show_profile_evidence_in_image": {
         "description": "在画像图片中展示证据摘要",

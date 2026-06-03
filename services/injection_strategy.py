@@ -183,13 +183,12 @@ class ToolHintStrategyService:
     _HINT_TEXT = (
         "【工具提示】\n"
         "仅当当前证据不足以确认用户历史事实时，再调用记忆工具补证。\n"
-        "统一使用 mem_search_tool 检索，不再按概览/细节工具分流。\n"
-        "参数：query(必填)，limit(可选，1-10)，time_expr(可选，时间筛选)，source_types(可选，类型筛选)。\n"
+        "使用 memory_recall 检索长期记忆摘要，适合查历史偏好、事实、计划和归档总结。\n"
+        "memory_recall 参数：query(必填)，limit(可选，1-10)，time_expr(可选，时间筛选)，mode(可选：hybrid/semantic/keyword/recent)。\n"
         "time_expr 示例：2026-01 / 2026-01-01~2026-01-31 / 02-23~03-01（未写年份默认今年）。\n"
-        "若范围过大，请自行按二分法缩小 time_expr 后再次调用 mem_search_tool。\n"
-        "source_types 可选：private, daily_summary, weekly, monthly, yearly。\n"
-        "若需要查看某条记忆对应的更完整原始对话，请继续调用 mem_get_detail_tool。\n"
-        "mem_get_detail_tool 参数：memory_id(必填，8位短ID或完整ID)，max_messages(可选，返回原文条数上限)。\n"
+        "若范围过大，请自行按二分法缩小 time_expr 后再次调用 memory_recall。\n"
+        "使用 session_search 检索原始对话片段，适合查具体说过的话、精确关键词和上下文窗口。\n"
+        "session_search 参数：query(必填)，window(可选，默认5)，limit(可选，1-10)。\n"
     )
 
     def __init__(self, config: dict = None):

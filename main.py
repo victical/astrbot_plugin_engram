@@ -4,12 +4,13 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.message_components import Image, At
 
 # 核心模块
-from .core import MemoryFacade, MemoryScheduler, MemoryManager
+from .core import AffinityMemoryProvider, MemoryFacade, MemoryScheduler, MemoryManager
 from .handlers import MemoryCommandHandler, ProfileCommandHandler, OneBotSyncHandler, MemoryToolHandler
 from .export_handler import ExportHandler
 from .profile_renderer import ProfileRenderer
 from .db_manager import DatabaseManager, StableDatabaseInterface
 from .services import (
+    BondCalculator,
     LLMContextInjector,
     IntentClassifier,
     TopicMemoryCacheService,
@@ -57,6 +58,7 @@ class EngramPlugin(Star):
 
         # 初始化核心组件（统一使用预设合并后的配置）
         self.logic = MemoryFacade(context, self.config, self.plugin_data_dir)
+        self.affinity_memory_provider = self._build_affinity_memory_provider()
         self.export_handler = ExportHandler(self.logic, self.plugin_data_dir)
         self.profile_renderer = ProfileRenderer(self.config, self.plugin_data_dir)
 
@@ -70,7 +72,7 @@ class EngramPlugin(Star):
         )
         self._onebot_handler = OneBotSyncHandler(self.logic._profile_manager, utils_module=utils_module)
         self._tool_handler = MemoryToolHandler(self.config, self.logic)
-        self._llm_injector = LLMContextInjector()
+        self._llm_injector = LLMContextInjector(config=self.config)
         self._intent_classifier = IntentClassifier(config=self.config, context=context)
         self._topic_cache_service = TopicMemoryCacheService(config=self.config)
         self._tool_hint_strategy = ToolHintStrategyService(config=self.config)
@@ -106,6 +108,20 @@ class EngramPlugin(Star):
             except Exception as e:
                 logger.error(f"Engram：WebUI 服务启动失败：{e}")
                 self._webui_server = None
+
+    @staticmethod
+    def _is_profile_affinity_enabled(config: dict) -> bool:
+        return bool((config or {}).get("enable_profile_affinity", True))
+
+    def _build_affinity_memory_provider(self):
+        # 只读适配器始终初始化，供外部 astrbot_plugin_affinity 读取画像与记忆数据。
+        # 它本身是被动数据管道、无副作用，因此不受 enable_profile_affinity（仅控制
+        # Engram 自身羁绊展示/注入）影响，避免关闭羁绊展示时连带禁用好感度插件。
+        return AffinityMemoryProvider(
+            logic=self.logic,
+            db=self.logic.db,
+            bond_calculator=BondCalculator(),
+        )
 
     def _handle_background_task_done(self, task_name: str, task: asyncio.Task):
         try:
@@ -503,6 +519,72 @@ class EngramPlugin(Star):
             resolve_user_id=_resolve_user_id,
         )
 
+    async def _build_session_search_output(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        window: int = 5,
+        limit: int = 3,
+    ) -> str:
+        """构建原始会话检索工具输出（委托给 handler）。"""
+        async def _get_search_results(evt: AstrMessageEvent, q: str, final_limit: int, final_window: int):
+            loop = asyncio.get_running_loop()
+
+            def _tag_results(rows, scope: str):
+                tagged = []
+                for row in rows or []:
+                    if isinstance(row, dict):
+                        item = dict(row)
+                        item["scope"] = scope
+                        tagged.append(item)
+                return tagged
+
+            if evt.get_group_id() and self.config.get("enable_group_memory", False):
+                group_manager = await self._ensure_group_memory_manager()
+                storage_id = self._resolve_group_storage_id(evt.get_group_id(), evt.get_sender_id())
+                group_db = getattr(group_manager, "db", None) if group_manager is not None else None
+                results = []
+                if group_db is not None and callable(getattr(group_db, "search_raw_memory_sessions", None)):
+                    group_rows = await loop.run_in_executor(
+                        self.logic.executor,
+                        group_db.search_raw_memory_sessions,
+                        storage_id,
+                        q,
+                        final_limit,
+                        final_window,
+                    )
+                    results.extend(_tag_results(group_rows, "group"))
+
+                if self.config.get("group_memory_allow_private_recall", False):
+                    private_rows = await loop.run_in_executor(
+                        self.logic.executor,
+                        self.logic.db.search_raw_memory_sessions,
+                        evt.get_sender_id(),
+                        q,
+                        final_limit,
+                        final_window,
+                    )
+                    results.extend(_tag_results(private_rows, "private"))
+                return results[:final_limit]
+
+            private_rows = await loop.run_in_executor(
+                self.logic.executor,
+                self.logic.db.search_raw_memory_sessions,
+                evt.get_sender_id(),
+                q,
+                final_limit,
+                final_window,
+            )
+            return _tag_results(private_rows, "private")
+
+        return await self._tool_handler.build_session_search_output(
+            event=event,
+            query=query,
+            window=window,
+            limit=limit,
+            get_search_results=_get_search_results,
+        )
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req):
         """在调用 LLM 前注入长期记忆和用户画像"""
@@ -814,188 +896,55 @@ class EngramPlugin(Star):
         self._friend_cache.add_friend(user_id)
         logger.debug("Engram：好友缓存新增 user_id=%s", user_id)
 
-    @filter.llm_tool(name="mem_search_tool")
-    async def mem_search_tool(
+    @filter.llm_tool(name="memory_recall")
+    async def memory_recall(
         self,
         event: AstrMessageEvent,
         query: str,
         limit: int = 3,
         time_expr: str = "",
-        source_types: list = None,
         mode: str = "hybrid"
     ) -> str:
-        '''检索长期记忆（通用），仅返回给 LLM，不直接发送给用户；结果包含 memory_id，可继续用于 mem_get_detail_tool。
+        '''检索长期记忆摘要。用于回忆用户历史偏好、事实、计划或已归档对话总结；如需具体原文片段，请改用 session_search。
 
         Args:
             query(string): 检索关键词或问题
-            limit(number): 返回条数上限
-            time_expr(string): 时间范围表达式
-            source_types(array[string]): source_type 过滤
+            limit(number): 返回条数上限，默认 3
+            time_expr(string): 可选时间范围表达式，如 2026-01 / 2026-01-01~2026-01-31
             mode(string): 检索模式，可选 hybrid/semantic/keyword/recent
         '''
-        output = await self._build_memory_search_output(
+        return await self._build_memory_search_output(
             event=event,
             query=query,
             limit=limit,
             time_expr=time_expr,
-            source_types=source_types,
+            source_types=None,
             mode=mode,
             default_types=None,
-            title="🧠 工具检索结果"
+            title="🧠 长期记忆召回结果"
         )
-        return output
 
-    @filter.llm_tool(name="mem_search_overview_tool")
-    async def mem_search_overview_tool(
+    @filter.llm_tool(name="session_search")
+    async def session_search(
         self,
         event: AstrMessageEvent,
         query: str,
+        window: int = 5,
         limit: int = 3,
-        time_expr: str = "",
-        source_types: list = None,
-        mode: str = "hybrid"
     ) -> str:
-        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
-        output = await self._build_memory_search_output(
-            event=event,
-            query=query,
-            limit=limit,
-            time_expr=time_expr,
-            source_types=source_types,
-            mode=mode,
-            default_types=None,
-            title="🧠 工具检索结果"
-        )
-        return output
-
-    @filter.llm_tool(name="mem_search_detail_tool")
-    async def mem_search_detail_tool(
-        self,
-        event: AstrMessageEvent,
-        query: str,
-        limit: int = 3,
-        time_expr: str = "",
-        source_types: list = None,
-        mode: str = "hybrid"
-    ) -> str:
-        '''检索长期记忆（兼容别名，行为同 mem_search_tool）。'''
-        output = await self._build_memory_search_output(
-            event=event,
-            query=query,
-            limit=limit,
-            time_expr=time_expr,
-            source_types=source_types,
-            mode=mode,
-            default_types=None,
-            title="🧠 工具检索结果"
-        )
-        return output
-
-    @filter.llm_tool(name="mem_get_detail_tool")
-    async def mem_get_detail_tool(
-        self,
-        event: AstrMessageEvent,
-        memory_id: str = "",
-        memory_ids: list = None,
-        max_messages: int = 20,
-    ) -> str:
-        '''按记忆 ID 获取更完整的原始对话。
+        '''检索原始对话片段。用于查找具体说过的话、精确关键词、上下文窗口；不做语义总结，直接返回命中消息及前后文。
 
         Args:
-            memory_id(string): 单个记忆 ID，支持 8 位短 ID 或完整 ID
-            memory_ids(array[string]): 多个记忆 ID，按顺序返回详情
-            max_messages(number): 返回原始对话条数上限
+            query(string): 原文关键词或短语
+            window(number): 每条命中前后各返回多少条同会话消息，默认 5
+            limit(number): 命中片段数量上限，默认 3
         '''
-        if not self.config.get("enable_memory_search_tool", True):
-            return "记忆检索工具已关闭。"
-
-        try:
-            max_messages = int(max_messages)
-        except (TypeError, ValueError):
-            max_messages = 20
-        max_messages = max(1, min(100, max_messages))
-
-        requested_ids = []
-        if isinstance(memory_ids, (list, tuple)):
-            requested_ids.extend(str(item or "").strip() for item in memory_ids)
-        if memory_id:
-            requested_ids.append(str(memory_id or "").strip())
-
-        normalized_ids = []
-        for item in requested_ids:
-            if item and item not in normalized_ids:
-                normalized_ids.append(item)
-
-        if not normalized_ids:
-            return "memory_id 或 memory_ids 至少提供一个有效 ID。"
-
-        invalid_ids = [item for item in normalized_ids if len(item) < 8]
-        if invalid_ids:
-            return "memory_id 至少需要 8 位，请先通过 mem_search_tool 获取 🆔。"
-
-        max_detail_ids = 5
-        truncated = len(normalized_ids) > max_detail_ids
-        normalized_ids = normalized_ids[:max_detail_ids]
-
-        if event.get_group_id() and self.config.get("enable_group_memory", False):
-            group_manager = await self._ensure_group_memory_manager()
-            user_id = self._resolve_group_storage_id(event.get_group_id(), event.get_sender_id())
-            logic = group_manager or self.logic
-        else:
-            user_id = event.get_sender_id()
-            logic = self.logic
-
-        detail_blocks = []
-        try:
-            for current_id in normalized_ids:
-                memory_index, raw_msgs = await logic.get_memory_detail_by_id(user_id, current_id)
-                if (not memory_index) and event.get_group_id() and self.config.get("group_memory_allow_private_recall", False):
-                    memory_index, raw_msgs = await self.logic.get_memory_detail_by_id(event.get_sender_id(), current_id)
-
-                if not memory_index:
-                    detail_blocks.append(str(raw_msgs or f"找不到 ID 为 {current_id} 的记忆。"))
-                    continue
-
-                created_at = self.logic._ensure_datetime(memory_index.created_at)
-                detail_lines = [
-                    f"📖 记忆详情（ID {memory_index.index_id[:8]}）",
-                    f"⏰ 时间：{created_at.strftime('%Y-%m-%d %H:%M')}",
-                    f"📝 归档：{memory_index.summary}",
-                    "————————————————",
-                    "🎙️ 原始对话回溯："
-                ]
-
-                if not raw_msgs:
-                    detail_lines.append("(暂无关联的原始对话数据)")
-                    detail_blocks.append("\n".join(detail_lines))
-                    continue
-
-                shown = 0
-                for m in raw_msgs:
-                    if not self.logic._is_valid_message_content(m.content):
-                        continue
-
-                    ts = self.logic._ensure_datetime(m.timestamp)
-                    time_str = ts.strftime("%H:%M:%S")
-                    role_name = "我" if m.role == "assistant" else (m.user_name or "你")
-                    detail_lines.append(f"[{time_str}] {role_name}: {m.content}")
-                    shown += 1
-
-                    if shown >= max_messages:
-                        break
-
-                if shown == 0:
-                    detail_lines.append("(原始对话均为空或被过滤)")
-
-                detail_blocks.append("\n".join(detail_lines))
-        except Exception as e:
-            logger.error(f"Engram mem_get_detail_tool 异常：{e}")
-            return "工具检索失败，请稍后重试。"
-
-        if truncated:
-            detail_blocks.append(f"(已截断，仅返回前 {max_detail_ids} 个 memory_id 的详情)")
-
-        return "\n\n".join(detail_blocks)
+        return await self._build_session_search_output(
+            event=event,
+            query=query,
+            window=window,
+            limit=limit,
+        )
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):

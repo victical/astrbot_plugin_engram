@@ -67,6 +67,9 @@ class ProfileRenderer:
         # 头像缓存目录
         self.avatar_cache_dir = os.path.join(plugin_data_dir, "avatar_cache")
         os.makedirs(self.avatar_cache_dir, exist_ok=True)
+
+    def _is_profile_affinity_enabled(self) -> bool:
+        return self.config.get("enable_profile_affinity", True)
     
     def _find_font(self):
         """查找可用字体"""
@@ -228,7 +231,7 @@ class ProfileRenderer:
         
         # 羁绊区域高度（固定）
         # 分隔线(30) + 标题(25) + 进度条(60) + 成就(60) + 提示(45) = 220
-        bond_height = 220
+        bond_height = 220 if self._is_profile_affinity_enabled() else 0
         
         # 证据摘要区域高度（可选）
         evidence_height = 0
@@ -387,64 +390,69 @@ class ProfileRenderer:
             curr_y += 40
         
         # 7. 羁绊模块（v2.1 扩展版：跟随在标签区域后）
-        curr_y += 30  # 与标签区域的间距
-        draw.line([(margin+30, curr_y), (W-margin-30, curr_y)], fill=colors["grid"], width=1)
-        
-        bond_info = self._bond_calculator.calculate_bond_level(memory_count, profile)
-        level = bond_info["level"]
-        level_name = bond_info["level_name"]
-        progress = bond_info["progress"]
-        breakdown = bond_info["breakdown"]
-        achievements = breakdown["achievements"]
-        next_hints = bond_info["next_level_hint"]
-        
-        level_color = self.LEVEL_COLORS.get(level, colors["accent"])
-        
-        curr_y += 25
-        # 第一行：等级名称
-        level_text = f"羁绊: Lv.{level} {level_name}"
-        draw.text((margin+35, curr_y), level_text, fill=colors["accent"], font=f_title)
-        
-        # 第二行：进度条（不显示百分比文字）
-        bar_y = curr_y + 45
-        bar_x = margin + 30
-        bar_w = W - 2*margin - 60
-        bar_h = 14
-        
-        draw.rounded_rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h],
-                               radius=7, fill="#EEEEEE")
-        if progress > 0:
-            progress_width = max(bar_h, bar_w * (progress/100))
-            draw.rounded_rectangle([bar_x, bar_y, bar_x + progress_width, bar_y+bar_h],
-                                   radius=7, fill=level_color)
-        
-        # 第三行：成就徽章（使用与标签相同的样式）
-        badge_y = bar_y + 30
-        if achievements:
-            badge_x = margin + 30
-            achievement_color = self.TAG_COLORS.get("成就", colors["tag_bg"])
-            for ach in achievements[:4]:
-                aw = draw.textlength(ach, font=f_tag) + 24
-                if badge_x + aw > W - margin - 30:
-                    break
-                draw.rounded_rectangle([badge_x, badge_y, badge_x+aw, badge_y+32],
-                                       radius=10, fill=achievement_color)
-                draw.text((badge_x+12, badge_y+4), ach, fill=colors["text_main"], font=f_tag)
-                badge_x += aw + 12
-            badge_y += 45
+        if self._is_profile_affinity_enabled():
+            curr_y += 30  # 与标签区域的间距
+            draw.line([(margin+30, curr_y), (W-margin-30, curr_y)], fill=colors["grid"], width=1)
+
+            bond_info = self._bond_calculator.calculate_bond_level(memory_count, profile)
+            level = bond_info["level"]
+            level_name = bond_info["level_name"]
+            progress = bond_info["progress"]
+            breakdown = bond_info["breakdown"]
+            achievements = breakdown["achievements"]
+            next_hints = bond_info["next_level_hint"]
+
+            level_color = self.LEVEL_COLORS.get(level, colors["accent"])
+
+            curr_y += 25
+            # 第一行：等级名称
+            level_text = f"羁绊: Lv.{level} {level_name}"
+            draw.text((margin+35, curr_y), level_text, fill=colors["accent"], font=f_title)
+
+            # 第二行：进度条（不显示百分比文字）
+            bar_y = curr_y + 45
+            bar_x = margin + 30
+            bar_w = W - 2*margin - 60
+            bar_h = 14
+
+            draw.rounded_rectangle([bar_x, bar_y, bar_x+bar_w, bar_y+bar_h],
+                                   radius=7, fill="#EEEEEE")
+            if progress > 0:
+                progress_width = max(bar_h, bar_w * (progress/100))
+                draw.rounded_rectangle([bar_x, bar_y, bar_x + progress_width, bar_y+bar_h],
+                                       radius=7, fill=level_color)
+
+            # 第三行：成就徽章（使用与标签相同的样式）
+            badge_y = bar_y + 30
+            if achievements:
+                badge_x = margin + 30
+                achievement_color = self.TAG_COLORS.get("成就", colors["tag_bg"])
+                for ach in achievements[:4]:
+                    aw = draw.textlength(ach, font=f_tag) + 24
+                    if badge_x + aw > W - margin - 30:
+                        break
+                    draw.rounded_rectangle([badge_x, badge_y, badge_x+aw, badge_y+32],
+                                           radius=10, fill=achievement_color)
+                    draw.text((badge_x+12, badge_y+4), ach, fill=colors["text_main"], font=f_tag)
+                    badge_x += aw + 12
+                badge_y += 45
+            else:
+                badge_y += 10
+
+            # 第四行：升级提示
+            if level < 7 and next_hints:
+                hint_text = next_hints[0]
+                if len(hint_text) > 35:
+                    hint_text = hint_text[:34] + "..."
+                draw.text((margin+35, badge_y), hint_text, fill=colors["text_dim"], font=f_tag)
+
+            curr_y = badge_y + 45
         else:
-            badge_y += 10
-        
-        # 第四行：升级提示
-        if level < 7 and next_hints:
-            hint_text = next_hints[0]
-            if len(hint_text) > 35:
-                hint_text = hint_text[:34] + "..."
-            draw.text((margin+35, badge_y), hint_text, fill=colors["text_dim"], font=f_tag)
+            curr_y += 30
 
         # 8. 证据摘要（可选）
         if self.config.get("show_profile_evidence_in_image", False) and evidence_summary:
-            sec_y = badge_y + 45
+            sec_y = curr_y
             draw.line([(margin+30, sec_y), (W-margin-30, sec_y)], fill=colors["grid"], width=1)
             sec_y += 22
             draw.text((margin+35, sec_y), "证据摘要", fill=colors["accent"], font=f_title)

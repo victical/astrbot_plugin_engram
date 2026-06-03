@@ -12,5 +12,12 @@ from .scheduler import MemoryScheduler
 from .profile_manager import ProfileManager
 from .memory_manager import MemoryManager
 from .memory_facade import MemoryFacade
+from .affinity_provider import AffinityMemoryProvider
 
-__all__ = ['MemoryFacade', 'MemoryScheduler', 'ProfileManager', 'MemoryManager']
+__all__ = [
+    'MemoryFacade',
+    'MemoryScheduler',
+    'ProfileManager',
+    'MemoryManager',
+    'AffinityMemoryProvider',
+]

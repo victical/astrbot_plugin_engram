@@ -168,6 +168,7 @@ data/plugins_data/astrbot_plugin_engram/exports/
 - **画像元数据开关**：`enable_profile_meta`，记录字段证据次数和时间（默认开启）。
 - **画像历史保留数**：`profile_history_limit`，控制可回滚版本数量（默认 5）。
 - **偏好 TTL**：`profile_preference_ttl_days`，控制 likes/dislikes 多久无证据后衰减（默认 90 天）。
+- **画像羁绊开关**：`enable_profile_affinity`，控制 `/profile show` 的羁绊等级展示、LLM 注入画像中的羁绊/关系状态，以及外部 affinity 适配器初始化（默认开启）。
 - **画像图片证据摘要**：`show_profile_evidence_in_image`，开启后 `/profile show` 附加证据摘要分节（默认关闭）。
 
 ### 其他配置
@@ -293,7 +294,7 @@ python tools/check_config_sync.py
 - **第一步：产生足够记忆**。确保今天有至少 3 条（由 `min_persona_update_memories` 决定）长期记忆生成。
 - **第二步：模拟更新**。正常情况下画像在凌晨 00:00 更新。开发测试时，管理员可以使用 `/engram_force_persona` 立即触发。
 - **第三步：查看画像**。输入 `/profile show`。
-  - **预期结果**：手账图片中应在"记忆碎片"分类下看到提取出的标签，如"爱好"中出现 `冰美式`，"禁忌"中出现 `香菜`。底部"羁绊"应显示当前关系状态。
+  - **预期结果**：手账图片中应在"记忆碎片"分类下看到提取出的标签，如"爱好"中出现 `冰美式`，"禁忌"中出现 `香菜`。启用 `enable_profile_affinity` 时底部"羁绊"应显示当前关系状态。
 
 ### 3. 语义搜索与列表测试
 - 输入 `/mem_list`：应列出带有 ⏰ 时间和 📝 归档内容的记忆列表。

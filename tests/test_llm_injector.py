@@ -74,3 +74,32 @@ def test_inject_context_invalid_target_falls_back_to_system_prompt():
     assert PROFILE_BLOCK in req.system_prompt
     assert MEMORY_BLOCK in req.system_prompt
     assert req.prompt == "hello"
+
+
+def test_build_profile_block_omits_affinity_when_disabled():
+    profile = {
+        "basic_info": {"nickname": "Alice", "qq_id": "10001"},
+        "attributes": {},
+        "preferences": {},
+        "dev_metadata": {},
+        "social_graph": {"relationship_status": "知己"},
+    }
+
+    block = LLMContextInjector(config={"enable_profile_affinity": False}).build_profile_block(profile)
+
+    assert "当前羁绊" not in block
+    assert "知己" not in block
+
+
+def test_build_compact_profile_block_omits_relationship_when_affinity_disabled():
+    profile = {
+        "basic_info": {"nickname": "Bob", "qq_id": "10002", "job": "程序员"},
+        "attributes": {},
+        "preferences": {},
+        "social_graph": {"relationship_status": "老朋友"},
+    }
+
+    block = LLMContextInjector(config={"enable_profile_affinity": False}).build_compact_profile_block(profile)
+
+    assert block == "Bob (QQ: 10002)：程序员"
+    assert "老朋友" not in block

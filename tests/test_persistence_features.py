@@ -135,3 +135,62 @@ def test_search_memory_indexes_by_keywords_sanitizes_fts_tokens(tmp_path, monkey
     assert "\x00" not in match_expr
     assert "\x1f" not in match_expr
     assert len(match_expr.strip('"')) <= 64
+
+
+def test_search_raw_memory_sessions_returns_same_session_window_and_scopes_user(tmp_path):
+    manager = DatabaseManager(str(tmp_path))
+    base = datetime.datetime(2026, 5, 20, 12, 0, 0)
+
+    rows = [
+        ("r1", "s1", "u1", "user", "before project note", 0),
+        ("r2", "s1", "u1", "assistant", "project phoenix deadline is Friday", 1),
+        ("r3", "s1", "u1", "user", "after project note", 2),
+        ("r4", "s1", "u2", "user", "project phoenix secret from another user", 3),
+        ("r5", "s2", "u1", "user", "project phoenix in another session", 4),
+    ]
+    for uuid, session_id, user_id, role, content, offset in rows:
+        manager.save_raw_memory(
+            uuid=uuid,
+            session_id=session_id,
+            user_id=user_id,
+            role=role,
+            content=content,
+            msg_type="text",
+            timestamp=base + datetime.timedelta(minutes=offset),
+        )
+
+    results = manager.search_raw_memory_sessions(
+        user_id="u1",
+        query="deadline",
+        limit=1,
+        window=1,
+    )
+
+    assert len(results) == 1
+    assert results[0]["match"]["uuid"] == "r2"
+    assert [item["uuid"] for item in results[0]["context"]] == ["r1", "r2", "r3"]
+    assert all(item["user_id"] == "u1" for item in results[0]["context"])
+
+
+def test_search_raw_memory_sessions_falls_back_to_like_for_chinese_substring(tmp_path):
+    manager = DatabaseManager(str(tmp_path))
+    base = datetime.datetime(2026, 5, 20, 12, 0, 0)
+
+    manager.save_raw_memory(
+        uuid="zh-1",
+        session_id="s1",
+        user_id="u1",
+        role="user",
+        content="今天聊了考试计划和报名材料",
+        msg_type="text",
+        timestamp=base,
+    )
+
+    results = manager.search_raw_memory_sessions(
+        user_id="u1",
+        query="考试计划",
+        limit=3,
+        window=0,
+    )
+
+    assert [row["match"]["uuid"] for row in results] == ["zh-1"]

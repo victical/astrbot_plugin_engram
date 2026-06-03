@@ -61,7 +61,8 @@ def test_memory_tool_forces_retrieve_and_returns_structured_fields():
             "summary": "用户喜欢结构化结果",
         }
     ]
-    assert "mem_get_detail_tool" in payload["usage_hint"]
+    assert "session_search" in payload["usage_hint"]
+    assert "mem_get_detail_tool" not in payload["usage_hint"]
 
 
 def test_memory_tool_uses_normalized_type_as_source_fallback():
@@ -125,3 +126,59 @@ def test_memory_tool_prefers_structured_search_results():
     logic.retrieve_memories.assert_not_awaited()
     payload = json.loads(output)
     assert payload["results"][0]["memory_id"] == "facefeed"
+
+
+def test_session_search_output_returns_raw_context_windows():
+    async def get_search_results(_event, query, limit, window):
+        assert query == "deadline"
+        assert limit == 2
+        assert window == 1
+        return [
+            {
+                "match": {
+                    "uuid": "r2",
+                    "session_id": "s1",
+                    "user_id": "u1",
+                    "role": "assistant",
+                    "content": "project deadline is Friday",
+                    "timestamp": "2026-05-20 12:01:00",
+                },
+                "context": [
+                    {
+                        "uuid": "r1",
+                        "session_id": "s1",
+                        "user_id": "u1",
+                        "role": "user",
+                        "content": "before",
+                        "timestamp": "2026-05-20 12:00:00",
+                    },
+                    {
+                        "uuid": "r2",
+                        "session_id": "s1",
+                        "user_id": "u1",
+                        "role": "assistant",
+                        "content": "project deadline is Friday",
+                        "timestamp": "2026-05-20 12:01:00",
+                    },
+                ],
+            }
+        ]
+
+    handler = MemoryToolHandler({"enable_memory_search_tool": True}, SimpleNamespace())
+
+    output = asyncio.run(
+        handler.build_session_search_output(
+            event=DummyEvent(),
+            query="deadline",
+            window=1,
+            limit=2,
+            get_search_results=get_search_results,
+        )
+    )
+
+    payload = json.loads(output)
+    assert payload["type"] == "session_search_result"
+    assert payload["query"] == "deadline"
+    assert payload["count"] == 1
+    assert payload["results"][0]["match"]["uuid"] == "r2"
+    assert [row["uuid"] for row in payload["results"][0]["context"]] == ["r1", "r2"]
