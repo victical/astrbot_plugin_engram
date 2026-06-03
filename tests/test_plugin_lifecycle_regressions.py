@@ -5,8 +5,161 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.filter.command_group import CommandGroupFilter
+from astrbot.core.star.star_handler import star_handlers_registry
+
 from astrbot_plugin_engram.main import EngramPlugin
 from astrbot_plugin_engram.core.memory_facade import MemoryFacade
+
+
+def _collect_command_filter_names(event_filter) -> set[str]:
+    if isinstance(event_filter, CommandFilter):
+        return set(event_filter.get_complete_command_names())
+    if isinstance(event_filter, CommandGroupFilter):
+        names = set(event_filter.get_complete_command_names())
+        for child in event_filter.sub_command_filters:
+            names.update(_collect_command_filter_names(child))
+        return names
+    return set()
+
+
+def _registered_command_names() -> set[str]:
+    names = set()
+    module_name = EngramPlugin.__module__
+    for handler in star_handlers_registry.get_handlers_by_module_name(module_name):
+        for event_filter in handler.event_filters:
+            names.update(_collect_command_filter_names(event_filter))
+    return names
+
+
+def test_chinese_commands_are_registered():
+    names = _registered_command_names()
+
+    expected = {
+        "查看记忆",
+        "查看记忆详情",
+        "搜索记忆",
+        "删除记忆",
+        "删除全部记忆",
+        "撤销删除记忆",
+        "查看画像",
+        "设置画像",
+        "回滚画像",
+        "查看画像证据",
+        "删除画像",
+        "清空画像",
+        "查看群记忆",
+        "查看群记忆详情",
+        "搜索群记忆",
+        "删除群记忆",
+        "删除全部群记忆",
+        "撤销删除群记忆",
+        "归档群记忆",
+        "导出记忆",
+        "统计记忆",
+        "导出全部记忆",
+        "归档记忆",
+        "归档全部记忆",
+        "更新画像",
+        "重建记忆向量",
+    }
+
+    assert expected <= names
+
+
+def test_english_commands_are_not_registered():
+    names = _registered_command_names()
+
+    forbidden = {
+        "mem_list",
+        "mem_view",
+        "mem_search",
+        "mem_delete",
+        "mem_delete_all",
+        "mem_undo",
+        "mem_clear_raw",
+        "mem_clear_archive",
+        "mem_clear_all",
+        "group_mem_list",
+        "group_mem_view",
+        "group_mem_search",
+        "group_mem_delete",
+        "group_mem_delete_all",
+        "group_mem_undo",
+        "group_mem_force_summarize",
+        "mem_export",
+        "mem_stats",
+        "mem_export_all",
+        "engram_force_summarize",
+        "engram_force_summarize_all",
+        "engram_force_persona",
+        "mem_rebuild_vector",
+        "engram_rebuild_vectors",
+        "profile",
+        "profile clear",
+        "profile show",
+        "profile set",
+        "profile rollback",
+        "profile delete",
+        "profile evidence",
+    }
+
+    leftovers = forbidden & names
+
+    assert leftovers == set(), f"English commands still registered: {sorted(leftovers)}"
+
+
+def test_user_facing_command_hints_use_chinese_commands():
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    checked_files = [
+        "README.md",
+        "_conf_schema.json",
+        "export_handler.py",
+        "core/memory_manager.py",
+        "webui/static/memories.js",
+    ]
+    forbidden = {
+        "/mem_list",
+        "/mem_view",
+        "/mem_search",
+        "/mem_delete",
+        "/mem_delete_all",
+        "/mem_undo",
+        "/mem_clear_raw",
+        "/mem_clear_archive",
+        "/mem_clear_all",
+        "/group_mem_list",
+        "/group_mem_view",
+        "/group_mem_search",
+        "/group_mem_delete",
+        "/group_mem_delete_all",
+        "/group_mem_undo",
+        "/group_mem_force_summarize",
+        "/mem_export",
+        "/mem_stats",
+        "/mem_export_all",
+        "/engram_force_summarize",
+        "/engram_force_summarize_all",
+        "/engram_force_persona",
+        "/mem_rebuild_vector",
+        "/engram_rebuild_vectors",
+        "/profile clear",
+        "/profile show",
+        "/profile set",
+        "/profile rollback",
+        "/profile delete",
+        "/profile evidence",
+    }
+
+    leftovers = []
+    for relative_path in checked_files:
+        content = (repo_root / relative_path).read_text(encoding="utf-8")
+        for item in forbidden:
+            if item in content:
+                leftovers.append(f"{relative_path}: {item}")
+
+    assert leftovers == [], "English command hints still present: " + ", ".join(leftovers)
 
 
 def test_plugin_background_task_failures_are_recorded():

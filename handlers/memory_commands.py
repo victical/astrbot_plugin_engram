@@ -23,6 +23,10 @@ import json
 from astrbot.api import logger
 
 
+def _is_confirmed(value: str) -> bool:
+    return str(value or "").strip().lower() in {"confirm", "确认"}
+
+
 class MemoryCommandHandler:
     """记忆命令处理器"""
     
@@ -77,9 +81,9 @@ class MemoryCommandHandler:
                 f"   📝 {m.summary}\n"
             )
 
-        result.append("\n💡 发送 /mem_view <序号或ID> 可查看某条记忆的完整对话原文。")
-        result.append("💡 发送 /mem_delete <ID> 可按记忆 ID 删除指定记忆。")
-        result.append("💡 发送 /mem_list <数量> 可自定义查询条数。")
+        result.append("\n💡 发送 /查看记忆详情 <序号或ID> 可查看某条记忆的完整对话原文。")
+        result.append("💡 发送 /删除记忆 <ID> 可按记忆 ID 删除指定记忆。")
+        result.append("💡 发送 /查看记忆 <数量> 可自定义查询条数。")
         return "\n".join(result)
     
     async def handle_mem_view(self, user_id: str, index: str) -> str:
@@ -105,7 +109,7 @@ class MemoryCommandHandler:
             display_label = f"序号 {seq}"
         else:
             if len(index) < 8:
-                return "⚠️ 记忆 ID 至少需要 8 位，例如：/mem_view bdd54504"
+                return "⚠️ 记忆 ID 至少需要 8 位，例如：/查看记忆详情 bdd54504"
 
             memory_index, raw_msgs = await self.memory.get_memory_detail_by_id(user_id, index)
             if not memory_index:
@@ -160,7 +164,7 @@ class MemoryCommandHandler:
             return f"🔍 未找到与 '{query}' 相关的记忆。"
         
         result = [f"🔍 搜索关键词 '{query}' 的结果（按相关性排序）：\n"] + memories
-        result.append("\n💡 使用 /mem_delete <ID> 可根据记忆 ID 删除指定记忆。")
+        result.append("\n💡 使用 /删除记忆 <ID> 可根据记忆 ID 删除指定记忆。")
         return "\n".join(result)
     
     async def handle_mem_delete(self, user_id: str, index: str, delete_raw: bool = False) -> str:
@@ -175,7 +179,7 @@ class MemoryCommandHandler:
         Returns:
             str: 格式化的命令结果
         """
-        cmd_name = "mem_delete_all" if delete_raw else "mem_delete"
+        cmd_name = "删除全部记忆" if delete_raw else "删除记忆"
         
         # 智能判断：数字且 ≤ 50 使用序号删除，否则使用 ID 删除
         if index.isdigit():
@@ -190,7 +194,7 @@ class MemoryCommandHandler:
             
             if success:
                 if delete_raw:
-                    return f"🗑️ 已彻底删除记忆 #{seq} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /mem_undo 撤销此操作。"
+                    return f"🗑️ 已彻底删除记忆 #{seq} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /撤销删除记忆 撤销此操作。"
                 else:
                     return f"🗑️ 已删除记忆 #{seq}：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 原始对话消息已保留，可重新归档。"
             else:
@@ -204,7 +208,7 @@ class MemoryCommandHandler:
             
             if success:
                 if delete_raw:
-                    return f"🗑️ 已彻底删除记忆 ID {index[:8]} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /mem_undo 撤销此操作。"
+                    return f"🗑️ 已彻底删除记忆 ID {index[:8]} 及其原始对话：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 如果误删，可使用 /撤销删除记忆 撤销此操作。"
                 else:
                     return f"🗑️ 已删除记忆 ID {index[:8]}：\n📝 {summary[:50]}{'...' if len(summary) > 50 else ''}\n\n💡 原始对话消息已保留，可重新归档。"
             else:
@@ -238,8 +242,8 @@ class MemoryCommandHandler:
         Returns:
             str: 格式化的命令结果
         """
-        if confirm != "confirm":
-            return "⚠️ 危险操作：此指令将永久删除您所有**尚未归档**的聊天原文，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear_raw confirm"
+        if not _is_confirmed(confirm):
+            return "⚠️ 危险操作：此指令将永久删除您所有**尚未归档**的聊天原文，且不可恢复。\n\n如果您确定要执行，请发送：\n/清理记忆原文 确认"
         
         loop = asyncio.get_event_loop()
         try:
@@ -267,8 +271,8 @@ class MemoryCommandHandler:
         Returns:
             str: 格式化的命令结果
         """
-        if confirm != "confirm":
-            return "⚠️ 危险操作：此指令将永久删除您所有的**长期记忆归档**及向量检索数据，但会保留原始聊天记录。\n\n如果您确定要执行，请发送：\n/mem_clear_archive confirm"
+        if not _is_confirmed(confirm):
+            return "⚠️ 危险操作：此指令将永久删除您所有的**长期记忆归档**及向量检索数据，但会保留原始聊天记录。\n\n如果您确定要执行，请发送：\n/清理记忆归档 确认"
         
         loop = asyncio.get_event_loop()
         try:
@@ -301,8 +305,8 @@ class MemoryCommandHandler:
         Returns:
             str: 格式化的命令结果
         """
-        if confirm != "confirm":
-            return "⚠️ 警告：此指令将永久删除您所有的聊天原文、长期记忆归档及向量检索数据，且不可恢复。\n\n如果您确定要执行，请发送：\n/mem_clear_all confirm"
+        if not _is_confirmed(confirm):
+            return "⚠️ 警告：此指令将永久删除您所有的聊天原文、长期记忆归档及向量检索数据，且不可恢复。\n\n如果您确定要执行，请发送：\n/清空记忆 确认"
         
         loop = asyncio.get_event_loop()
         try:
@@ -323,7 +327,7 @@ class MemoryCommandHandler:
     
     def get_force_summarize_messages(self) -> tuple[str, str]:
         """获取 engram_force_summarize 的开始/完成文案。"""
-        return ("⏳ 正在强制执行记忆归档，请稍候...", "✅ 记忆归档完成。您可以使用 /mem_list 查看。")
+        return ("⏳ 正在强制执行记忆归档，请稍候...", "✅ 记忆归档完成。您可以使用 /查看记忆 查看。")
 
     async def handle_force_summarize(self, user_id: str) -> None:
         """执行 engram_force_summarize。"""
@@ -374,6 +378,6 @@ class MemoryCommandHandler:
             f"- 总索引：{total}\n"
             f"- 成功写入：{rebuilt}\n"
             f"- 失败：{failed}\n"
-            f"💡 若 embedding_provider 变更或出现向量维度不匹配，请执行 /mem_rebuild_vector full 重新嵌入全部记忆"
+            f"💡 若 embedding_provider 变更或出现向量维度不匹配，请执行 /重建记忆向量 full 重新嵌入全部记忆"
             f"{extra_backup_line}"
         )

@@ -143,7 +143,7 @@ class ExportHandler:
 - 用户消息：{global_stats.get('user_messages', 0)} 条
 - 助手消息：{global_stats.get('assistant_messages', 0)} 条
 
-💡 使用 /mem_export 可导出数据用于模型微调
+💡 使用 /导出记忆 可导出数据用于模型微调
 """
         yield event.plain_result(result.strip())
     

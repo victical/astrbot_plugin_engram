@@ -999,7 +999,7 @@ class MemoryManager:
             if self._is_dimension_mismatch_error(e):
                 logger.warning(
                     "Engram：Chroma 向量维度不匹配（旧库维度与当前 embedding 维度不同）。"
-                    "请执行管理员指令 /mem_rebuild_vector full 重建向量库，"
+                    "请执行管理员指令 /重建记忆向量 full 重建向量库，"
                     "或切回原 embedding_provider。"
                 )
                 return False
@@ -1024,7 +1024,7 @@ class MemoryManager:
             if self._is_dimension_mismatch_error(e):
                 logger.warning(
                     "Engram：Chroma 检索维度不匹配（旧库维度与当前 embedding 维度不同）。"
-                    "请执行管理员指令 /mem_rebuild_vector full 重建向量库，"
+                    "请执行管理员指令 /重建记忆向量 full 重建向量库，"
                     "或切回原 embedding_provider。"
                 )
                 return None

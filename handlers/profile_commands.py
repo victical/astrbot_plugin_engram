@@ -10,6 +10,10 @@ import datetime
 from astrbot.api import logger
 
 
+def _is_confirmed(value: str) -> bool:
+    return str(value or "").strip().lower() in {"confirm", "确认"}
+
+
 class ProfileCommandHandler:
     """画像命令处理器"""
 
@@ -53,8 +57,8 @@ class ProfileCommandHandler:
             return False, f"⚠️ 档案绘制失败，转为文本模式：\n{json.dumps(profile, indent=2, ensure_ascii=False)}"
 
     async def handle_profile_clear(self, user_id: str, confirm: str = "") -> str:
-        if confirm != "confirm":
-            return "⚠️ 危险操作：此指令将永久删除您的用户画像文件，所有侧写特征将被重置。\n\n如果您确定要执行，请发送：\n/profile clear confirm"
+        if not _is_confirmed(confirm):
+            return "⚠️ 危险操作：此指令将永久删除您的用户画像文件，所有侧写特征将被重置。\n\n如果您确定要执行，请发送：\n/清空画像 确认"
 
         await self.profile.clear_user_profile(user_id)
         return "🗑️ 您的用户画像已成功重置。"
@@ -63,9 +67,9 @@ class ProfileCommandHandler:
         key = str(key or "").strip()
         value = str(value or "").strip()
         if not key:
-            return "⚠️ 请提供字段名称。例如：/profile set 职业 程序员"
+            return "⚠️ 请提供字段名称。例如：/设置画像 职业 程序员"
         if not value:
-            return "⚠️ 请提供字段值。例如：/profile set 职业 程序员"
+            return "⚠️ 请提供字段值。例如：/设置画像 职业 程序员"
 
         if "." not in key:
             field_map = {
@@ -100,7 +104,7 @@ class ProfileCommandHandler:
         category = str(category or "").strip()
         value = str(value or "").strip()
         if not category or not value:
-            return "⚠️ 用法：/profile delete <类别> <值>（如：/profile delete 爱好 篮球）"
+            return "⚠️ 用法：/删除画像 <类别> <值>（如：/删除画像 爱好 篮球）"
 
         if "." not in category:
             category_map = {
@@ -192,7 +196,7 @@ class ProfileCommandHandler:
         time_desc = f"前 {days_int} 天"
         return (
             f"⏳ 正在基于{time_desc}的记忆强制更新用户画像，请稍候...",
-            f"✅ 画像更新完成（基于{time_desc}的记忆）。您可以使用 /profile show 查看。"
+            f"✅ 画像更新完成（基于{time_desc}的记忆）。您可以使用 /查看画像 查看。"
         )
 
     async def handle_force_persona(self, user_id: str, days_int: int) -> tuple:

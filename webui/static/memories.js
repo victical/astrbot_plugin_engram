@@ -275,7 +275,7 @@ async function handleBatchDelete() {
     }));
 
     if (selected.length === 0) return;
-    if (!confirm(`确定要删除选中的 ${selected.length} 条记忆吗？此操作不可撤销（除非使用 /mem_undo 指令）。`)) return;
+    if (!confirm(`确定要删除选中的 ${selected.length} 条记忆吗？此操作不可撤销（除非使用 /撤销删除记忆 指令）。`)) return;
 
     const headers = await getAuthHeaders();
     if (!headers) return;

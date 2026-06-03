@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - 群聊记忆系统：支持群聊记忆独立存储（SQLite+Chroma）、好友白名单与 LLM 触发落库。
-- 群聊记忆指令：新增 `/group_mem_list`、`/group_mem_view`、`/group_mem_search`、`/group_mem_delete`、`/group_mem_delete_all`、`/group_mem_undo`、`/group_mem_force_summarize`。
+- 群聊记忆指令：新增 `/查看群记忆`、`/查看群记忆详情`、`/搜索群记忆`、`/删除群记忆`、`/删除全部群记忆`、`/撤销删除群记忆`、`/归档群记忆`。
 - 群聊配置项：新增 `enable_group_memory`、`group_memory_only_friends`、`group_memory_min_text_length`、`group_memory_source_type`、`group_memory_store_session_as`。
 - 群聊权限配置：新增 `group_memory_private_session_only`（群聊记忆按用户隔离）。
 - 群聊私聊融合：新增 `group_memory_allow_private_recall`（群聊检索追加私聊记忆）。
@@ -60,13 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - mem_search_tool / mem_get_detail_tool 支持群聊场景检索并回退私聊。
 - 群聊注入记忆统一为 `【长期记忆回溯】` 格式，并标记 `【群聊】/【私聊】` 来源。
 - 记忆归档中 assistant 名称仅使用 `ai_name` 配置，不再回退“助手”。
-- 群聊指令输出替换为 group_ 前缀提示，避免误删私聊记忆。
+- 群聊指令输出替换为群聊专用中文提示，避免误删私聊记忆。
 
 ## [Unreleased]
 
 ### Added
-- 画像系统升级：新增 `_meta` 证据元数据（`last_seen_at` / `evidence_count` / `evidence_refs`）、画像快照历史与 `/profile rollback` 回滚能力。
-- 新增画像证据查询指令 `/profile evidence [top_n]`，可查看字段证据摘要。
+- 画像系统升级：新增 `_meta` 证据元数据（`last_seen_at` / `evidence_count` / `evidence_refs`）、画像快照历史与 `/回滚画像` 回滚能力。
+- 新增画像证据查询指令 `/查看画像证据 [数量]`，可查看字段证据摘要。
 - 新增测试：`tests/test_profile_meta.py`、`tests/test_profile_rollback.py`、`tests/test_profile_ttl_decay.py`、`tests/test_profile_commands.py`。
 
 ### Changed
@@ -74,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 偏好冲突由“直接丢弃”调整为“进入 pending_proposals 等待后续证据”。
 - 画像更新流程改为“两步式”：proposal -> guardian 决策 -> snapshot -> 落盘。
 - `likes/dislikes` 增加 TTL 衰减机制（基于证据时间）。
-- `/profile show` 支持可选证据摘要渲染（`show_profile_evidence_in_image=false` 默认关闭）。
+- `/查看画像` 支持可选证据摘要渲染（`show_profile_evidence_in_image=false` 默认关闭）。
 - 配置与预设联动新增画像策略项：`enable_profile_meta`、`profile_history_limit`、`profile_preference_ttl_days`、`show_profile_evidence_in_image`。
 
 ## [1.5.4] - 2026-03-07

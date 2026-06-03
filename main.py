@@ -417,11 +417,11 @@ class EngramPlugin(Star):
         if not text:
             return text
         replacements = {
-            "/mem_view": "/group_mem_view",
-            "/mem_delete_all": "/group_mem_delete_all",
-            "/mem_delete": "/group_mem_delete",
-            "/mem_list": "/group_mem_list",
-            "/mem_undo": "/group_mem_undo",
+            "/查看记忆详情": "/查看群记忆详情",
+            "/删除全部记忆": "/删除全部群记忆",
+            "/删除记忆": "/删除群记忆",
+            "/查看记忆": "/查看群记忆",
+            "/撤销删除记忆": "/撤销删除群记忆",
         }
         for src, dst in replacements.items():
             text = text.replace(src, dst)
@@ -995,7 +995,7 @@ class EngramPlugin(Star):
         # 被动更新基础信息（委托给 OneBotSyncHandler，内部自带频率控制）
         await self._onebot_handler.sync_user_info(event, user_id=user_id, user_name=user_name)
 
-    @filter.command("mem_list")
+    @filter.command("查看记忆")
     async def mem_list(self, event: AstrMessageEvent, count: str = ""):
         """查看最近生成的长期记忆归档"""
         user_id = event.get_sender_id()
@@ -1005,7 +1005,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_list(user_id=user_id, count=count),
         )
 
-    @filter.command("mem_view")
+    @filter.command("查看记忆详情")
     async def mem_view(self, event: AstrMessageEvent, index: str):
         """查看指定序号或 ID 记忆的完整对话原文"""
         user_id = event.get_sender_id()
@@ -1015,7 +1015,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_view(user_id=user_id, index=index),
         )
 
-    @filter.command("mem_search")
+    @filter.command("搜索记忆")
     async def mem_search(self, event: AstrMessageEvent, query: str):
         """搜索与关键词相关的长期记忆（按相关性排序）"""
         user_id = event.get_sender_id()
@@ -1036,13 +1036,13 @@ class EngramPlugin(Star):
                 yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆。")
                 return
             result = [f"🔍 搜索关键词 '{query}' 的结果（按相关性排序）：\n"] + memories
-            result.append("\n💡 使用 /mem_delete <ID> 可根据记忆 ID 删除指定记忆。")
+            result.append("\n💡 使用 /删除记忆 <ID> 可根据记忆 ID 删除指定记忆。")
             yield event.plain_result("\n".join(result))
         except Exception as e:
             logger.error("Engram command mem_search failed: %s", e, exc_info=True)
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
-    @filter.command("mem_delete")
+    @filter.command("删除记忆")
     async def mem_delete(self, event: AstrMessageEvent, index: str):
         """删除指定序号或 ID 的总结记忆（保留原始消息）"""
         user_id = event.get_sender_id()
@@ -1052,7 +1052,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=False),
         )
 
-    @filter.command("mem_delete_all")
+    @filter.command("删除全部记忆")
     async def mem_delete_all(self, event: AstrMessageEvent, index: str):
         """删除指定序号或 ID 的总结记忆及其关联的原始消息"""
         user_id = event.get_sender_id()
@@ -1062,7 +1062,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_delete(user_id=user_id, index=index, delete_raw=True),
         )
 
-    @filter.command("mem_undo")
+    @filter.command("撤销删除记忆")
     async def mem_undo(self, event: AstrMessageEvent):
         """撤销最近一次删除操作"""
         user_id = event.get_sender_id()
@@ -1072,7 +1072,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_undo(user_id=user_id),
         )
 
-    @filter.command("mem_clear_raw")
+    @filter.command("清理记忆原文")
     async def mem_clear_raw(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有未归档的原始消息数据"""
         user_id = event.get_sender_id()
@@ -1082,7 +1082,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_clear_raw(user_id=user_id, confirm=confirm),
         )
 
-    @filter.command("mem_clear_archive")
+    @filter.command("清理记忆归档")
     async def mem_clear_archive(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有长期记忆归档（保留原始消息）"""
         user_id = event.get_sender_id()
@@ -1092,7 +1092,7 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_clear_archive(user_id=user_id, confirm=confirm),
         )
 
-    @filter.command("mem_clear_all")
+    @filter.command("清空记忆")
     async def mem_clear_all(self, event: AstrMessageEvent, confirm: str = ""):
         """清除所有原始消息和长期记忆数据"""
         user_id = event.get_sender_id()
@@ -1102,13 +1102,6 @@ class EngramPlugin(Star):
             lambda: self._mem_handler.handle_mem_clear_all(user_id=user_id, confirm=confirm),
         )
 
-    @filter.command_group("profile")
-    def profile_group(self, event: AstrMessageEvent): 
-        """用户画像相关指令"""
-        pass
-    profile_group.__name__ = "profile_group"
-
-    @profile_group.command("clear")
     async def profile_clear(self, event: AstrMessageEvent, confirm: str = ""):
         """清除用户画像数据"""
         user_id = event.get_sender_id()
@@ -1118,7 +1111,6 @@ class EngramPlugin(Star):
             lambda: self._profile_handler.handle_profile_clear(user_id=user_id, confirm=confirm),
         )
 
-    @profile_group.command("show")
     async def profile_show(self, event: AstrMessageEvent):
         """显示手账风格的用户深度画像"""
         user_id = event.get_sender_id()
@@ -1133,9 +1125,8 @@ class EngramPlugin(Star):
             logger.error("Engram command profile_show failed: %s", e, exc_info=True)
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
-    @profile_group.command("set")
     async def profile_set(self, event: AstrMessageEvent, key: str, value: str):
-        """手动设置画像字段的值 (如: /profile set 职业 程序员)"""
+        """手动设置画像字段的值 (如: /设置画像 职业 程序员)"""
         user_id = event.get_sender_id()
         yield await self._run_plain_command(
             event,
@@ -1143,7 +1134,6 @@ class EngramPlugin(Star):
             lambda: self._profile_handler.handle_profile_set(user_id=user_id, key=key, value=value),
         )
 
-    @profile_group.command("rollback")
     async def profile_rollback(self, event: AstrMessageEvent, steps: str = "1"):
         """回滚用户画像到历史版本（默认回滚 1 步）"""
         user_id = event.get_sender_id()
@@ -1153,9 +1143,8 @@ class EngramPlugin(Star):
             lambda: self._profile_handler.handle_profile_rollback(user_id=user_id, steps=steps),
         )
 
-    @profile_group.command("delete")
     async def profile_delete(self, event: AstrMessageEvent, category: str, value: str):
-        """删除画像记忆碎片 (如: /profile delete 爱好 篮球)"""
+        """删除画像记忆碎片 (如: /删除画像 爱好 篮球)"""
         user_id = event.get_sender_id()
         yield await self._run_plain_command(
             event,
@@ -1163,7 +1152,6 @@ class EngramPlugin(Star):
             lambda: self._profile_handler.handle_profile_delete(user_id=user_id, category=category, value=value),
         )
 
-    @profile_group.command("evidence")
     async def profile_evidence(self, event: AstrMessageEvent, top_n: str = "8"):
         """查看画像证据摘要"""
         user_id = event.get_sender_id()
@@ -1173,8 +1161,44 @@ class EngramPlugin(Star):
             lambda: self._profile_handler.handle_profile_evidence(user_id=user_id, top_n=top_n),
         )
 
+    @filter.command("查看画像")
+    async def profile_show_cn(self, event: AstrMessageEvent):
+        """查看当前用户画像"""
+        async for result in self.profile_show(event):
+            yield result
+
+    @filter.command("设置画像")
+    async def profile_set_cn(self, event: AstrMessageEvent, key: str, value: str):
+        """手动设置画像字段的值"""
+        async for result in self.profile_set(event, key, value):
+            yield result
+
+    @filter.command("回滚画像")
+    async def profile_rollback_cn(self, event: AstrMessageEvent, steps: str = "1"):
+        """回滚用户画像到历史版本"""
+        async for result in self.profile_rollback(event, steps):
+            yield result
+
+    @filter.command("删除画像")
+    async def profile_delete_cn(self, event: AstrMessageEvent, category: str, value: str):
+        """删除画像记忆碎片"""
+        async for result in self.profile_delete(event, category, value):
+            yield result
+
+    @filter.command("查看画像证据")
+    async def profile_evidence_cn(self, event: AstrMessageEvent, top_n: str = "8"):
+        """查看画像证据摘要"""
+        async for result in self.profile_evidence(event, top_n):
+            yield result
+
+    @filter.command("清空画像")
+    async def profile_clear_cn(self, event: AstrMessageEvent, confirm: str = ""):
+        """清除用户画像数据"""
+        async for result in self.profile_clear(event, confirm):
+            yield result
+
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("engram_force_summarize")
+    @filter.command("归档记忆")
     async def force_summarize(self, event: AstrMessageEvent):
         """[管理员] 立即对当前所有未处理对话进行记忆归档"""
         user_id = event.get_sender_id()
@@ -1188,7 +1212,7 @@ class EngramPlugin(Star):
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("engram_force_summarize_all")
+    @filter.command("归档全部记忆")
     async def force_summarize_all(self, event: AstrMessageEvent):
         """[管理员] 立即对所有用户未处理对话进行记忆归档（含群聊记忆）"""
         yield event.plain_result("⏳ 正在强制执行全局记忆归档，请稍候...")
@@ -1226,7 +1250,7 @@ class EngramPlugin(Star):
             )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("engram_force_persona")
+    @filter.command("更新画像")
     async def force_persona(self, event: AstrMessageEvent, days: str = ""):
         """[管理员] 立即基于指定天数的记忆强制深度更新画像"""
         user_id = event.get_sender_id()
@@ -1246,13 +1270,13 @@ class EngramPlugin(Star):
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("mem_rebuild_vector")
+    @filter.command("重建记忆向量")
     async def mem_rebuild_vector(self, event: AstrMessageEvent, mode: str = ""):
         """[管理员] 备份并重建向量库（full 表示重建并回灌）
 
         重建说明：
             当 embedding_provider 变更或提示向量维度不一致时，
-            请执行 /mem_rebuild_vector full 重新嵌入全部记忆，否则旧记忆将无法检索。
+            请执行 /重建记忆向量 full 重新嵌入全部记忆，否则旧记忆将无法检索。
         """
         full_rebuild_flag = str(mode or "").strip().lower() == "full"
         mode_text = "全量重建" if full_rebuild_flag else "增量重建"
@@ -1265,22 +1289,7 @@ class EngramPlugin(Star):
             logger.error("Engram：重建向量库失败：%s", e, exc_info=True)
             yield event.plain_result("❌ 向量库重建失败，请稍后重试。")
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("engram_rebuild_vectors")
-    async def engram_rebuild_vectors(self, event: AstrMessageEvent, full_rebuild: str = "false", batch_size: str = ""):
-        """[管理员] 兼容旧指令：重建向量库（仅 full 触发全量，batch 参数已弃用）"""
-        full_rebuild_flag = str(full_rebuild or "").strip().lower() == "full"
-        mode_text = "全量重建" if full_rebuild_flag else "增量重建"
-        yield event.plain_result(f"⏳ 正在执行向量库{mode_text}，请稍候...")
-
-        try:
-            result = await self._mem_handler.handle_rebuild_vectors(full_rebuild_flag=full_rebuild_flag, batch_size=200)
-            yield event.plain_result(self._mem_handler.build_rebuild_vector_result_text(full_rebuild_flag, result))
-        except Exception as e:
-            logger.error("Engram：重建向量库失败：%s", e, exc_info=True)
-            yield event.plain_result("❌ 向量库重建失败，请稍后重试。")
-
-    @filter.command("group_mem_list")
+    @filter.command("查看群记忆")
     async def group_mem_list(self, event: AstrMessageEvent, count: str = ""):
         """查看本群最近生成的长期记忆归档"""
         if not event.get_group_id():
@@ -1298,7 +1307,7 @@ class EngramPlugin(Star):
             transform=self._rewrite_group_command_hints,
         )
 
-    @filter.command("group_mem_view")
+    @filter.command("查看群记忆详情")
     async def group_mem_view(self, event: AstrMessageEvent, index: str):
         """查看本群指定序号或 ID 的记忆详情"""
         if not event.get_group_id():
@@ -1316,7 +1325,7 @@ class EngramPlugin(Star):
             transform=self._rewrite_group_command_hints,
         )
 
-    @filter.command("group_mem_search")
+    @filter.command("搜索群记忆")
     async def group_mem_search(self, event: AstrMessageEvent, query: str):
         """搜索本群的长期记忆"""
         if not event.get_group_id():
@@ -1334,7 +1343,7 @@ class EngramPlugin(Star):
             transform=self._rewrite_group_command_hints,
         )
 
-    @filter.command("group_mem_delete")
+    @filter.command("删除群记忆")
     async def group_mem_delete(self, event: AstrMessageEvent, index: str):
         """删除本群指定序号或 ID 的总结记忆"""
         if not event.get_group_id():
@@ -1352,7 +1361,7 @@ class EngramPlugin(Star):
             transform=self._rewrite_group_command_hints,
         )
 
-    @filter.command("group_mem_delete_all")
+    @filter.command("删除全部群记忆")
     async def group_mem_delete_all(self, event: AstrMessageEvent, index: str):
         """删除本群指定序号或 ID 的总结记忆及原始消息"""
         if not event.get_group_id():
@@ -1370,7 +1379,7 @@ class EngramPlugin(Star):
             transform=self._rewrite_group_command_hints,
         )
 
-    @filter.command("group_mem_undo")
+    @filter.command("撤销删除群记忆")
     async def group_mem_undo(self, event: AstrMessageEvent):
         """撤销本群最近一次删除操作"""
         if not event.get_group_id():
@@ -1389,7 +1398,7 @@ class EngramPlugin(Star):
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("group_mem_force_summarize")
+    @filter.command("归档群记忆")
     async def group_mem_force_summarize(self, event: AstrMessageEvent):
         """[管理员] 强制归档本群未处理对话"""
         if not event.get_group_id():
@@ -1409,7 +1418,7 @@ class EngramPlugin(Star):
             logger.error("Engram command group_mem_force_summarize failed: %s", e, exc_info=True)
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
-    @filter.command("mem_export")
+    @filter.command("导出记忆")
     async def mem_export(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
         """导出原始消息数据用于模型微调"""
         try:
@@ -1419,7 +1428,7 @@ class EngramPlugin(Star):
             logger.error("Engram command mem_export failed: %s", e, exc_info=True)
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
 
-    @filter.command("mem_stats")
+    @filter.command("统计记忆")
     async def mem_stats(self, event: AstrMessageEvent):
         """查看消息统计信息"""
         user_id = event.get_sender_id()
@@ -1456,7 +1465,7 @@ class EngramPlugin(Star):
             yield event.plain_result("❌ 命令执行失败，请稍后重试。")
     
     @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("mem_export_all")
+    @filter.command("导出全部记忆")
     async def mem_export_all(self, event: AstrMessageEvent, format: str = "jsonl", days: str = ""):
         """[管理员] 导出所有用户的原始消息数据"""
         try:

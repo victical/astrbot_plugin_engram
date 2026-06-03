@@ -52,7 +52,7 @@
         "description": "查询记忆指令默认返回的数量",
         "type": "int",
         "default": 5,
-        "hint": "使用 /mem_list 指令时默认返回的记忆条数。可在指令中使用 /mem_list <数量> 临时覆盖此值（最多50条）"
+        "hint": "使用 /查看记忆 指令时默认返回的记忆条数。可在指令中使用 /查看记忆 <数量> 临时覆盖此值（最多50条）"
       }
     }
   },
@@ -733,7 +733,7 @@
         "description": "画像历史版本保留数量",
         "type": "int",
         "default": 5,
-        "hint": "控制每个用户最多保留多少个画像快照，用于 /profile rollback 回滚。"
+        "hint": "控制每个用户最多保留多少个画像快照，用于 /回滚画像 回滚。"
       },
       "profile_preference_ttl_days": {
         "description": "偏好字段 TTL（天）",
@@ -745,13 +745,13 @@
         "description": "启用画像羁绊功能",
         "type": "bool",
         "default": true,
-        "hint": "开启后 /profile show 会显示羁绊等级，LLM 注入画像会包含当前羁绊。关闭后隐藏羁绊展示、移除注入提示词中的羁绊/关系状态。供 astrbot_plugin_affinity 读取画像和记忆的只读适配器始终初始化，不受此开关影响。"
+        "hint": "开启后 /查看画像 会显示羁绊等级，LLM 注入画像会包含当前羁绊。关闭后隐藏羁绊展示、移除注入提示词中的羁绊/关系状态。供 astrbot_plugin_affinity 读取画像和记忆的只读适配器始终初始化，不受此开关影响。"
       },
       "show_profile_evidence_in_image": {
         "description": "在画像图片中展示证据摘要",
         "type": "bool",
         "default": false,
-        "hint": "开启后 /profile show 图片底部会附加证据摘要分节。"
+        "hint": "开启后 /查看画像 图片底部会附加证据摘要分节。"
       }
     }
   },
