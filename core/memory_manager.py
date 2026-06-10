@@ -1541,11 +1541,15 @@ class MemoryManager:
 
         for attempt in range(max_retries):
             try:
+                # 优先使用统一的 folding_model，再回退到各级专用配置
+                folding_model = str(self.config.get("folding_model", "")).strip()
                 preferred_model = str(self.config.get(model_config_key, "")).strip()
                 summarize_model = str(self.config.get("summarize_model", "")).strip()
 
                 provider = None
-                if preferred_model:
+                if folding_model:
+                    provider = self.context.get_provider_by_id(folding_model)
+                if not provider and preferred_model:
                     provider = self.context.get_provider_by_id(preferred_model)
                 if not provider and summarize_model:
                     provider = self.context.get_provider_by_id(summarize_model)
@@ -1994,6 +1998,13 @@ class MemoryManager:
         mode: str = "hybrid",
     ):
         """检索相关记忆并返回结构化结果，支持时间、类型与模式过滤。"""
+        # 排除最近N分钟的记忆（避免检索到当前对话的原始消息）
+        exclude_recent_minutes = self.config.get("exclude_recent_minutes", 0)
+        if exclude_recent_minutes > 0:
+            exclude_before = datetime.datetime.now() - datetime.timedelta(minutes=exclude_recent_minutes)
+            if not end_time or end_time > exclude_before:
+                end_time = exclude_before
+
         normalized_mode = self._normalize_search_mode(mode)
 
         if normalized_mode == "keyword":

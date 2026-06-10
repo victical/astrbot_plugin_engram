@@ -474,6 +474,25 @@
     "type": "object",
     "hint": "周/月/年多层摘要折叠调度与提示词。",
     "items": {
+      "folding_model": {
+        "description": "折叠总结统一模型",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "用于周/月/年总结的统一模型。留空时回退到 summarize_model 或默认模型。"
+      },
+      "folding_delay": {
+        "description": "总结用户间隔延迟（秒）",
+        "type": "int",
+        "default": 1,
+        "hint": "批量用户执行时每个用户后的固定延迟，适用于周/月/年总结。"
+      },
+      "folding_jitter": {
+        "description": "总结用户间随机抖动（秒）",
+        "type": "int",
+        "default": 0,
+        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值，适用于周/月/年总结。"
+      },
       "enable_memory_folding": {
         "description": "启用周总结折叠",
         "type": "bool",
@@ -503,25 +522,6 @@
         "type": "int",
         "default": 2,
         "hint": "24小时制，默认凌晨 2 点。"
-      },
-      "weekly_folding_delay": {
-        "description": "周总结用户间隔延迟（秒）",
-        "type": "int",
-        "default": 1,
-        "hint": "批量用户执行时每个用户后的固定延迟。"
-      },
-      "weekly_folding_jitter": {
-        "description": "周总结用户间随机抖动（秒）",
-        "type": "int",
-        "default": 0,
-        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
-      },
-      "weekly_folding_model": {
-        "description": "周总结使用模型",
-        "type": "string",
-        "_special": "select_provider",
-        "default": "",
-        "hint": "留空时回退到 summarize_model 或默认模型。"
       },
       "weekly_folding_prompt": {
         "description": "周总结提示词",
@@ -562,25 +562,6 @@
         "type": "int",
         "default": 3,
         "hint": "24小时制，默认凌晨 3 点。"
-      },
-      "monthly_folding_delay": {
-        "description": "月总结用户间隔延迟（秒）",
-        "type": "int",
-        "default": 1,
-        "hint": "批量用户执行时每个用户后的固定延迟。"
-      },
-      "monthly_folding_jitter": {
-        "description": "月总结用户间随机抖动（秒）",
-        "type": "int",
-        "default": 0,
-        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
-      },
-      "monthly_folding_model": {
-        "description": "月总结使用模型",
-        "type": "string",
-        "_special": "select_provider",
-        "default": "",
-        "hint": "留空时回退到 summarize_model 或默认模型。"
       },
       "monthly_folding_prompt": {
         "description": "月总结提示词",
@@ -627,25 +608,6 @@
         "type": "int",
         "default": 4,
         "hint": "24小时制，默认凌晨 4 点。"
-      },
-      "yearly_folding_delay": {
-        "description": "年度总结用户间隔延迟（秒）",
-        "type": "int",
-        "default": 1,
-        "hint": "批量用户执行时每个用户后的固定延迟。"
-      },
-      "yearly_folding_jitter": {
-        "description": "年度总结用户间随机抖动（秒）",
-        "type": "int",
-        "default": 0,
-        "hint": "在固定延迟基础上附加 0~N 秒随机抖动，分散请求峰值。"
-      },
-      "yearly_folding_model": {
-        "description": "年度总结使用模型",
-        "type": "string",
-        "_special": "select_provider",
-        "default": "",
-        "hint": "留空时回退到 summarize_model 或默认模型。"
       },
       "yearly_folding_prompt": {
         "description": "年度总结提示词",

@@ -684,8 +684,14 @@ class MemoryScheduler:
             return
 
         folding_days = self._safe_int(self.config.get("weekly_folding_days", 7), default=7, min_value=1)
-        delay = self._safe_int(self.config.get("weekly_folding_delay", 1), default=1, min_value=0)
-        jitter = self._safe_int(self.config.get("weekly_folding_jitter", 0), default=0, min_value=0)
+        delay = self._safe_int(
+            self.config.get("folding_delay") or self.config.get("weekly_folding_delay", 1),
+            default=1, min_value=0
+        )
+        jitter = self._safe_int(
+            self.config.get("folding_jitter") or self.config.get("weekly_folding_jitter", 0),
+            default=0, min_value=0
+        )
 
         user_ids = list(self.logic.last_chat_time.keys())
         if not user_ids:
@@ -729,8 +735,14 @@ class MemoryScheduler:
             return
 
         folding_days = self._safe_int(self.config.get("monthly_folding_days", 30), default=30, min_value=1)
-        delay = self._safe_int(self.config.get("monthly_folding_delay", 1), default=1, min_value=0)
-        jitter = self._safe_int(self.config.get("monthly_folding_jitter", 0), default=0, min_value=0)
+        delay = self._safe_int(
+            self.config.get("folding_delay") or self.config.get("monthly_folding_delay", 1),
+            default=1, min_value=0
+        )
+        jitter = self._safe_int(
+            self.config.get("folding_jitter") or self.config.get("monthly_folding_jitter", 0),
+            default=0, min_value=0
+        )
 
         loop = asyncio.get_event_loop()
         try:
@@ -788,8 +800,14 @@ class MemoryScheduler:
             return
 
         folding_days = self._safe_int(self.config.get("yearly_folding_days", 365), default=365, min_value=1)
-        delay = self._safe_int(self.config.get("yearly_folding_delay", 1), default=1, min_value=0)
-        jitter = self._safe_int(self.config.get("yearly_folding_jitter", 0), default=0, min_value=0)
+        delay = self._safe_int(
+            self.config.get("folding_delay") or self.config.get("yearly_folding_delay", 1),
+            default=1, min_value=0
+        )
+        jitter = self._safe_int(
+            self.config.get("folding_jitter") or self.config.get("yearly_folding_jitter", 0),
+            default=0, min_value=0
+        )
 
         loop = asyncio.get_event_loop()
         try:
