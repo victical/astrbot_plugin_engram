@@ -159,8 +159,9 @@ class MemoryToolHandler:
                 )
             else:
                 legacy_results = await logic.retrieve_memories(
-                    user_id,
-                    query,
+                    session_id=user_id,
+                    query=query,
+                    user_id=user_id,
                     limit=final_limit,
                     start_time=start_time,
                     end_time=end_time,

@@ -151,7 +151,13 @@ def test_save_memory_index_persists_scope_fields(tmp_path):
 def test_retrieve_memories_accepts_integer_created_at(tmp_path):
     manager = make_manager(tmp_path)
 
-    memories = asyncio.run(manager.retrieve_memories("u1", "考试计划", limit=1, force_retrieve=True))
+    memories = asyncio.run(manager.retrieve_memories(
+        session_id="u1",
+        query="考试计划",
+        user_id="u1",
+        limit=1,
+        force_retrieve=True
+    ))
 
     assert len(memories) == 1
     assert "remembered study plan" in memories[0]
@@ -162,8 +168,19 @@ def test_retrieve_memories_force_retrieve_bypasses_skip_intent(tmp_path):
     manager = make_manager(tmp_path)
     manager._intent_classifier = SimpleNamespace(classify_query=lambda query: ("skip", 0.0))
 
-    skipped = asyncio.run(manager.retrieve_memories("u1", "随便聊聊", limit=1))
-    forced = asyncio.run(manager.retrieve_memories("u1", "随便聊聊", limit=1, force_retrieve=True))
+    skipped = asyncio.run(manager.retrieve_memories(
+        session_id="u1",
+        query="随便聊聊",
+        user_id="u1",
+        limit=1
+    ))
+    forced = asyncio.run(manager.retrieve_memories(
+        session_id="u1",
+        query="随便聊聊",
+        user_id="u1",
+        limit=1,
+        force_retrieve=True
+    ))
 
     assert skipped == []
     assert len(forced) == 1
@@ -176,7 +193,13 @@ def test_retrieve_memories_falls_back_when_vector_query_raises(tmp_path):
     manager = make_manager(tmp_path, db=db)
     manager._collection_query_text = AsyncMock(side_effect=RuntimeError("vector unavailable"))
 
-    memories = asyncio.run(manager.retrieve_memories("u1", "study plan", limit=1, force_retrieve=True))
+    memories = asyncio.run(manager.retrieve_memories(
+        session_id="u1",
+        query="study plan",
+        user_id="u1",
+        limit=1,
+        force_retrieve=True
+    ))
 
     assert len(memories) == 1
     assert "fallback remembered study plan" in memories[0]
@@ -192,7 +215,13 @@ def test_retrieve_memories_falls_back_when_vector_result_empty(tmp_path):
         return_value={"ids": [[]], "documents": [[]], "distances": [[]], "metadatas": [[]]}
     )
 
-    memories = asyncio.run(manager.retrieve_memories("u1", "study plan", limit=1, force_retrieve=True))
+    memories = asyncio.run(manager.retrieve_memories(
+        session_id="u1",
+        query="study plan",
+        user_id="u1",
+        limit=1,
+        force_retrieve=True
+    ))
 
     assert len(memories) == 1
     assert "fallback remembered study plan" in memories[0]

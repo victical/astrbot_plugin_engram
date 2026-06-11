@@ -592,10 +592,11 @@ class EngramPlugin(Star):
             await self._handle_group_llm_request(event, req)
             return
         user_id = event.get_sender_id()
+        session_id = event.unified_msg_origin
         query = event.message_str
         profile = await self.logic.get_user_profile(user_id)
         profile_block = self._llm_injector.build_profile_block(profile)
-        
+
         memory_block = ""
         memories = []
         try:
@@ -608,24 +609,28 @@ class EngramPlugin(Star):
             cache_hit = False
             topic_key = ""
             try:
-                cache_hit, memories, topic_key = self._get_cached_topic_memories(user_id, query)
+                cache_hit, memories, topic_key = self._get_cached_topic_memories(session_id, query)
             except Exception as e:
                 logger.debug(f"Engram：话题缓存读取失败，已回退为直接检索：{e}")
                 cache_hit, memories, topic_key = False, [], ""
 
             if not cache_hit:
                 try:
-                    memories = await self.logic.retrieve_memories(user_id, query)
+                    memories = await self.logic.retrieve_memories(
+                        session_id=session_id,
+                        query=query,
+                        user_id=user_id
+                    )
                 except Exception as e:
                     logger.error(f"Engram：on_llm_request 中 retrieve_memories 调用失败：{e}")
                     memories = []
 
                 try:
-                    self._set_cached_topic_memories(user_id, query, topic_key, memories)
+                    self._set_cached_topic_memories(session_id, query, topic_key, memories)
                 except Exception as e:
                     logger.debug(f"Engram：话题缓存写入失败，已忽略：{e}")
             else:
-                logger.debug(f"Engram：话题缓存命中，user_id={user_id}，query={query[:30]}")
+                logger.debug(f"Engram：话题缓存命中，session_id={session_id}，query={query[:30]}")
 
             if memories:
                 memory_prompt = "\n".join(memories)
@@ -685,7 +690,8 @@ class EngramPlugin(Star):
         group_id = event.get_group_id()
         sender_id = event.get_sender_id()
         user_name = event.get_sender_name()
-        storage_id = self._resolve_group_storage_id(group_id, sender_id)
+        session_id = event.unified_msg_origin
+        storage_id = session_id  # 使用 unified_msg_origin 作为 storage_id
         group_source_type = str(self.config.get("group_memory_source_type", "group")).strip() or "group"
 
         event.set_extra("group_memory_pending", {
@@ -722,16 +728,18 @@ class EngramPlugin(Star):
             if not cache_hit:
                 try:
                     group_memories = await group_manager.retrieve_memories(
-                        storage_id,
-                        content,
+                        session_id=storage_id,
+                        query=content,
+                        user_id=sender_id,
                         source_types=[group_source_type]
                     )
                     memories = list(group_memories or [])
                     private_memories = []
                     if self.config.get("group_memory_allow_private_recall", False):
                         private_memories = await self.logic.retrieve_memories(
-                            sender_id,
-                            content,
+                            session_id=sender_id,
+                            query=content,
+                            user_id=sender_id,
                             source_types=["private"]
                         )
                         memories.extend([m for m in private_memories if m not in memories])

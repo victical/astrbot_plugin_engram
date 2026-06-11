@@ -178,6 +178,20 @@
     "type": "object",
     "hint": "长期记忆召回、关键词增强与排序融合策略。",
     "items": {
+      "memory_retrieval_scope": {
+        "description": "记忆检索范围",
+        "type": "string",
+        "options": [
+          "session_only",
+          "user_plus_current_session"
+        ],
+        "labels": [
+          "仅当前会话",
+          "用户所有记忆+当前会话"
+        ],
+        "default": "session_only",
+        "hint": "session_only：仅检索当前会话的记忆（私聊只看私聊，群聊只看当前群）；user_plus_current_session：检索用户在所有会话的记忆+当前会话所有人的记忆（群聊时可看到其他人讨论过的话题）"
+      },
       "max_recent_memories": {
         "description": "检索时召回的最大长期记忆数量",
         "type": "int",

@@ -174,9 +174,10 @@ class MemoryFacade:
     ):
         """检索相关记忆（支持时间、来源类型过滤，以及显式强制检索）。"""
         return await self._memory_manager.retrieve_memories(
-            user_id,
-            query,
-            limit,
+            session_id=user_id,
+            query=query,
+            user_id=user_id,
+            limit=limit,
             start_time=start_time,
             end_time=end_time,
             source_types=source_types,

@@ -154,8 +154,9 @@ class MemoryCommandHandler:
             str: 格式化的命令结果
         """
         memories = await self.memory.retrieve_memories(
-            user_id,
-            query,
+            session_id=user_id,
+            query=query,
+            user_id=user_id,
             limit=3,
             force_retrieve=True,
         )

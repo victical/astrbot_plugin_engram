@@ -892,9 +892,12 @@ class MemoryManager:
         if not texts:
             return []
 
+        logger.debug(f"Engram：开始生成 embedding，文本数量={len(texts)}")
         provider, provider_id = await self._get_embedding_provider()
         if not provider:
+            logger.warning(f"Engram：embedding provider 不可用，provider_id={provider_id}")
             return []
+        logger.debug(f"Engram：使用 embedding provider: {provider_id}")
 
         method_names = (
             "text_embedding",
@@ -931,8 +934,10 @@ class MemoryManager:
 
             for variant in call_variants:
                 try:
+                    logger.debug(f"Engram：尝试调用 {method_name}(variant={variant})")
                     vectors = await _invoke(variant, texts)
                     if vectors:
+                        logger.debug(f"Engram：成功生成 {len(vectors)} 个向量")
                         return vectors
                 except TypeError as e:
                     last_error = e
@@ -1748,6 +1753,7 @@ class MemoryManager:
 
     async def _retrieve_memories_by_keyword_fallback(
         self,
+        session_id,
         user_id,
         query,
         limit,
@@ -1768,12 +1774,15 @@ class MemoryManager:
             keyword_tokens.append(str(query).strip())
         keyword_tokens = list(dict.fromkeys([k for k in keyword_tokens if k]))[:30]
 
+        # 根据 memory_retrieval_scope 配置决定过滤策略
+        retrieval_scope = self.config.get("memory_retrieval_scope", "session_only")
+
         # 优先使用 DB 专用关键词检索接口；旧接口下回退到最近记忆列表过滤
         if hasattr(self.db, "search_memory_indexes_by_keywords"):
             candidates = await loop.run_in_executor(
                 self.executor,
                 self.db.search_memory_indexes_by_keywords,
-                user_id,
+                session_id,
                 keyword_tokens,
                 candidate_limit,
                 start_time,
@@ -1782,7 +1791,30 @@ class MemoryManager:
                 bool(self.config.get("enable_sqlite_bm25_fallback", True)),
             )
         else:
-            candidates = await loop.run_in_executor(self.executor, self.db.get_memory_list, user_id, candidate_limit)
+            candidates = await loop.run_in_executor(self.executor, self.db.get_memory_list, session_id, candidate_limit)
+
+        # 如果是 user_plus_current_session 模式，需要额外检索用户的其他会话记忆
+        if retrieval_scope == "user_plus_current_session" and user_id:
+            user_candidates = []
+            if hasattr(self.db, "search_memory_indexes_by_user_id"):
+                user_candidates = await loop.run_in_executor(
+                    self.executor,
+                    self.db.search_memory_indexes_by_user_id,
+                    user_id,
+                    keyword_tokens,
+                    candidate_limit,
+                    start_time,
+                    end_time,
+                    source_types,
+                )
+            # 合并结果并去重（按 index_id）
+            if user_candidates:
+                seen_ids = {getattr(c, "index_id", None) for c in candidates}
+                for uc in user_candidates:
+                    uc_id = getattr(uc, "index_id", None)
+                    if uc_id and uc_id not in seen_ids:
+                        candidates.append(uc)
+                        seen_ids.add(uc_id)
 
         if not candidates:
             return []
@@ -1991,8 +2023,9 @@ class MemoryManager:
 
     async def retrieve_memory_search_results(
         self,
-        user_id,
+        session_id,
         query,
+        user_id=None,
         limit=None,
         start_time=None,
         end_time=None,
@@ -2012,6 +2045,7 @@ class MemoryManager:
 
         if normalized_mode == "keyword":
             return await self._retrieve_memories_by_keyword_fallback(
+                session_id=session_id,
                 user_id=user_id,
                 query=query,
                 limit=limit or self.config.get("max_recent_memories", 3),
@@ -2064,7 +2098,7 @@ class MemoryManager:
         if intent_type == "skip" and force_retrieve:
             logger.debug("Engram：查询被判定为 skip，但 force_retrieve=True，继续检索")
 
-        # 构造 where 过滤：用户维度 + 可选来源类型
+        # 构造 where 过滤：session维度 + 可选来源类型
         # Chroma 复杂过滤统一走 $and，避免"字段 + $or"混写兼容性问题
         allowed_types = self._get_allowed_source_types()
         normalized_source_types = []
@@ -2078,7 +2112,23 @@ class MemoryManager:
             if token in allowed_types:
                 normalized_source_types = [token]
 
-        where_clauses = [{"user_id": user_id}]
+        # 根据 memory_retrieval_scope 配置决定过滤策略
+        where_clauses = []
+        retrieval_scope = self.config.get("memory_retrieval_scope", "session_only")
+
+        if retrieval_scope == "user_plus_current_session" and user_id:
+            # 用户所有记忆 + 当前会话所有人的记忆
+            where_clauses.append({
+                "$or": [
+                    {"user_id": user_id},
+                    {"session_id": session_id}
+                ]
+            })
+        elif retrieval_scope == "session_only":
+            # 仅当前会话
+            where_clauses.append({"session_id": session_id})
+        # else: 不过滤（全局检索，通常不推荐）
+
         if len(normalized_source_types) == 1:
             where_clauses.append({"source_type": normalized_source_types[0]})
         elif len(normalized_source_types) > 1:
@@ -2099,6 +2149,7 @@ class MemoryManager:
         except Exception as e:
             logger.warning(f"Engram：记忆查询异常，已回退关键词检索：{e}")
             return await self._retrieve_memories_by_keyword_fallback(
+                session_id=session_id,
                 user_id=user_id,
                 query=query,
                 limit=limit,
@@ -2110,6 +2161,7 @@ class MemoryManager:
         if not results or not results.get('ids') or not results['ids'] or not results['ids'][0]:
             logger.debug("Engram：向量检索结果为空，已回退关键词检索")
             return await self._retrieve_memories_by_keyword_fallback(
+                session_id=session_id,
                 user_id=user_id,
                 query=query,
                 limit=limit,
@@ -2475,7 +2527,8 @@ class MemoryManager:
             ).strip() or "unknown"
 
             if rank_strategy == "rrf" and use_keyword and memory_data:
-                quality_factor = max(0.0, 1.5 - distance) / 1.5
+                # Cosine 距离转相似度：distance ∈ [0,2], similarity = 1 - distance/2
+                quality_factor = max(0.0, 1.0 - distance / 2.0)
                 best_score = memory_data[0].get('display_score', 1e-9)
                 raw_percent = data.get('display_score', 0) / max(best_score, 1e-9) * 100
                 relevance_percent = max(0, min(100, int(raw_percent * quality_factor)))
@@ -2537,8 +2590,9 @@ class MemoryManager:
 
     async def retrieve_memories(
         self,
-        user_id,
+        session_id,
         query,
+        user_id=None,
         limit=None,
         start_time=None,
         end_time=None,
@@ -2548,8 +2602,9 @@ class MemoryManager:
     ):
         """检索相关记忆并返回兼容旧版注入/命令链路的文本结果。"""
         results = await self.retrieve_memory_search_results(
-            user_id,
+            session_id,
             query,
+            user_id=user_id,
             limit=limit,
             start_time=start_time,
             end_time=end_time,
