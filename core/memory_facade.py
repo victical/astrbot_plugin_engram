@@ -225,10 +225,6 @@ class MemoryFacade:
         """按用户执行月总结折叠"""
         return await self._memory_manager.fold_monthly_summaries(user_id, days)
 
-    async def fold_yearly_summaries(self, user_id, days=365):
-        """按用户执行年度总结折叠"""
-        return await self._memory_manager.fold_yearly_summaries(user_id, days)
-
     async def rebuild_vector_collection(self, full_rebuild: bool = False, batch_size: int = 200):
         """手动重建向量库"""
         return await self._memory_manager.rebuild_vector_collection(full_rebuild, batch_size)

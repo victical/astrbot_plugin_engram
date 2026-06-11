@@ -586,52 +586,6 @@
         "editor_theme": "vs-dark",
         "default": "你是一名记忆整理助手。请根据下方【weekly_summary 列表】生成一段月总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 保留关键人物/地点/事件/数值；\n3. 提炼本月主题、关键变化与持续偏好；\n4. 语言简洁，160~280字。\n\n【weekly_summary 列表】\n{{memory_texts}}",
         "hint": "{{memory_texts}}：最近多条周级总结列表"
-      },
-      "enable_yearly_folding": {
-        "description": "启用年度总结折叠",
-        "type": "bool",
-        "default": true,
-        "hint": "开启后每年按计划将近 N 天 monthly/weekly 记忆折叠为一条 yearly 总结。"
-      },
-      "yearly_folding_days": {
-        "description": "年度总结折叠回溯天数",
-        "type": "int",
-        "default": 365,
-        "hint": "执行年度总结时纳入最近多少天的 monthly（兜底兼容 weekly）记忆。"
-      },
-      "yearly_folding_min_samples": {
-        "description": "触发年度总结最少样本数",
-        "type": "int",
-        "default": 6,
-        "hint": "候选月记条数不足该值时跳过年度总结生成。"
-      },
-      "yearly_folding_month": {
-        "description": "年度总结执行月份",
-        "type": "int",
-        "default": 1,
-        "hint": "每年在几月执行（1-12）。默认 1 月。"
-      },
-      "yearly_folding_day": {
-        "description": "年度总结执行日期",
-        "type": "int",
-        "default": 1,
-        "hint": "每年执行月中的第几天执行（1-28 推荐）。超出当月天数时自动回退到月末。"
-      },
-      "yearly_folding_hour": {
-        "description": "年度总结执行小时",
-        "type": "int",
-        "default": 4,
-        "hint": "24小时制，默认凌晨 4 点。"
-      },
-      "yearly_folding_prompt": {
-        "description": "年度总结提示词",
-        "type": "string",
-        "obvious_hint": true,
-        "editor_mode": true,
-        "editor_language": "markdown",
-        "editor_theme": "vs-dark",
-        "default": "你是一名记忆整理助手。请根据下方【monthly_summary 列表】生成一段年度总结。\n\n要求：\n1. 只基于给定内容，不编造；\n2. 归纳全年主线、阶段变化与稳定偏好；\n3. 保留关键人物/地点/事件/数值；\n4. 语言简洁，220~420字。\n\n【monthly_summary 列表】\n{{memory_texts}}",
-        "hint": "{{memory_texts}}：最近多条月级总结列表"
       }
     }
   },

@@ -1,4 +1,0 @@
-url:https://router.tumuer.me/v1
-key:sk-v2d522PocckMsK8RDljtGCjdvwa1r93cKL18I0tmEAS61QAU
-mdoel:text-embedding-3-large
-维度：1024

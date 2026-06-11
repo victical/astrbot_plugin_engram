@@ -166,9 +166,6 @@ class MemoryScheduler:
 
         if self.config.get("enable_monthly_folding", True) and callable(getattr(self.logic, "fold_monthly_summaries", None)):
             self._create_task("monthly_folding_scheduler", self.monthly_folding_scheduler())
-
-        if self.config.get("enable_yearly_folding", True) and callable(getattr(self.logic, "fold_yearly_summaries", None)):
-            self._create_task("yearly_folding_scheduler", self.yearly_folding_scheduler())
     
     def shutdown(self):
         """停止调度器（设置关闭标志）"""
@@ -481,27 +478,6 @@ class MemoryScheduler:
         next_day = min(run_day, next_last_day)
         return datetime.datetime(year, month, next_day, run_hour, 0, 0, tzinfo=now.tzinfo)
 
-    def _calculate_next_yearly_run(
-        self,
-        now: datetime.datetime,
-        run_month: int,
-        run_day: int,
-        run_hour: int
-    ) -> datetime.datetime:
-        """计算下一次年度总结执行时间。"""
-        run_month = self._safe_int(run_month, default=1, min_value=1, max_value=12)
-        run_day = self._safe_int(run_day, default=1, min_value=1, max_value=31)
-        run_hour = self._safe_int(run_hour, default=4, min_value=0, max_value=23)
-
-        curr_last_day = calendar.monthrange(now.year, run_month)[1]
-        curr_day = min(run_day, curr_last_day)
-        candidate = datetime.datetime(now.year, run_month, curr_day, run_hour, 0, 0, tzinfo=now.tzinfo)
-        if candidate > now:
-            return candidate
-
-        next_last_day = calendar.monthrange(now.year + 1, run_month)[1]
-        next_day = min(run_day, next_last_day)
-        return datetime.datetime(now.year + 1, run_month, next_day, run_hour, 0, 0, tzinfo=now.tzinfo)
 
     async def weekly_folding_scheduler(self):
         """每周调度周总结折叠任务（默认周日 02:00）"""
@@ -621,60 +597,6 @@ class MemoryScheduler:
                     logger.error(f"Engram 月折叠调度器异常：{e}")
                 await asyncio.sleep(60)
 
-    async def yearly_folding_scheduler(self):
-        """每年调度年度总结折叠任务（默认每年 1 月 1 日 04:00）。"""
-        task_name = "yearly_folding_scheduler"
-
-        while not self._is_shutdown:
-            try:
-                run_month = self._safe_int(self.config.get("yearly_folding_month", 1), default=1, min_value=1, max_value=12)
-                run_day = self._safe_int(self.config.get("yearly_folding_day", 1), default=1, min_value=1, max_value=31)
-                run_hour = self._safe_int(self.config.get("yearly_folding_hour", 4), default=4, min_value=0, max_value=23)
-                now = self._now()
-                next_run = self._calculate_next_yearly_run(now, run_month, run_day, run_hour)
-                sleep_seconds = self._calculate_sleep_until(next_run, now)
-                run_key = next_run.strftime("%Y")
-
-                logger.info(
-                    "Engram：年折叠已调度，距离执行约 %.1f 小时",
-                    sleep_seconds / 3600
-                )
-                await asyncio.sleep(sleep_seconds)
-
-                if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
-                    self._observe_skip(task_name, "shutdown_signal")
-                    break
-                if getattr(self.logic.executor, "_shutdown", False):
-                    self._observe_skip(task_name, "executor_shutdown")
-                    self._is_shutdown = True
-                    break
-
-                if not self._should_run_window(task_name, run_key, next_run):
-                    self._observe_skip(task_name, "run_window_already_completed")
-                    continue
-
-                started_at = time.perf_counter()
-                try:
-                    await self._execute_yearly_folding()
-                    self._observe_run(task_name, started_at, True)
-                    self._mark_run_window_complete(task_name, run_key, next_run)
-                except Exception as e:
-                    self._observe_run(task_name, started_at, False, e)
-                    if not self._is_shutdown:
-                        logger.error("Engram yearly folding scheduler failed: %s", e)
-                    await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                self._observe_skip(task_name, "task_cancelled")
-                logger.debug("Engram：年折叠调度器任务已取消")
-                break
-            except Exception as e:
-                if "cannot schedule new futures after shutdown" in str(e):
-                    self._observe_skip(task_name, "executor_shutdown_exception")
-                    self._is_shutdown = True
-                    break
-                if not self._is_shutdown:
-                    logger.error(f"Engram 年折叠调度器异常：{e}")
-                await asyncio.sleep(60)
 
     async def _execute_weekly_folding(self):
         """执行所有活跃用户的周总结折叠"""
@@ -792,70 +714,6 @@ class MemoryScheduler:
                 meta={"users": len(user_ids)},
             )
 
-    async def _execute_yearly_folding(self):
-        """执行所有用户的年度总结折叠。"""
-        task_name = "execute_yearly_folding"
-        if not self.config.get("enable_yearly_folding", True):
-            self._observe_skip(task_name, "yearly_folding_disabled")
-            return
-
-        folding_days = self._safe_int(self.config.get("yearly_folding_days", 365), default=365, min_value=1)
-        delay = self._safe_int(
-            self.config.get("folding_delay") or self.config.get("yearly_folding_delay", 1),
-            default=1, min_value=0
-        )
-        jitter = self._safe_int(
-            self.config.get("folding_jitter") or self.config.get("yearly_folding_jitter", 0),
-            default=0, min_value=0
-        )
-
-        loop = asyncio.get_event_loop()
-        try:
-            user_ids = await loop.run_in_executor(self.logic.executor, self.logic.db.get_all_user_ids)
-        except Exception as e:
-            logger.debug(f"Engram：年折叠获取全部用户失败，已回退到活跃用户列表：{e}")
-            self._observe_skip(task_name, "get_all_user_ids_failed_fallback_active_users")
-            user_ids = list(self.logic.last_chat_time.keys())
-
-        if not user_ids:
-            self._observe_skip(task_name, "no_users_to_fold")
-            return
-
-        had_error = False
-        started_at = time.perf_counter()
-        for user_id in user_ids:
-            if self._is_shutdown or getattr(self.logic, "_is_shutdown", False):
-                self._observe_skip(task_name, "shutdown_during_iteration")
-                break
-            if user_id is None:
-                self._observe_skip(task_name, "skip_none_user_id")
-                continue
-            uid_str = str(user_id).lower()
-            if uid_str in {"system", "astrbot"}:
-                self._observe_skip(task_name, "skip_system_user")
-                continue
-
-            try:
-                await self.logic.fold_yearly_summaries(user_id, days=folding_days)
-            except Exception as e:
-                had_error = True
-                logger.error(f"Engram：用户 {user_id} 年折叠失败：{e}")
-
-            if delay > 0 or jitter > 0:
-                await asyncio.sleep(max(0, delay) + max(0, random.randint(0, jitter)))
-
-        if had_error:
-            self._observe_run(task_name, started_at, False, RuntimeError("yearly_folding_partial_failure"))
-            self._push_activity(
-                title=f"年折叠部分失败（{len(user_ids)} 用户）",
-                meta={"users": len(user_ids)},
-            )
-        else:
-            self._observe_run(task_name, started_at, True)
-            self._push_activity(
-                title=f"年折叠完成（{len(user_ids)} 用户）",
-                meta={"users": len(user_ids)},
-            )
 
     # ========== 记忆衰减与修剪 ==========
 

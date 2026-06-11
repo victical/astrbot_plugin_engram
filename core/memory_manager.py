@@ -359,7 +359,7 @@ class MemoryManager:
 
     def _get_allowed_source_types(self):
         """获取允许的 source_type 列表（含默认/群聊配置）。"""
-        allowed = {"private", "daily_summary", "weekly", "monthly", "yearly"}
+        allowed = {"private", "weekly", "monthly", "yearly"}
         default_type = str(self.default_source_type or "").strip().lower()
         if default_type:
             allowed.add(default_type)
@@ -1696,7 +1696,7 @@ class MemoryManager:
             user_id,
             days=days,
             min_samples=min_samples,
-            source_types=["daily_summary", "private"],
+            source_types=["private"],
             output_source_type="weekly",
             prompt_template=prompt_template,
             model_config_key="weekly_folding_model",
@@ -1720,36 +1720,13 @@ class MemoryManager:
             user_id,
             days=days,
             min_samples=min_samples,
-            source_types=["weekly", "daily_summary", "private"],
+            source_types=["weekly", "private"],
             output_source_type="monthly",
             prompt_template=prompt_template,
             model_config_key="monthly_folding_model",
             level_label="monthly"
         )
 
-    async def fold_yearly_summaries(self, user_id, days=365):
-        """将近 N 天的月级总结折叠为一条年度总结，写入 SQLite + ChromaDB。"""
-        min_samples = self.config.get("yearly_folding_min_samples", 6)
-        prompt_template = self.config.get(
-            "yearly_folding_prompt",
-            "你是一名记忆整理助手。请根据下方【monthly_summary 列表】生成一段年度总结。\n\n"
-            "要求：\n"
-            "1. 只基于给定内容，不编造；\n"
-            "2. 归纳全年主线、阶段变化与稳定偏好；\n"
-            "3. 保留关键人物/地点/事件/数值；\n"
-            "4. 语言简洁，220~420字。\n\n"
-            "【monthly_summary 列表】\n{{memory_texts}}"
-        )
-        return await self._fold_summaries(
-            user_id,
-            days=days,
-            min_samples=min_samples,
-            source_types=["monthly", "weekly"],
-            output_source_type="yearly",
-            prompt_template=prompt_template,
-            model_config_key="yearly_folding_model",
-            level_label="yearly"
-        )
 
     async def _retrieve_memories_by_keyword_fallback(
         self,
