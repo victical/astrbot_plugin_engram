@@ -272,6 +272,38 @@ python tools/check_config_sync.py
 输出报告：
 - `reports/config_sync_report.md`
 
+### ⭐ 记忆召回质量测试（新功能）
+
+本插件现已支持**基于真实数据的记忆召回质量评估**！这是一套自动化测试工具，用于客观评估记忆召回效果。
+
+**快速使用：**
+
+```bash
+# 1. 先在 AstrBot 中导出数据
+/导出记忆 jsonl 30
+
+# 2. 运行测试（Windows）
+.\tests\run_memory_test.bat
+
+# 或者（Linux/Mac）
+bash tests/run_memory_test.sh
+
+# 3. 查看报告
+# 报告位置：tests/memory_recall_report.md
+```
+
+**测试指标：**
+- 召回成功率：能否找到相关记忆
+- 平均相关性：召回内容的准确度
+- 原文回溯成功率：UUID关联是否可用（核心优势）
+- 平均召回耗时：性能评估
+
+**详细文档：**
+- 完整使用指南：`tests/README_memory_testing.md`
+- 工具总结：`tests/SUMMARY_memory_testing.md`
+
+💡 **建议定期运行此测试，监控记忆质量变化趋势。**
+
 ## 🧪 功能测试指南
 
 如果您需要验证插件的所有核心功能，请按照以下步骤操作：

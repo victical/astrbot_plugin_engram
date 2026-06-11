@@ -1,0 +1,30 @@
+{"id": "TC001", "original_message": "小糯怎么一直提我喜欢的水果啊，你不是已经告诉过我好几次了吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯怎么一直提我喜欢的水果啊", "你不是已经告诉过我好几次了吗"], "source_timestamp": "2026-01-15 11:24:24", "category": "preference"}
+{"id": "TC002", "original_message": "我喜欢吃什么", "test_query": "我喜欢什么", "expected_keywords": ["我喜欢吃什么"], "source_timestamp": "2026-01-28 22:53:21", "category": "preference"}
+{"id": "TC003", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-05 21:11:45", "category": "preference"}
+{"id": "TC004", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-05 21:17:35", "category": "preference"}
+{"id": "TC005", "original_message": "我是问昨天你在论坛发的帖子", "test_query": "我是做什么的", "expected_keywords": ["我是问昨天你在论坛发的帖子"], "source_timestamp": "2026-02-06 14:20:58", "category": "fact"}
+{"id": "TC006", "original_message": "其实我不喜欢打牌，之前说的打牌是我妈啦", "test_query": "我讨厌什么", "expected_keywords": ["其实我不喜欢打牌", "之前说的打牌是我妈啦"], "source_timestamp": "2026-02-17 00:23:13", "category": "preference"}
+{"id": "TC007", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-18 01:03:30", "category": "preference"}
+{"id": "TC008", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 01:45:08", "category": "preference"}
+{"id": "TC009", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 01:48:41", "category": "preference"}
+{"id": "TC010", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 01:58:09", "category": "preference"}
+{"id": "TC011", "original_message": "还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:00:46", "category": "preference"}
+{"id": "TC012", "original_message": "还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:05:01", "category": "preference"}
+{"id": "TC013", "original_message": "还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:07:15", "category": "preference"}
+{"id": "TC014", "original_message": "还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:08:35", "category": "preference"}
+{"id": "TC015", "original_message": "还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:09:41", "category": "preference"}
+{"id": "TC016", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:13:49", "category": "preference"}
+{"id": "TC017", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-19 02:17:45", "category": "preference"}
+{"id": "TC018", "original_message": "小糯我喜欢吃什么水果", "test_query": "我喜欢什么", "expected_keywords": ["小糯我喜欢吃什么水果"], "source_timestamp": "2026-02-20 00:09:46", "category": "preference"}
+{"id": "TC019", "original_message": "小糯我喜欢吃什么水果", "test_query": "我喜欢什么", "expected_keywords": ["小糯我喜欢吃什么水果"], "source_timestamp": "2026-02-20 00:24:36", "category": "preference"}
+{"id": "TC020", "original_message": "小糯真不记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯真不记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-20 00:30:15", "category": "preference"}
+{"id": "TC021", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-02-24 15:30:21", "category": "preference"}
+{"id": "TC022", "original_message": "你一个个查一遍呗，其实我是想要你主动找，而不是我告诉你", "test_query": "我是做什么的", "expected_keywords": ["你一个个查一遍呗", "其实我是想要你主动找", "而不是我告诉你"], "source_timestamp": "2026-03-01 00:57:29", "category": "fact"}
+{"id": "TC023", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-03-01 04:18:22", "category": "preference"}
+{"id": "TC024", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-03-01 04:24:44", "category": "preference"}
+{"id": "TC025", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-03-01 04:31:48", "category": "preference"}
+{"id": "TC026", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-03-01 16:57:14", "category": "preference"}
+{"id": "TC027", "original_message": "小糯还记得我喜欢吃什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢吃什么水果吗"], "source_timestamp": "2026-03-01 17:07:12", "category": "preference"}
+{"id": "TC028", "original_message": "小糯还记得我喜欢什么水果吗", "test_query": "我喜欢什么", "expected_keywords": ["小糯还记得我喜欢什么水果吗"], "source_timestamp": "2026-03-08 23:48:09", "category": "preference"}
+{"id": "TC029", "original_message": "但其实qq上的生日是我随便写的。我是过农历生日，是正月二十八，也就是明天生日哦", "test_query": "我是做什么的", "expected_keywords": ["但其实qq上的生日是我随便写的", "我是过农历生日", "是正月二十八", "也就是明天生日哦"], "source_timestamp": "2026-03-10 20:42:15", "category": "fact"}
+{"id": "TC030", "original_message": "但其实qq上的生日是我随便写的。我是过农历生日，是正月二十三，也就是明天生日哦", "test_query": "我是做什么的", "expected_keywords": ["但其实qq上的生日是我随便写的", "我是过农历生日", "是正月二十三", "也就是明天生日哦"], "source_timestamp": "2026-03-10 20:42:55", "category": "fact"}

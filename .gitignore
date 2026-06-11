@@ -51,3 +51,5 @@ sync_engram.sh
 worktrees/
 .codex-tasks/
 .ruff_cache/
+engram_memories.db
+chroma.sqlite3
