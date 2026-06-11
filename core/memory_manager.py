@@ -2119,7 +2119,7 @@ class MemoryManager:
             )
 
         # 获取配置
-        similarity_threshold = float(self.config.get("memory_similarity_threshold", 0.6))
+        similarity_threshold = float(self.config.get("memory_similarity_threshold", 1.4))
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
         enable_memory_decay = self.config.get("enable_memory_decay", True)
