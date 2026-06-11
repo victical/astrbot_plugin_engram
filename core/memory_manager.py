@@ -233,7 +233,10 @@ class MemoryManager:
 
             def _init_chroma():
                 client = chromadb.PersistentClient(path=self.chroma_path)
-                collection = client.get_or_create_collection(name="long_term_memories")
+                collection = client.get_or_create_collection(
+                    name="long_term_memories",
+                    metadata={"hnsw:space": "cosine"}  # OpenAI embedding使用余弦相似度
+                )
                 return client, collection
 
             try:
@@ -2953,7 +2956,10 @@ class MemoryManager:
                         self.chroma_client.delete_collection(name="long_term_memories")
                     except Exception as e:
                         logger.debug(f"Engram：删除旧 Chroma 集合已跳过或失败，将继续重建：{e}")
-                    self.collection = self.chroma_client.get_or_create_collection(name="long_term_memories")
+                    self.collection = self.chroma_client.get_or_create_collection(
+                        name="long_term_memories",
+                        metadata={"hnsw:space": "cosine"}
+                    )
 
             await loop.run_in_executor(self.executor, _backup_and_reset_collection)
 
