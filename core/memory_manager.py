@@ -2116,7 +2116,7 @@ class MemoryManager:
             )
 
         # 获取配置
-        similarity_threshold = float(self.config.get("memory_similarity_threshold", 1.5))
+        similarity_threshold = float(self.config.get("memory_similarity_threshold", 0.6))
         show_relevance_score = self.config.get("show_relevance_score", True)
         enable_keyword_boost = self.config.get("enable_keyword_boost", True)
         enable_memory_decay = self.config.get("enable_memory_decay", True)
@@ -2148,7 +2148,7 @@ class MemoryManager:
 
         # 动态阈值与权重调整（按查询类别）
         if intent_type == "recall":
-            similarity_threshold *= 1.15  # 放宽阈值
+            similarity_threshold *= 1.3  # 放宽阈值（基数降低后需更大乘数）
             weight_vector = max(weight_vector, 0.55)
             weight_keyword = min(weight_keyword, 0.35)
             weight_recency = max(weight_recency, 0.1)
@@ -2215,8 +2215,15 @@ class MemoryManager:
             "keyword_doc_freq": {},
         }
 
+        # 诊断日志：记录检索结果总数
+        logger.info(f"Engram：检索到 {len(results['ids'][0])} 条候选记忆，阈值={similarity_threshold:.3f}")
+
         for i in range(len(results['ids'][0])):
             distance = distances[i] if distances and i < len(distances) else float('inf')
+
+            # 诊断日志：记录前5条的距离值
+            if i < 5:
+                logger.info(f"Engram：记忆#{i} distance={distance:.3f} vs threshold={similarity_threshold:.3f}")
 
             # 过滤低相关性结果
             if distance > similarity_threshold:
