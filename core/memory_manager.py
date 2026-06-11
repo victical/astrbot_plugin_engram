@@ -2741,49 +2741,52 @@ class MemoryManager:
                 'vector_data': vector_data,
             }
 
-            # 1. 从 ChromaDB 删除向量数据
-            await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
+            # 1. SQLite 事务：删除索引、原文/标记未归档、写入撤销历史
+            def _sqlite_delete_transaction():
+                with self.db.db.atomic():
+                    # 1.1 删除记忆索引
+                    self.db.delete_memory_index(index_id)
 
-            # 2. 如果需要，删除关联的原始消息
-            if delete_raw and target_memory.ref_uuids:
-                uuids = self._safe_load_uuids(target_memory.ref_uuids)
-                await loop.run_in_executor(self.executor, self.db.delete_raw_memories_by_uuids, uuids)
-            else:
-                # 不删除原始消息时，将其标记为未归档，以便重新总结
-                if deleted_uuids:
-                    def _mark_unarchived():
+                    # 1.2 删除或标记原始消息
+                    if delete_raw and deleted_uuids:
+                        self.db.delete_raw_memories_by_uuids(deleted_uuids)
+                    elif deleted_uuids:
+                        # 标记为未归档
                         RawMemory = self.db.RawMemory
-                        with self.db.db.connection_context():
-                            RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
-                    await loop.run_in_executor(self.executor, _mark_unarchived)
+                        RawMemory.update(is_archived=False).where(RawMemory.uuid << deleted_uuids).execute()
 
-            # 3. 从 SQLite 删除记忆索引
-            await loop.run_in_executor(self.executor, self.db.delete_memory_index, index_id)
+                    # 1.3 写入撤销历史
+                    scope_key = self._build_delete_scope_key(user_id, target_memory.source_type)
+                    source_type = str(target_memory.source_type or self.default_source_type or "private")
+                    delete_history_id = self.db.save_delete_history(
+                        scope_key=scope_key,
+                        user_id=str(user_id or ""),
+                        group_id=str(user_id or "") if source_type.startswith("group") else "",
+                        source_type=source_type,
+                        index_id=index_id,
+                        summary=summary,
+                        ref_uuids=target_memory.ref_uuids,
+                        prev_index_id=target_memory.prev_index_id,
+                        created_at=target_memory.created_at,
+                        active_score=target_memory.active_score,
+                        delete_raw=bool(delete_raw),
+                        deleted_uuids=json.dumps(deleted_uuids, ensure_ascii=False),
+                        vector_data=vector_data,
+                    )
+                    return delete_history_id
 
-            # 4. 所有删除步骤成功后再写撤销历史，避免失败删除污染 undo 状态。
-            scope_key = self._build_delete_scope_key(user_id, target_memory.source_type)
-            source_type = str(target_memory.source_type or self.default_source_type or "private")
-            delete_history_id = await loop.run_in_executor(
-                self.executor,
-                lambda: self.db.save_delete_history(
-                    scope_key=scope_key,
-                    user_id=str(user_id or ""),
-                    group_id=str(user_id or "") if source_type.startswith("group") else "",
-                    source_type=source_type,
-                    index_id=index_id,
-                    summary=summary,
-                    ref_uuids=target_memory.ref_uuids,
-                    prev_index_id=target_memory.prev_index_id,
-                    created_at=target_memory.created_at,
-                    active_score=target_memory.active_score,
-                    delete_raw=bool(delete_raw),
-                    deleted_uuids=json.dumps(deleted_uuids, ensure_ascii=False),
-                    vector_data=vector_data,
-                ),
-            )
+            delete_history_id = await loop.run_in_executor(self.executor, _sqlite_delete_transaction)
             delete_record["_history_id"] = delete_history_id
 
-            # 热缓存保留最近若干条，便于同进程快速撤销
+            # 2. 事务成功后删除 ChromaDB 向量（失败不回滚 SQLite）
+            try:
+                await loop.run_in_executor(self.executor, lambda: self.collection.delete(ids=[index_id]))
+            except Exception as e:
+                logger.warning(f"Engram：ChromaDB 向量删除失败（SQLite 已删除）：{e}")
+                # 未来可加入补偿队列
+
+            # 3. 更新热缓存
+            # 3. 更新热缓存
             if user_id not in self._delete_history:
                 self._delete_history[user_id] = []
             self._delete_history[user_id].insert(0, delete_record)
